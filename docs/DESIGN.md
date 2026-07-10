@@ -70,12 +70,23 @@ location is the only stateless way to know what to fetch.)
 2. **Extract identity** from the forge-set payload: `org`/`repo` from
    `repo.full_name`, `event` and `branch` from the pipeline.
 3. **Derive conventional policy names**, e.g. `ci/<org>/<repo>/<event>` and
-   `ci/<org>/<repo>/<event>/<branch>` (encoding: §5). Request all of them
-   unconditionally — attaching a nonexistent policy grants nothing, so which
-   tiers exist is decided entirely by which policies the admin created.
+   `ci/<org>/<repo>/<event>/<branch>` (encoding: §5; always lowercase —
+   Vault normalizes policy names to lowercase anyway). Request all of them
+   unconditionally and **always explicitly** — attaching a nonexistent
+   policy mints fine with a warning and grants nothing (source-confirmed,
+   research §7.1), so which tiers exist is decided entirely by which
+   policies the admin created. (An *empty* policy request falls back to the
+   role's literal `allowed_policies` list — never send one.)
 4. **Mint** a child token against a single token-role (working name `ci`)
-   whose `allowed_policies_glob` backstops the grantable set; TTL from the
-   role's `token_ttl`.
+   with `token_type=service` **forced on the role** — service, not batch,
+   is a hard requirement: batch-token leases parent to the batch's parent,
+   which would bind pipeline STS leases to ironbark's own AppRole token.
+   The role's `allowed_policies_glob` bounds the grantable set — and note
+   it is availability-critical, not just a backstop: a requested policy
+   outside the glob ERRORS the whole mint rather than being filtered
+   (research §7.6). TTL from the role's `token_ttl`. Expect and swallow the
+   per-mint "Policy %q does not exist" warnings (surface them in the audit
+   line, not as errors).
 5. **Sweep** the conventional KV v2 subtree `kv/ci/<org>/<repo>/…` with the
    minted token (§5), tolerating partial denials — the 403s *are* the tiering
    mechanism.
@@ -134,8 +145,12 @@ the design accepts that trade openly (DEC-0001).
 | Malicious `.woodpecker.yaml` (PR branch) | Cannot forge `branch`/`event` (forge-set); PR-tier policies gate what the sweep can see; deploy tier requires `event=push, branch=main`, which a PR pipeline structurally is not. The yaml has no channel to request anything from ironbark at all. |
 | Someone with KV-subtree write access plants a `$ref` at a privileged path | Deref happens under the pipeline's own token → 403, skipped. Pointers are convenience, not authority. |
 | ironbark's AppRole `secret_id` leaked | Equivalent to ironbark compromise; same bounds. ESO-managed, rotatable. |
+| Compromised ironbark attempts `root` escalation | Impossible: the root-policy guard survives token roles — a `root`-bearing token cannot be minted unless the *parent* token holds root, which ironbark's AppRole never does (source-verified, research §7.6). |
 | Spoofed request to ironbark | Refused at signature verification (§6). |
-| Repo renamed / deleted-and-recreated under the same name | Convention keys on `full_name`, so a new repo inherits the old name's subtree. Mitigation proposed: `.identity` binding (§5, open). |
+| Replayed request within the freshness window | Woodpecker signs a `created` timestamp but no nonce (mechanisms §8); ironbark MUST enforce a `created` window, and exact duplicates inside it are undetectable — bounded by window size, TLS, and network policy. Effect of a replay: a duplicate mint for the same identity, not an identity change. |
+| `event=manual` pipeline claims `branch=main` | Real: manual-event Branch is caller-supplied (mechanisms §6). The convention must treat `manual` (and `deploy`, which inherits Branch from the restarted pipeline) as their own trust tiers — grantable to anyone with run-pipeline access — never as branch-verified. |
+| ironbark down / DoS'd | Woodpecker is fail-open (mechanisms §5): pipelines run with DB-only secrets and a server-side warning. Steps referencing missing `from_secret` fail at compile — the actual backstop. Pipelines depending only implicitly on extension secrets half-run. Not changeable from ironbark; documented loudly for adopters. |
+| Repo renamed / deleted-and-recreated under the same name | Convention keys on `full_name`, so a new repo inherits the old name's subtree. Mitigation proposed: `.identity` binding against `repo.forge_remote_id`, which is confirmed present in the payload (mechanisms §7). |
 
 ### Honest limits
 
@@ -222,7 +237,34 @@ attacker-chosen strings containing `-` and `/`; naive concatenation lets
 `(repo=a, branch=b-x)` collide with `(repo=a-b, branch=x)` constructions.
 Fixed field order plus a reversible escape (percent-encoding the branch into
 a single path segment is the working candidate) — and the DEC-0004 IaC module
-generates all names, so humans never hand-write them.
+generates all names, so humans never hand-write them. `/` itself is legal in
+policy names (route regex `.+`, both products) but `/`-named policies do not
+appear in a flat `LIST sys/policies/acl` — a doctor concern, not a blocker.
+
+**Everything is lowercase.** Vault lowercases policy names on every
+read/write, and Woodpecker's `from_secret` matching lowercases both sides
+while its store-merge dedup is case-sensitive (mechanisms §9) — so ironbark
+derives lowercase policy names and emits lowercase secret names, always.
+Consequence: two forge repos differing only in case collide onto one policy
+set; the IaC module and doctor must flag case-colliding repo names.
+
+**Event-tier facts the convention must encode** (from mechanisms §6):
+- `pull_request` Branch is the TARGET branch — every PR against main carries
+  `branch=main`. Tiering gates on event first; branch only meaningfully
+  narrows `push` (and `release`/`cron`).
+- `tag` events carry no branch at all — tag secrets scope at event level.
+- `manual` Branch is caller-supplied and `deploy` inherits it from the
+  restarted pipeline — both are their own trust tiers ("anyone with
+  run-pipeline access"), never branch-verified.
+
+**Conventional policies are additive-only** — no `deny` stanzas. ACL
+precedence is most-specific-wins regardless of allow/deny (research §7.3),
+which is subtle enough that the convention simply refuses to depend on it.
+
+**The role glob must cover the convention's whole output space.** A
+requested policy outside `allowed_policies_glob` errors the mint outright
+(research §7.6) — the glob (e.g. `ci/*`) is load-bearing for availability.
+Doctor check: convention templates ⊆ role glob.
 
 **Proposed, not yet decided:**
 
@@ -354,45 +396,78 @@ OpenBao (plugin APIs drifting apart post-fork); managed Vault offerings
 disallow custom plugins; sharply narrows adoption of a published tool.
 **Revisit trigger:** the convention encoding proves too brittle in practice.
 
+**JWT-issuer alternative — evaluated 2026-07-11, not adopted** (research
+§3/§7.7/§8). ironbark as an OIDC/JWT issuer consumed by Vault's `jwt` auth
+method (GitLab/SPIFFE-style `bound_claims`) is mature and well-precedented,
+but: it makes ironbark a stateful key-holder (JWKS, rotation); per-repo
+scoping still needs per-repo roles or templated policies; and the templating
+shortcut is undermined by a real divergence — Vault allows `/` in templated
+substitutions by default (a metadata value like `org/repo` injects path
+segments), OpenBao blocks it by default (the rule is silently dropped) —
+plus a history of alias-metadata authorization CVEs. With the token-role
+linchpin source-confirmed, the alternative loses on both security and
+simplicity. **Revisit triggers:** Woodpecker ships native id-tokens
+(discussion #2285, dormant since 2022 — "There is no eta"), or token-role
+minting fails operationally.
+
+**Response wrapping** (unverified lead from bedag/vault-secret-broker):
+delivering the minted token cubbyhole-wrapped so only the pipeline can
+unwrap it once. Possible M2+ hardening; interacts poorly with the sweep
+(ironbark itself must use the token first). Not evaluated.
+
+**Forgejo v16.0 (due mid-July 2026)** ships scoped short-lived JWT tokens at
+the forge level. Does not give Woodpecker pipelines an identity, but worth
+tracking for the estate.
+
 ## 13. Open questions
 
-Verification items (source reads against Woodpecker, per the standard set in
-`woodpecker-secret-mechanisms.md`):
+RESOLVED by the 2026-07-11 research pass (facts in
+`woodpecker-secret-mechanisms.md` §5–§12 and
+`research/2026-07-11-pre-implementation-research.md`):
 
-- **Fail posture** — when the extension returns non-2xx, does Woodpecker
-  fail the pipeline or proceed with DB secrets only? Load-bearing: decides
-  whether an ironbark outage/DoS fails closed. Could force a design change.
-- **`pipeline.Branch` semantics per event type** — source vs target branch
-  on `pull_request`; what `tag`, `deployment`, `cron`, `manual` carry. The
-  convention's branch tier depends on this.
-- **Payload fields** — confirm `repo.forge_remote_id` is present in the
-  extension payload (needed for the `.identity` binding).
-- **Replay/freshness** — does Woodpecker's RFC-9421 signature include the
-  `created` parameter (httpsign default?); pick a freshness window
-  accordingly.
+- ~~Fail posture~~ → **fail-open**, no fail-closed flag exists; documented
+  property + threat-table row (§3).
+- ~~`pipeline.Branch` semantics~~ → per-event table; PR = target branch,
+  tag = empty, manual = caller-supplied, deploy = inherited. Folded into §5.
+- ~~`forge_remote_id` in payload~~ → yes; `.identity` binding viable.
+- ~~Replay/freshness~~ → `created` is signed (httpsign default), no nonce.
+  ironbark enforces a `created` window; replays inside it are undetectable
+  (threat row, §3). Window size itself is an M1 knob (library verify
+  default is −2s/+10s; extension calls are server-to-server so a tight
+  window is viable).
+- ~~`num_uses`~~ → not used: every API request decrements (sweep and deref
+  reads included), and use-caps are illegal on batch and hostile to the
+  returned token. TTL is the bound.
+- ~~Policy-name charset~~ → `/` legal, lowercased, no length cap; folded
+  into §5.
+- ~~Extension call cadence~~ → once per create/approve/restart, covers all
+  workflows in the pipeline; no caching.
+- ~~OpenBao parity (mostly)~~ → no divergence on: token/lease mechanics,
+  nonexistent-policy behavior, allowed_policies_glob logic, wildcard
+  matching. Real divergences found and accounted for: `default-ceiling`
+  and `control-group` are Vault-only (cosmetic for us); Vault-only List-op
+  precedence CVE fix (our sweep LISTs — test both products); policy
+  templating slash defaults differ (moot — templating not adopted, §12).
 
-Design/parity items:
+Still open:
 
-- **OpenBao parity check** for every feature leaned on: token-role
-  `allowed_policies_glob`, KV v2 `custom_metadata`, `+` policy-path
-  wildcards, policy-name charset (also determines whether `/` in policy
-  names is legal, else fall back to a flat escaped encoding).
+- **OpenBao KV v2 `custom_metadata` parity** — last unconfirmed parity
+  item; M1 integration tests exercise it directly.
 - **Role strategy** — single glob role `ci` (M1 working choice) vs per-repo
-  roles stamped by the IaC module (stronger per-repo backstop). Revisit at
-  M2.
-- **`num_uses`** — a use-capped token conflicts with ironbark's own sweep
-  reads and with returning the token; likely uncapped + short TTL. Confirm.
-- **Name normalization** — Woodpecker secret-name charset/case rules; KV
-  key → secret-name mapping; collision with DB secrets (extension wins —
-  document as intentional). Expected to evolve during M1 build; lock before
-  v1 (accepted 2026-07-11).
-
-Operational items:
-
-- **TTL guidance** — documentation must state the queue+runtime budgeting
-  rule and the lease-parenting consequence (no revoke when derefs occur).
-- **Per-mint audit line** — emit `(repo, branch, event, policies, TTL)` per
-  mint in addition to Vault's audit; format TBD.
+  roles stamped by the IaC module (narrower per-repo glob = tighter
+  availability *and* security backstop). Revisit at M2.
+- **TTL merge semantics** (role-vs-request) — verifier refuted a claimed
+  Vault/OpenBao divergence; treat role values as caps and pin exact
+  behavior via M1 integration tests against both products.
+- **Freshness window size** — pick during M1 (see above).
+- **Name normalization details** — injective branch escape, KV key →
+  secret-name mapping. Expected to evolve during M1 build; lock before v1
+  (accepted 2026-07-11). Both must produce lowercase output (§5).
+- **TTL guidance docs** — queue+runtime budgeting; no-revoke-when-derefs;
+  mint happens at create/approve/restart so gated pipelines mint at
+  approval (favourable).
+- **Per-mint audit line** — emit `(repo, branch, event, policies, TTL)` +
+  any mint warnings; format TBD.
 - **Rate limiting** — whether to bound mint rate per repo/instance.
 - **Health/readiness/metrics** — endpoints and what readiness means (Vault
   reachable? role present?).

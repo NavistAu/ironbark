@@ -149,6 +149,7 @@ the design accepts that trade openly (DEC-0001).
 | Spoofed request to ironbark | Refused at signature verification (§6). |
 | Replayed request within the freshness window | Woodpecker signs a `created` timestamp but no nonce (mechanisms §8); ironbark MUST enforce a `created` window, and exact duplicates inside it are undetectable — bounded by window size, TLS, and network policy. Effect of a replay: a duplicate mint for the same identity, not an identity change. |
 | `event=manual` pipeline claims `branch=main` | Real: manual-event Branch is caller-supplied (mechanisms §6). The convention must treat `manual` (and `deploy`, which inherits Branch from the restarted pipeline) as their own trust tiers — grantable to anyone with run-pipeline access — never as branch-verified. |
+| Attacker pushes a branch literally named `Main` (or other case variant of a protected branch) | Would reach the protected branch's tier if branch names were case-folded. Prevented: the convention never case-folds branches; case is preserved injectively through the escape encoding (SPEC §2.2, found in cross-AI review cycle 2). |
 | ironbark down / DoS'd | Woodpecker is fail-open (mechanisms §5): pipelines run with DB-only secrets and a server-side warning. Steps referencing missing `from_secret` fail at compile — the actual backstop. Pipelines depending only implicitly on extension secrets half-run. Not changeable from ironbark; documented loudly for adopters. |
 | Repo renamed / deleted-and-recreated under the same name | Convention keys on `full_name`, so a new repo inherits the old name's subtree. Mitigation proposed: `.identity` binding against `repo.forge_remote_id`, which is confirmed present in the payload (mechanisms §7). |
 
@@ -241,12 +242,17 @@ generates all names, so humans never hand-write them. `/` itself is legal in
 policy names (route regex `.+`, both products) but `/`-named policies do not
 appear in a flat `LIST sys/policies/acl` — a doctor concern, not a blocker.
 
-**Everything is lowercase.** Vault lowercases policy names on every
-read/write, and Woodpecker's `from_secret` matching lowercases both sides
-while its store-merge dedup is case-sensitive (mechanisms §9) — so ironbark
-derives lowercase policy names and emits lowercase secret names, always.
-Consequence: two forge repos differing only in case collide onto one policy
-set; the IaC module and doctor must flag case-colliding repo names.
+**Lowercase everywhere — except the branch, which is case-PRESERVED.**
+Vault lowercases policy names on every read/write, and Woodpecker's
+`from_secret` matching lowercases both sides while its store-merge dedup is
+case-sensitive (mechanisms §9) — so ironbark derives lowercase policy names
+and emits lowercase secret names. Org/repo/event are case-folded (forges
+enforce case-insensitive owner/repo uniqueness; the IaC module and doctor
+flag collisions). The branch is NOT case-folded: git refs are
+case-sensitive and branch protection binds to the exact name, so folding
+would collapse an attacker's branch `Main` onto protected `main`'s tier.
+Instead the escape encoding percent-encodes uppercase bytes (`Main` →
+`%4dain`) — output stays lowercase, distinctness survives (SPEC §2.2).
 
 **Event-tier facts the convention must encode** (from mechanisms §6):
 - `pull_request` Branch is the TARGET branch — every PR against main carries

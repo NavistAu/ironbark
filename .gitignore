@@ -1,0 +1,23 @@
+# Go build output
+/ironbark
+/dist/
+*.exe
+*.test
+*.out
+
+# Go workspace / deps
+/vendor/
+go.work
+go.work.sum
+
+# local env / secrets — never commit
+*.env
+.env
+*.hcl.local
+policy.local.*
+
+# editor / OS
+.DS_Store
+*.swp
+/.idea/
+/.vscode/

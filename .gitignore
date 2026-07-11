@@ -21,3 +21,8 @@ policy.local.*
 *.swp
 /.idea/
 /.vscode/
+
+# implementation worktrees
+/.worktrees/
+/bin/
+/dist/

@@ -1,8 +1,9 @@
 # ironbark M1 — implementation specification
 
-Status: REVIEW-CONVERGED (4-cycle adversarial cross-AI review, codex +
-gemini, zero remaining HIGH concerns — [`reviews/SPEC-REVIEWS.md`](reviews/SPEC-REVIEWS.md)).
-Pending: owner acceptance, which triggers the §12 decision-log entries.
+Status: ACCEPTED 2026-07-11, after a 4-cycle adversarial cross-AI review
+(codex + gemini, zero remaining HIGH concerns —
+[`reviews/SPEC-REVIEWS.md`](reviews/SPEC-REVIEWS.md)). The §12 decisions
+are logged as [DEC-0006…DEC-0010](decisionlog/).
 Sources of truth: [`DESIGN.md`](DESIGN.md) (architecture + threat model),
 [`decisionlog/`](decisionlog/) (DEC-0001…0005),
 [`woodpecker-secret-mechanisms.md`](woodpecker-secret-mechanisms.md)

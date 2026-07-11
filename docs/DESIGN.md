@@ -272,7 +272,7 @@ requested policy outside `allowed_policies_glob` errors the mint outright
 (research §7.6) — the glob (e.g. `ci/*`) is load-bearing for availability.
 Doctor check: convention templates ⊆ role glob.
 
-**Proposed, not yet decided:**
+**Accepted 2026-07-11 (DEC-0006; specified in SPEC.md §4.4–§4.6):**
 
 - **Per-secret pins via KV v2 `custom_metadata`** — e.g.
   `images: forge.example.com/infra/iac-toolbox` on an entry becomes the returned
@@ -384,6 +384,11 @@ Current decisions live in [`docs/decisionlog/`](decisionlog/) (MADR):
 | DEC-0003 | `$ref` pointer entries dereference dynamic engines into the masked path |
 | DEC-0004 | Control surface = IaC module + `ironbark doctor`; no GUI |
 | DEC-0005 | Custom Vault auth-method plugin: research note only, with revisit trigger |
+| DEC-0006 | Convention directives graduated: `.identity`, `.config`, custom_metadata pins |
+| DEC-0007 | Minted-token lifecycle: orphan non-renewable service tokens, canary-gated |
+| DEC-0008 | Identity encoding: branch case preserved injectively; event-tier mapping |
+| DEC-0009 | Sweep/response semantics: independent tiers, specific-wins, string-only |
+| DEC-0010 | M1 runtime surface: 10s freshness, env-only config, dual audit shapes |
 
 Earlier decisions still standing from the 2026-07-10 revision: Go
 implementation (fork `woodpecker-ci/example-extensions` for the transport
@@ -480,5 +485,5 @@ Still open:
 - **Publishing home** — mirror from the private forge to a public one;
   which.
 
-Proposed-pending-acceptance (see §5): `custom_metadata` pins, `.identity`
-binding, `.config` directives.
+(The former §5 proposals — `custom_metadata` pins, `.identity` binding,
+`.config` directives — were accepted 2026-07-11 as DEC-0006.)

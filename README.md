@@ -33,8 +33,14 @@ token, transiently, storing nothing.
 
 ## Status
 
-Design phase. See [`docs/DESIGN.md`](docs/DESIGN.md) and the decision log in
-[`docs/decisionlog/`](docs/decisionlog/). Nothing is built yet.
+M1 (the broker) is implemented: a Go service (`cmd/ironbark` +
+`internal/{wpsign,identity,policy,broker,vaultx,httpapi}`), unit-tested and
+integration-tested against both Vault 1.20 and OpenBao 2.5.5. See
+[`docs/SPEC.md`](docs/SPEC.md) for the normative interface/behavior spec,
+[`docs/DESIGN.md`](docs/DESIGN.md) for architecture and threat model, and
+the decision log in [`docs/decisionlog/`](docs/decisionlog/). Still future:
+the M2 Terraform module and `ironbark doctor` — onboarding a repo today
+means hand-writing the Vault-side IaC described below.
 
 ## Why not just…
 
@@ -49,6 +55,211 @@ Design phase. See [`docs/DESIGN.md`](docs/DESIGN.md) and the decision log in
 - **…Forgejo Actions (which has OIDC)?** Its Kubernetes runner still needs a
   privileged Docker-in-Docker sidecar; Woodpecker's k8s backend runs each step as
   an unprivileged pod. See the design doc's context section.
+
+## Deploying: pointing Woodpecker at ironbark
+
+Woodpecker's secret-extension flags (server-side, `cmd/server/flags.go`):
+
+```
+WOODPECKER_SECRET_EXTENSION_ENDPOINT=https://ironbark.internal/
+WOODPECKER_SECRET_EXTENSION_NETRC=false
+WOODPECKER_EXTENSIONS_ALLOWED_HOSTS=<see gotcha below>
+```
+
+Point `WOODPECKER_SECRET_EXTENSION_ENDPOINT` at ironbark's `/` route (the
+only route Woodpecker calls; `/healthz`, `/readyz`, `/metrics` are for you).
+The extension is *additive* to Woodpecker's own DB secrets — adoption can be
+incremental, repo by repo, driven entirely by which Vault policies/KV paths
+exist for a given repo.
+
+**Gotcha — `WOODPECKER_EXTENSIONS_ALLOWED_HOSTS` (the #1 deployment
+footgun):** it defaults to `MatchBuiltinExternal`, which *blocks*
+private/in-cluster addresses. An ironbark running in-cluster
+(`*.svc.cluster.local`) is rejected outright unless you widen this flag to
+permit ironbark's address. If the extension call is silently going nowhere,
+check this first.
+
+**Fail-open, loudly:** if ironbark is down, unreachable, or errors, Woodpecker
+does **not** fail the pipeline. It logs a server-side warning and proceeds
+with DB-only secrets — there is no fail-closed flag. A step referencing a
+missing `from_secret` will then fail at compile (the real backstop), but a
+pipeline that depends on ironbark only *implicitly* (e.g. reading
+`vault_token` from the environment with no `from_secret` reference) can
+half-run silently, using none of the secrets it expected. Do not assume
+"the pipeline ran" means "ironbark answered."
+
+**Leave `WOODPECKER_SECRET_EXTENSION_NETRC` off.** When enabled, Woodpecker
+sends the repo *owner's* forge OAuth access token to the extension endpoint
+on every pipeline call. ironbark never reads or logs the `netrc` field
+regardless — there's simply no reason to send it.
+
+## Vault/OpenBao operator contract
+
+Setting up a repo (or the instance) requires Vault/OpenBao-side IaC — there
+is no broker-side config for this. Three pieces: the token role ironbark
+mints against, per-repo tier policies, and the AppRole ironbark itself logs
+in with.
+
+### Token role
+
+Create the role ironbark mints pipeline tokens from (default name `ci`,
+`IRONBARK_TOKEN_ROLE`):
+
+```hcl
+allowed_policies_glob   = ["ci/*"]
+token_type              = "service"
+token_explicit_max_ttl  = "15m"
+orphan                  = true
+renewable               = false
+token_no_default_policy = false
+```
+
+```
+vault write auth/token/roles/ci \
+  allowed_policies_glob="ci/*" \
+  token_type=service \
+  token_explicit_max_ttl=15m \
+  orphan=true \
+  renewable=false \
+  token_no_default_policy=false
+```
+
+(Works identically against OpenBao as `bao write auth/token/roles/ci ...`.)
+
+**Use `token_explicit_max_ttl`, not `token_ttl`.** This is integration-verified
+(Vault 1.20 + OpenBao 2.5.5): the token-store role endpoint silently *drops*
+a `token_ttl` field — no error, no warning — and a token minted with no
+request TTL then inherits the token auth mount's `default_lease_ttl`, which
+defaults to **32 days**. Setting `token_ttl` on the role is therefore a
+no-op that quietly defeats the "dies in minutes" threat model. The field
+that actually bounds a role-minted token's lifetime on both products is
+`token_explicit_max_ttl`. Set it deliberately to however long a pipeline run
+should be able to hold credentials — see TTL budgeting below.
+
+`orphan=true` keeps pipeline tokens alive across ironbark's own AppRole
+rotation/re-login. `renewable=false` makes the TTL an absolute lifetime —
+Vault's `default` policy grants renew-self, so a renewable token could
+outlive the "dies in minutes" intent. `token_no_default_policy=false` keeps
+`default` attached, which is load-bearing: ironbark revokes every non-`200`
+outcome via `auth/token/revoke-self`, authenticated *as* the minted token,
+which requires `default`'s revoke-self grant.
+
+### Tier policies (example: `acme/widgets`)
+
+Policy names follow `ci/<org>/<repo>/<event>[/<branch>]`. A plan tier
+(read-only, e.g. for `pull_request`):
+
+```hcl
+# ci/acme/widgets/pull_request
+path "kv/data/ci/acme/widgets/*" {
+  capabilities = ["read"]
+}
+path "kv/metadata/ci/acme/widgets/*" {
+  capabilities = ["list"]
+}
+```
+
+A deploy tier (e.g. for `push` on `main`):
+
+```hcl
+# ci/acme/widgets/push/main
+path "kv/data/ci/acme/widgets/push/main/*" {
+  capabilities = ["read"]
+}
+path "kv/metadata/ci/acme/widgets/push/main/*" {
+  capabilities = ["list"]
+}
+```
+
+**Use exact paths under the tier, not a single trailing `*` at the repo
+root shared across tiers.** In Vault's ACL glob, `*` crosses `/`
+(integration-verified) — a policy path like `kv/data/ci/acme/widgets/*`
+attached only to the *branch*-tier policy would also match the *event*-tier
+and base-tier paths, leaking secrets meant for a broader (less trusted)
+scope into a narrower one. Scope each policy's paths to its own tier prefix.
+
+### ironbark's own AppRole
+
+ironbark's Vault identity must be able to mint tokens against the role
+above and nothing else — no KV read, no policy read:
+
+```hcl
+# attached to ironbark's AppRole
+path "auth/token/create/ci" {
+  capabilities = ["create", "update"]
+}
+```
+
+### KV convention (brief — see [`docs/SPEC.md` §4](docs/SPEC.md) for detail)
+
+```
+kv/ci/<org>/<repo>/<key>                       # repo-wide, all events
+kv/ci/<org>/<repo>/<event>/<key>                # event tier
+kv/ci/<org>/<repo>/<event>/<branch>/<key>       # branch tier (branchful events only)
+kv/ci/<org>/<repo>/.identity                    # optional: forge_remote_id binding
+kv/ci/<org>/<repo>/.config                      # optional: repo directives (e.g. suppress vault_token)
+```
+
+Entries can be plain values, or `{"$ref": "<path>"}` pointers dereferenced
+into dynamic engines at request time. KV v2 `custom_metadata` on an entry can
+pin `ironbark_images` / `ironbark_events` to narrow which step images or
+events the returned secret is valid for.
+
+## `$ref` dereference limitation
+
+`$ref` pointer entries are resolved with a bodiless `GET` against the
+target path, using the pipeline's minted token. This means `$ref` targets
+must be **GET-readable** dynamic-secret endpoints — `aws/creds/<role>`,
+`database/creds/<role>`, `gcp/.../key`, `azure/creds/<role>`, or another KV
+path. It does **not** work for engines that require a request body on a
+write, notably `pki/issue/<role>`: that endpoint is POST-only and returns
+405 on a bare GET (integration-verified on both products). Don't point
+`$ref` at PKI issuance — there is no supported path to it in M1.
+
+## TTL budgeting
+
+`token_explicit_max_ttl` is the entire lifetime of a pipeline's credentials,
+so it must be sized to cover **queue time + run time**, not just run time.
+The token is minted once, at pipeline *compile* time — which is pipeline
+creation, approval, or restart, not job start. A pipeline that sits queued
+behind other work arrives at its first step with less TTL already spent.
+Gated pipelines are the favourable case: they mint at *approval*, so
+queue-delay TTL erosion only starts counting from the human approval click,
+not from submission.
+
+Dynamic-credential leases obtained via `$ref` (e.g. AWS STS creds) are
+parented to the minted token and die when it does — so the token TTL must
+outlive the whole pipeline run, including every workflow that shares it (one
+mint covers all workflows of a pipeline). ironbark never revokes a token
+after a `200` response; expiry is the only cleanup for a successful run, so
+undersizing the TTL means credentials disappearing mid-run rather than being
+proactively reclaimed.
+
+## Configuration reference
+
+A `_FILE` suffix variant of any var reads the value from a file path
+instead (for External Secrets Operator / Kubernetes secret mounts). Setting
+both a var and its `_FILE` variant is a configuration error.
+
+| Var | Default | Required | Notes |
+|---|---|---|---|
+| `IRONBARK_LISTEN_ADDR` | `:8080` | no | |
+| `IRONBARK_WOODPECKER_PUBLIC_KEY` / `_FILE` | — | **yes** | PEM ed25519, from `curl <woodpecker>/api/signature/public-key` |
+| `IRONBARK_VAULT_ADDR` | — | **yes** | Vault/OpenBao URL |
+| `IRONBARK_VAULT_ROLE_ID` / `_FILE` | — | **yes** | ironbark's AppRole |
+| `IRONBARK_VAULT_SECRET_ID` / `_FILE` | — | **yes** | ironbark's AppRole |
+| `IRONBARK_TOKEN_ROLE` | `ci` | no | token role name (§ above) |
+| `IRONBARK_KV_MOUNT` | `kv` | no | KV v2 mount |
+| `IRONBARK_KV_PREFIX` | `ci` | no | |
+| `IRONBARK_POLICY_PREFIX` | `ci` | no | |
+| `IRONBARK_FRESHNESS_WINDOW` | `10s` | no | signature `created` freshness window |
+| `IRONBARK_ADVERTISE_VAULT_ADDR` | unset | no | when set, echoed back as a `vault_addr` convenience secret |
+| `IRONBARK_LOG_LEVEL` | `info` | no | |
+
+No config file, no rule tables, no path maps — onboarding a repo is Vault
+IaC (policies + KV entries), not broker configuration. TLS termination is
+the deployment's concern (service mesh / ingress); ironbark serves plain
+HTTP.
 
 ## License
 

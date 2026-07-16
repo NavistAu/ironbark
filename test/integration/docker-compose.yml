@@ -1,0 +1,104 @@
+# Task 13 integration fixtures: dockerized dual-product test bed for
+# ironbark's SPEC §9.3 suite (Task 14). Brings up Vault, OpenBao, and a
+# small Postgres instance (used as the backing store for a real
+# lease-producing $ref target — see the note below on why PKI, the
+# originally-proposed engine, does not work for this).
+#
+# Confirmed image refs (pulled + verified locally, do not substitute):
+#   - hashicorp/vault:1.20            (docker.io)
+#   - ghcr.io/openbao/openbao:2.5.5   (ghcr.io, NOT docker.io/openbao/openbao)
+#   - postgres:16-alpine              (docker.io — see database-secrets-engine
+#     note below)
+#
+# Confirmed dev-mode invocation (both images' default CMD already runs the
+# dev server; only the root-token env var needs setting — verified by
+# `docker inspect` + `docker run` against both images, not guessed):
+#   - hashicorp/vault:1.20's default CMD is ["server","-dev"]; its
+#     docker-entrypoint.sh appends
+#     -dev-root-token-id="$VAULT_DEV_ROOT_TOKEN_ID" and
+#     -dev-listen-address="${VAULT_DEV_LISTEN_ADDRESS:-0.0.0.0:8200}"
+#     unconditionally. So VAULT_DEV_ROOT_TOKEN_ID=root is sufficient; no
+#     command override needed.
+#   - ghcr.io/openbao/openbao:2.5.5's default CMD is
+#     ["server","-dev","-dev-no-store-token"]; its docker-entrypoint.sh
+#     (same shape script, OpenBao-branded) appends
+#     -dev-root-token-id="$BAO_DEV_ROOT_TOKEN_ID" (NOT VAULT_DEV_ROOT_TOKEN_ID
+#     — OpenBao's entrypoint reads its own BAO_* env vars) and
+#     -dev-listen-address="${BAO_DEV_LISTEN_ADDRESS:-0.0.0.0:8200}". So
+#     BAO_DEV_ROOT_TOKEN_ID=root is what actually works.
+#   Both were confirmed live: `docker run` each with only the root-token
+#   env set, then `curl .../v1/sys/health` and an authenticated
+#   `sys/mounts` call against both, before this compose file was written.
+#
+# Healthchecks use each product's own `<binary> status` CLI command
+# (`vault status` / `bao status`), which exits 0 once the dev server is up
+# and unsealed (dev mode is always auto-unsealed) — confirmed via
+# `docker exec` against both images. Each needs its own *_ADDR env var set
+# (VAULT_ADDR / BAO_ADDR) since the CLI defaults to https://127.0.0.1:8200
+# otherwise, which the dev listener (http, not https) doesn't answer.
+services:
+  vault:
+    image: hashicorp/vault:1.20
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_ADDR: http://127.0.0.1:8200
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  openbao:
+    image: ghcr.io/openbao/openbao:2.5.5
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: root
+      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      BAO_ADDR: http://127.0.0.1:8200
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "8300:8200"
+    healthcheck:
+      test: ["CMD", "bao", "status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # Backing store for the database secrets engine (fixture.go mounts
+  # `database/` on BOTH vault and openbao pointing at this one instance).
+  #
+  # Why Postgres and not PKI: the plan that scoped this task named PKI as
+  # "a cheap lease-producing engine" for the $ref deref+lease test case.
+  # Empirically (docker run + curl against the real image, not assumed)
+  # `GET pki/issue/<role>` returns 405 "unsupported operation" on both
+  # products — PKI's issue endpoint is POST/write-only (it requires
+  # request-body params like common_name that a bodiless GET cannot
+  # carry). ironbark's actual sweepDeref (internal/vaultx/sweep.go) always
+  # issues a plain GET with no body — SPEC §4.3 says exactly that: "GET
+  # <path> (any mount)". So PKI cannot serve as the $ref deref target
+  # under the implementation as it stands; a mismatch between the task
+  # plan and product behavior, not a guess. `database/creds/<role>` IS a
+  # GET-based, lease-producing read (Vault's own textbook example for
+  # this exact scenario, and the closest built-in match to DEC-0003's
+  # motivating "aws/creds/..." example, which is also GET-based) —
+  # confirmed live: GET returns 200 with a real lease_id, and
+  # sys/leases/revoke against that lease_id returns 204. PKI is still
+  # mounted + configured below (fixture.go) per the literal ask, and
+  # remains available for any direct-client PKI assertions Task 14 wants,
+  # but it is NOT the $ref target.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vaultadmin
+      POSTGRES_PASSWORD: vaultpw
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaultadmin -d postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

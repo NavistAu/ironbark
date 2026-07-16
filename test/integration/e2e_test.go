@@ -221,7 +221,7 @@ func TestE2E(t *testing.T) {
 	for _, p := range products {
 		p := p
 		t.Run(p.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 			fx := SetupProduct(t, p.addr, p.rootToken)
 			stack := newE2EStack(t, ctx, p.addr, fx, pub)
 

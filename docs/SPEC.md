@@ -553,7 +553,7 @@ to read KV directly → values match. Run in CI for both products.
 - Packages:
   - `cmd/ironbark` — main, config loading, wiring.
   - `internal/wpsign` — §5. `Verify(r *http.Request, key ed25519.PublicKey, window time.Duration) (err error)` + failure-reason typed errors.
-  - `internal/identity` — §2.1–2.2. `Extract(payload) (Identity, error)`, `Esc(string) string`.
+  - `internal/identity` — §2.1–2.2. `Parse(body []byte) (Identity, error)`, `Esc(string) string`. (`Identity` also carries `Commit`/`PipelineNumber` for the §3.2 mint metadata and §8.1 audit line.)
   - `internal/policy` — §2.3. `Derive(Identity, Prefix) []string`.
   - `internal/broker` — orchestrates §1.2 steps 5–10; owns interfaces:
     `Minter`, `Sweeper`, `Dereferencer` (implemented in `internal/vaultx`).

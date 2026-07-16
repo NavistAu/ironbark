@@ -40,6 +40,15 @@ type Vault interface {
 
 var _ Vault = (*vaultx.Client)(nil)
 
+// revokeCleanupTimeout bounds the best-effort revoke issued from Handle's
+// deferred cleanup (see below). It is deliberately NOT derived from the
+// request context: a request that reaches this defer via httpapi's 30s
+// timeout has an already-cancelled ctx, and cleanup/compensation work must
+// be decoupled from the operation whose failure triggered it — otherwise
+// the exact case where revocation matters most (Vault too slow to respond
+// in time) can never revoke, silently falling back to TTL expiry instead.
+const revokeCleanupTimeout = 5 * time.Second
+
 // Secret is one entry of the SPEC §6 response body.
 type Secret struct {
 	Name   string
@@ -213,9 +222,17 @@ func (b *Broker) Handle(ctx context.Context, id identity.Identity) (result Resul
 	// failures never change the status (best-effort — TTL is the
 	// backstop) and are surfaced via result.RevokeFailed for httpapi to
 	// log, since the broker itself never logs.
+	//
+	// The revoke uses a fresh, detached context (not the request ctx):
+	// httpapi cancels ctx once its own deadline fires, and a post-mint
+	// timeout is exactly the case where this defer needs to run — reusing
+	// the already-cancelled ctx would make RevokeSelf fail immediately on
+	// that path, which is precisely when clean revocation matters most.
 	defer func() {
 		if result.Status != 200 {
-			if err := b.vault.RevokeSelf(ctx, mint.Token); err != nil {
+			revokeCtx, cancel := context.WithTimeout(context.Background(), revokeCleanupTimeout)
+			defer cancel()
+			if err := b.vault.RevokeSelf(revokeCtx, mint.Token); err != nil {
 				result.RevokeFailed = true
 			}
 		}

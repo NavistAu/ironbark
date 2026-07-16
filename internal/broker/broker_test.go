@@ -44,7 +44,14 @@ type mockVault struct {
 	sweepErr       error
 
 	revokeCalls []string
-	revokeErr   error
+	revokeCtxs  []context.Context
+	// revokeCtxErrs records ctx.Err() AT THE MOMENT RevokeSelf was called
+	// (not later): the fix's own `defer cancel()` cancels its detached ctx
+	// right after the call returns (correct cleanup hygiene), so checking
+	// ctx.Err() after Handle has already returned would observe a Done
+	// ctx even on success — this must be sampled inline.
+	revokeCtxErrs []error
+	revokeErr     error
 }
 
 func (m *mockVault) CanaryOK() bool { return m.canaryOK }
@@ -61,6 +68,8 @@ func (m *mockVault) MintToken(ctx context.Context, policies []string, meta map[s
 
 func (m *mockVault) RevokeSelf(ctx context.Context, token string) error {
 	m.revokeCalls = append(m.revokeCalls, token)
+	m.revokeCtxs = append(m.revokeCtxs, ctx)
+	m.revokeCtxErrs = append(m.revokeCtxErrs, ctx.Err())
 	return m.revokeErr
 }
 
@@ -437,6 +446,54 @@ func TestHandle_SweepError_502_Revoke(t *testing.T) {
 	}
 	if len(mv.revokeCalls) != 1 || mv.revokeCalls[0] != "tok-sweep-err" {
 		t.Errorf("revokeCalls = %v, want [tok-sweep-err]", mv.revokeCalls)
+	}
+}
+
+// TestHandle_RequestCtxCancelled_RevokeStillUsesLiveCtx proves the
+// request-timeout fix: even when the ctx passed into Handle is already
+// cancelled by the time the deferred revoke runs (httpapi's 30s deadline
+// firing mid-request is the real-world trigger), RevokeSelf is still
+// called, and with a DIFFERENT, still-live context — not the cancelled
+// request ctx. Before the fix, the defer reused the request ctx directly,
+// so RevokeSelf would have observed a Done context here.
+func TestHandle_RequestCtxCancelled_RevokeStillUsesLiveCtx(t *testing.T) {
+	mv := &mockVault{
+		canaryOK:   true,
+		mintResult: serviceMint("tok-cancelled-req"),
+		sweepErr:   errors.New("vault 500"), // drives a non-200 (502) outcome
+	}
+	b := New(mv, "ci", "")
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel() // request ctx is already Done before Handle is even called
+
+	res := b.Handle(reqCtx, testIdentity())
+
+	if res.Status != 502 {
+		t.Fatalf("Status = %d, want 502", res.Status)
+	}
+	if len(mv.revokeCalls) != 1 || mv.revokeCalls[0] != "tok-cancelled-req" {
+		t.Fatalf("revokeCalls = %v, want [tok-cancelled-req] (revoke must still be attempted)", mv.revokeCalls)
+	}
+	if res.RevokeFailed {
+		t.Fatalf("RevokeFailed = true, want false (detached ctx must let the mock revoke succeed)")
+	}
+	if len(mv.revokeCtxs) != 1 {
+		t.Fatalf("revokeCtxs = %v, want exactly 1 recorded ctx", mv.revokeCtxs)
+	}
+	gotCtx := mv.revokeCtxs[0]
+	if gotCtx == reqCtx {
+		t.Errorf("RevokeSelf received the request ctx itself, want a detached ctx")
+	}
+	// Sampled AT CALL TIME (see revokeCtxErrs doc comment): the broker's own
+	// deferred cancel() fires immediately after RevokeSelf returns, so
+	// checking gotCtx.Err() now (post-Handle-return) would be Done even on
+	// success — this must reflect what RevokeSelf itself observed.
+	if err := mv.revokeCtxErrs[0]; err != nil {
+		t.Errorf("RevokeSelf's ctx.Err() at call time = %v, want nil (must be live, not inherit the cancelled request ctx)", err)
+	}
+	if reqCtx.Err() == nil {
+		t.Fatalf("test setup broken: reqCtx should be Done")
 	}
 }
 

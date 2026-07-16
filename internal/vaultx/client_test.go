@@ -2,20 +2,24 @@ package vaultx
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
 // fakeVault fakes just enough of Vault's HTTP API for the AppRole session
-// lifecycle: POST auth/approle/login and POST auth/token/renew-self. Both
-// endpoints' failure mode and the login lease duration are controllable
-// and call-counted, mutex-guarded for concurrent access from the Run
-// goroutine and the test.
+// lifecycle (POST auth/approle/login, POST auth/token/renew-self) and, as
+// of Task 8, the mint/canary lifecycle (POST auth/token/create/<role>,
+// POST auth/token/revoke-self). All endpoints' failure modes are
+// controllable and call-counted, mutex-guarded for concurrent access from
+// the Run goroutine and the test.
 type fakeVault struct {
 	mu           sync.Mutex
 	loginCalls   int
@@ -23,14 +27,52 @@ type fakeVault struct {
 	loginFail    bool
 	renewFail    bool
 	leaseSeconds int
+
+	// mint (auth/token/create/<role>) state. Defaults describe a
+	// correctly-configured token role (SPEC §3.1): service, non-renewable,
+	// orphan, with the warning Vault/OpenBao emit for a nonexistent
+	// policy (R§7.1).
+	mintCalls       int
+	mintFail        bool
+	mintStatus      int
+	mintTokenType   string
+	mintRenewable   bool
+	mintOrphan      *bool
+	mintTTLSeconds  int
+	mintWarnings    []string
+	lastPolicies    []string
+	lastMeta        map[string]string
+	lastDisplayName string
+	lastMintedToken string
+	lastMintBodyRaw []byte // the exact request body bytes, for shape assertions
+
+	// revoke-self state.
+	revokeCalls     int
+	revokeFail      bool
+	lastRevokeToken string
 }
 
 func newFakeVault() *fakeVault {
-	return &fakeVault{leaseSeconds: 60}
+	orphanTrue := true
+	return &fakeVault{
+		leaseSeconds:   60,
+		mintTokenType:  "service",
+		mintRenewable:  false,
+		mintOrphan:     &orphanTrue,
+		mintTTLSeconds: 900,
+		mintWarnings:   []string{`policy "ci/ironbark-selftest" does not exist`},
+	}
 }
 
 func (f *fakeVault) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// auth/token/create/<role> is path-suffixed by the role name, so it
+		// can't be a literal switch case below.
+		if strings.HasPrefix(r.URL.Path, "/v1/auth/token/create/") {
+			f.handleMint(w, r)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/v1/auth/approle/login":
 			f.mu.Lock()
@@ -63,10 +105,77 @@ func (f *fakeVault) handler() http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintf(w, `{"auth":{"client_token":"renewed-token","lease_duration":%d,"renewable":true}}`, lease)
 
+		case "/v1/auth/token/revoke-self":
+			f.mu.Lock()
+			f.revokeCalls++
+			fail := f.revokeFail
+			f.lastRevokeToken = r.Header.Get("X-Vault-Token")
+			f.mu.Unlock()
+
+			if fail {
+				w.WriteHeader(http.StatusForbidden)
+				fmt.Fprint(w, `{"errors":["permission denied"]}`)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}
+}
+
+// handleMint fakes POST auth/token/create/<role> (SPEC §3.2): it records
+// the request body (policies/meta/display_name) for assertion and returns
+// a response shaped by the fake's configurable mint* fields, so tests can
+// drive each SPEC §3.5 canary assertion independently.
+func (f *fakeVault) handleMint(w http.ResponseWriter, r *http.Request) {
+	raw, _ := io.ReadAll(r.Body)
+
+	var body struct {
+		Policies    []string          `json:"policies"`
+		Meta        map[string]string `json:"meta"`
+		DisplayName string            `json:"display_name"`
+	}
+	_ = json.Unmarshal(raw, &body)
+
+	f.mu.Lock()
+	f.mintCalls++
+	n := f.mintCalls
+	fail := f.mintFail
+	status := f.mintStatus
+	tokenType := f.mintTokenType
+	renewable := f.mintRenewable
+	orphan := f.mintOrphan
+	ttl := f.mintTTLSeconds
+	warnings := f.mintWarnings
+	f.lastPolicies = body.Policies
+	f.lastMeta = body.Meta
+	f.lastDisplayName = body.DisplayName
+	f.lastMintBodyRaw = raw
+	token := fmt.Sprintf("mint-token-%d", n)
+	f.lastMintedToken = token
+	f.mu.Unlock()
+
+	if fail {
+		if status == 0 {
+			status = http.StatusBadRequest
+		}
+		w.WriteHeader(status)
+		fmt.Fprint(w, `{"errors":["mint failed"]}`)
+		return
+	}
+
+	warningsJSON, _ := json.Marshal(warnings)
+	orphanField := ""
+	if orphan != nil {
+		orphanJSON, _ := json.Marshal(*orphan)
+		orphanField = fmt.Sprintf(`,"orphan":%s`, orphanJSON)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"warnings":%s,"auth":{"client_token":%q,"accessor":"mint-accessor-%d","token_type":%q,"renewable":%t,"lease_duration":%d%s}}`,
+		warningsJSON, token, n, tokenType, renewable, ttl, orphanField)
 }
 
 func (f *fakeVault) loginCallCount() int {
@@ -91,6 +200,96 @@ func (f *fakeVault) setRenewFail(v bool) {
 	f.mu.Lock()
 	f.renewFail = v
 	f.mu.Unlock()
+}
+
+func (f *fakeVault) mintCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mintCalls
+}
+
+func (f *fakeVault) revokeCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.revokeCalls
+}
+
+func (f *fakeVault) setMintFail(v bool) {
+	f.mu.Lock()
+	f.mintFail = v
+	f.mu.Unlock()
+}
+
+func (f *fakeVault) setMintTokenType(v string) {
+	f.mu.Lock()
+	f.mintTokenType = v
+	f.mu.Unlock()
+}
+
+func (f *fakeVault) setMintRenewable(v bool) {
+	f.mu.Lock()
+	f.mintRenewable = v
+	f.mu.Unlock()
+}
+
+func (f *fakeVault) setMintOrphan(v *bool) {
+	f.mu.Lock()
+	f.mintOrphan = v
+	f.mu.Unlock()
+}
+
+func (f *fakeVault) setMintTTLSeconds(v int) {
+	f.mu.Lock()
+	f.mintTTLSeconds = v
+	f.mu.Unlock()
+}
+
+func (f *fakeVault) setMintWarnings(v []string) {
+	f.mu.Lock()
+	f.mintWarnings = v
+	f.mu.Unlock()
+}
+
+func (f *fakeVault) setRevokeFail(v bool) {
+	f.mu.Lock()
+	f.revokeFail = v
+	f.mu.Unlock()
+}
+
+func (f *fakeVault) lastPoliciesValue() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastPolicies
+}
+
+func (f *fakeVault) lastMetaValue() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastMeta
+}
+
+func (f *fakeVault) lastDisplayNameValue() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastDisplayName
+}
+
+func (f *fakeVault) lastMintedTokenValue() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastMintedToken
+}
+
+func (f *fakeVault) lastMintBodyRawValue() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastMintBodyRaw
+}
+
+func (f *fakeVault) lastRevokeTokenValue() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastRevokeToken
 }
 
 // waitFor polls cond until it returns true or timeout elapses, failing the

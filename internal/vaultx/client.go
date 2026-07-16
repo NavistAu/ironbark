@@ -74,13 +74,18 @@ func New(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("vaultx: new client: %w", err)
 	}
 
-	return &Client{
+	c := &Client{
 		api:           apiClient,
 		cfg:           cfg,
-		canaryFn:      func(context.Context, string) error { return nil },
 		renewAfter:    func(leaseSeconds int) time.Duration { return time.Duration(leaseSeconds/2) * time.Second },
 		retryInterval: 60 * time.Second,
-	}, nil
+	}
+	// canaryFn is the real SPEC §3.5 canary (Task 8's canary.go), wired
+	// here so Run's lifecycle (Task 7) actually exercises it after every
+	// (re-)login rather than Task 7's original no-op stub.
+	c.canaryFn = c.runCanary
+
+	return c, nil
 }
 
 // Login performs an AppRole login (POST auth/approle/login) using

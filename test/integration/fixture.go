@@ -341,6 +341,15 @@ func setupPolicies(t *testing.T, ctx context.Context, c *api.Client) {
 }
 
 // setupTokenRole writes auth/token/roles/ci EXACTLY per SPEC §3.1.
+//
+// token_explicit_max_ttl, NOT token_ttl, bounds a role-minted token's
+// lifetime (integration-verified 2026-07-16, SPEC §3.1's corrected note):
+// the token-store role endpoint silently drops token_ttl, and a token
+// minted with no request TTL then inherits the token auth mount's
+// default_lease_ttl (32 days by default) instead. token_explicit_max_ttl
+// is a hard, unrenewable expiry cap the role backend does honor on both
+// products — kept short (90s) here so Task 14's lease-expiry test has a
+// real deadline to observe.
 func setupTokenRole(t *testing.T, ctx context.Context, c *api.Client) {
 	t.Helper()
 	if _, err := c.Logical().WriteWithContext(ctx, "auth/token/roles/ci", map[string]interface{}{
@@ -349,7 +358,7 @@ func setupTokenRole(t *testing.T, ctx context.Context, c *api.Client) {
 		"orphan":                  true,
 		"renewable":               false,
 		"token_no_default_policy": false,
-		"token_ttl":               "90s",
+		"token_explicit_max_ttl":  "90s",
 	}); err != nil {
 		t.Fatalf("integration: token role ci: %v", err)
 	}

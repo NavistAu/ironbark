@@ -43,6 +43,16 @@ import (
 //
 // New wires this as the default canaryFn, so Run's lifecycle actually
 // exercises the real canary, not Task 7's no-op stub.
+// RunCanary is a minimal exported seam so tests outside this package
+// (test/integration, an external `package integration`) can drive the
+// SPEC §3.5 canary directly against a real Vault/OpenBao instance without
+// reimplementing Run's timer-driven retry loop. Production code never
+// calls this — New wires runCanary as Run's canaryFn, which is what
+// actually executes in cmd/ironbark. Task 14.
+func (c *Client) RunCanary(ctx context.Context, policyPrefix string) error {
+	return c.runCanary(ctx, policyPrefix)
+}
+
 func (c *Client) runCanary(ctx context.Context, policyPrefix string) error {
 	policy := policyPrefix + "/ironbark-selftest"
 

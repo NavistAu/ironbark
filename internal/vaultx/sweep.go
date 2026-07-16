@@ -258,6 +258,14 @@ func (c *Client) ReadConfig(ctx context.Context, token, base string) (map[string
 	return out, nil
 }
 
+// Base returns the SPEC §2.4 KV base path `<KVPrefix>/<org>/<repo>` for id.
+// Sweep uses it as the common prefix for all three tiers; the broker (Task
+// 10) uses the same method to read <base>/.identity and <base>/.config, so
+// the base-path computation has exactly one implementation.
+func (c *Client) Base(id identity.Identity) string {
+	return c.cfg.KVPrefix + "/" + id.Org + "/" + id.Repo
+}
+
 // Sweep performs the SPEC §4.1–§4.3, §4.6 sweep: it LISTs each applicable
 // KV v2 prefix independently, most specific first (branch, then event,
 // then base — branchful is true only when the caller's event is
@@ -272,7 +280,7 @@ func (c *Client) ReadConfig(ctx context.Context, token, base string) (map[string
 // plain (non-ErrMalformedDirective) error — the broker maps this to
 // revoke+502.
 func (c *Client) Sweep(ctx context.Context, token string, id identity.Identity, branchful bool) (SweepResult, error) {
-	base := c.cfg.KVPrefix + "/" + id.Org + "/" + id.Repo
+	base := c.Base(id)
 
 	var tiers []string
 	if branchful && id.Branch != "" {

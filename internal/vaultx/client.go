@@ -30,6 +30,33 @@ type Config struct {
 	KVPrefix  string
 }
 
+// Metrics is the optional observability seam vaultx's sweep/deref reads
+// report through (SPEC §1.1 /metrics: ironbark_sweep_reads_total,
+// ironbark_deref_reads_total), without vaultx importing a metrics library
+// itself. internal/httpapi's Server implements this interface (as an
+// adapter over its own Prometheus counters) and exposes it so Task 12's
+// cmd wiring can pass it to New via WithMetrics.
+type Metrics interface {
+	// IncSweepRead is called once per successful per-entry data-GET
+	// performed during Sweep (sweepEntry) — one per secret entry actually
+	// read, not per LIST.
+	IncSweepRead()
+	// IncDerefRead is called once per successful pointer-dereference GET
+	// performed during Sweep (sweepDeref).
+	IncDerefRead()
+}
+
+// Option configures optional Client behavior at construction (New).
+type Option func(*Client)
+
+// WithMetrics wires m as Client's Metrics seam. Every call site guards
+// against a nil metrics field, so omitting this option (the Client's
+// zero value for metrics) leaves sweep/deref reads fully nil-safe —
+// existing callers and tests, none of which set this, are unaffected.
+func WithMetrics(m Metrics) Option {
+	return func(c *Client) { c.metrics = m }
+}
+
 // Client holds ironbark's own Vault/OpenBao AppRole session: the
 // underlying api.Client (its default token is always ironbark's own
 // session token — Task 8's canary/mint calls authenticate as ironbark
@@ -44,6 +71,11 @@ type Client struct {
 	leaseSeconds int    // that token's last-known lease duration
 	sessionOK    bool   // login/renew succeeded and hasn't since failed
 	canaryOK     bool   // the canary (Task 8) passed since the last (re-)login
+
+	// metrics is the optional Metrics seam (see WithMetrics); nil unless
+	// set at construction, and every call site guards it — sweep.go's
+	// reads are fully nil-safe without it.
+	metrics Metrics
 
 	// canaryFn, renewAfter, and retryInterval below are unguarded
 	// configuration knobs, not runtime state: callers (Task 8/12) must
@@ -67,8 +99,11 @@ type Client struct {
 }
 
 // New builds a Client for cfg.Addr. It does not contact Vault — call Run
-// (or Login) to establish the AppRole session.
-func New(cfg Config) (*Client, error) {
+// (or Login) to establish the AppRole session. opts apply after every
+// field above has its default (e.g. WithMetrics to wire the sweep/deref
+// counters seam); callers that pass none get the prior nil-metrics
+// behavior unchanged.
+func New(cfg Config, opts ...Option) (*Client, error) {
 	apiClient, err := api.NewClient(&api.Config{Address: cfg.Addr})
 	if err != nil {
 		return nil, fmt.Errorf("vaultx: new client: %w", err)
@@ -84,6 +119,10 @@ func New(cfg Config) (*Client, error) {
 	// here so Run's lifecycle (Task 7) actually exercises it after every
 	// (re-)login rather than Task 7's original no-op stub.
 	c.canaryFn = c.runCanary
+
+	for _, opt := range opts {
+		opt(c)
+	}
 
 	return c, nil
 }

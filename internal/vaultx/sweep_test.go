@@ -711,3 +711,96 @@ func TestReadConfig_OtherFailureReturnsPlainError(t *testing.T) {
 		t.Errorf("ReadConfig error wraps ErrMalformedDirective, want a plain read-error class")
 	}
 }
+
+// --- Metrics seam (WithMetrics) ---
+
+// countingMetrics is a race-safe fake Metrics that records call counts,
+// for TestSweep_MetricsSeam to assert exact IncSweepRead/IncDerefRead
+// counts.
+type countingMetrics struct {
+	mu         sync.Mutex
+	sweepReads int
+	derefReads int
+}
+
+func (m *countingMetrics) IncSweepRead() {
+	m.mu.Lock()
+	m.sweepReads++
+	m.mu.Unlock()
+}
+
+func (m *countingMetrics) IncDerefRead() {
+	m.mu.Lock()
+	m.derefReads++
+	m.mu.Unlock()
+}
+
+func (m *countingMetrics) counts() (sweepReads, derefReads int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sweepReads, m.derefReads
+}
+
+var _ Metrics = (*countingMetrics)(nil)
+
+// TestSweep_MetricsSeam proves the WithMetrics seam: every successful
+// per-entry data-GET increments IncSweepRead (including a pointer entry's
+// own read of its "$ref" definition), and every successful pointer
+// dereference additionally increments IncDerefRead. Five entries are
+// listed at the base tier: three plain (shorthand-form) secrets and two
+// pointers, each dereferencing successfully — so IncSweepRead must be
+// called exactly 5 times (one per entry actually read) and IncDerefRead
+// exactly 2 times (one per successful deref).
+func TestSweep_MetricsSeam(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"a", "b", "c", "p1", "p2"}))
+	fv.set(dataEntryPath(sweepBase, "a"), http.StatusOK, entryBody(map[string]interface{}{"value": "va"}, nil))
+	fv.set(dataEntryPath(sweepBase, "b"), http.StatusOK, entryBody(map[string]interface{}{"value": "vb"}, nil))
+	fv.set(dataEntryPath(sweepBase, "c"), http.StatusOK, entryBody(map[string]interface{}{"value": "vc"}, nil))
+	fv.set(dataEntryPath(sweepBase, "p1"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/creds/one"}, nil))
+	fv.set(dataEntryPath(sweepBase, "p2"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/creds/two"}, nil))
+	fv.set("/v1/aws/creds/one", http.StatusOK, derefBody(map[string]interface{}{"user": "u1"}, "lease-1"))
+	fv.set("/v1/aws/creds/two", http.StatusOK, derefBody(map[string]interface{}{"user": "u2"}, "lease-2"))
+
+	srv := httptest.NewServer(fv.handler())
+	t.Cleanup(srv.Close)
+
+	cm := &countingMetrics{}
+	c, err := New(testConfig(srv.URL), WithMetrics(cm))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Secrets) != 5 {
+		t.Fatalf("Secrets = %+v, want 5 (a, b, c, p1_user, p2_user)", res.Secrets)
+	}
+
+	sweepReads, derefReads := cm.counts()
+	if sweepReads != 5 {
+		t.Errorf("IncSweepRead call count = %d, want 5 (one per entry actually read: a, b, c, p1, p2)", sweepReads)
+	}
+	if derefReads != 2 {
+		t.Errorf("IncDerefRead call count = %d, want 2 (one per successful pointer dereference: p1, p2)", derefReads)
+	}
+}
+
+// TestSweep_MetricsSeam_NilSafeWithoutOption proves the zero value (no
+// WithMetrics option) leaves Sweep fully nil-safe — the existing
+// (pre-Task-11-amendment) behavior every other test in this file relies
+// on.
+func TestSweep_MetricsSeam_NilSafeWithoutOption(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"a"}))
+	fv.set(dataEntryPath(sweepBase, "a"), http.StatusOK, entryBody(map[string]interface{}{"value": "va"}, nil))
+
+	c := newSweepClient(t, fv) // no WithMetrics
+	if _, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false); err != nil {
+		t.Fatalf("Sweep: %v (must not panic/error with metrics unset)", err)
+	}
+}

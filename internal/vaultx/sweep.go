@@ -365,6 +365,9 @@ func (c *Client) sweepEntry(ctx context.Context, token, tierPath, key string, sw
 	if !found {
 		return nil
 	}
+	if c.metrics != nil {
+		c.metrics.IncSweepRead()
+	}
 	defer resp.Body.Close()
 
 	var parsed struct {
@@ -464,6 +467,9 @@ func (c *Client) sweepDeref(ctx context.Context, token, key, refPath string, ima
 	}
 	if !found {
 		return nil
+	}
+	if c.metrics != nil {
+		c.metrics.IncDerefRead()
 	}
 	defer resp.Body.Close()
 

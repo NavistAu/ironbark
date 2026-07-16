@@ -169,6 +169,15 @@ func TestVerifyMatrix(t *testing.T) {
 		assertReason(t, err, ReasonUncoveredComponent)
 	})
 
+	// Mirror of the row above: this SPEC §9.1 row is an "or" over both
+	// required components, so both directions of uncovered-component must
+	// be exercised. Here @request-target is the one left uncovered.
+	t.Run("components cover only content-digest", func(t *testing.T) {
+		req := newSignedRequest(t, priv, testBody, wpsigntest.Opts{Components: []string{"content-digest"}})
+		err := Verify(req, testBody, pub, testWindow, time.Now)
+		assertReason(t, err, ReasonUncoveredComponent)
+	})
+
 	t.Run("created omitted", func(t *testing.T) {
 		req := newSignedRequest(t, priv, testBody, wpsigntest.Opts{OmitCreated: true})
 		err := Verify(req, testBody, pub, testWindow, time.Now)

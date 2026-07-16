@@ -174,19 +174,36 @@ The Vault/OpenBao operator provides token role `TOKEN_ROLE` (default
 `ci`) with, at minimum:
 
 ```
-allowed_policies_glob = ["<POLICY_PREFIX>/*"]   # must cover §2.3 output space
-token_type            = "service"               # hard requirement, R§7.4; batch
-                                                # leases would parent to ironbark's
-                                                # own token (research §4)
-token_ttl             = <operator choice, e.g. 15m>  # budget queue+runtime, WP§12
-orphan                = true                    # see §3.3
-renewable             = false                   # TTL is the lifetime, full stop:
-                                                # default policy grants renew-self,
-                                                # so a renewable token could outlive
-                                                # the threat model's "dies in minutes"
-token_no_default_policy = false                 # default policy is load-bearing:
-                                                # revoke-self powers §3.4
+allowed_policies_glob   = ["<POLICY_PREFIX>/*"]   # must cover §2.3 output space
+token_type              = "service"               # hard requirement, R§7.4; batch
+                                                  # leases would parent to ironbark's
+                                                  # own token (research §4)
+token_explicit_max_ttl  = <operator choice, e.g. 15m>  # THE lifetime bound — see note
+orphan                  = true                    # see §3.3
+renewable               = false                   # TTL is the lifetime, full stop:
+                                                  # default policy grants renew-self,
+                                                  # so a renewable token could outlive
+                                                  # the threat model's "dies in minutes"
+token_no_default_policy = false                   # default policy is load-bearing:
+                                                  # revoke-self powers §3.4
 ```
+
+**Note on the lifetime bound (integration-verified, 2026-07-16, Vault
+1.20 + OpenBao 2.5.5):** the token-store role endpoint
+(`auth/token/roles/:name`) does **not** honor a `token_ttl` field — it is
+silently dropped (no warning), and a token minted with no request TTL then
+inherits the token auth mount's `default_lease_ttl` (32 days by default).
+So `token_ttl` on the role is a NO-OP and would leave CI tokens alive for
+32 days, defeating the threat model's "dies in minutes." The field that
+actually bounds a role-minted token's lifetime is
+`token_explicit_max_ttl` (a hard, unrenewable expiry cap the role backend
+does honor on both products). ironbark still sends no `ttl` at mint (§3.2);
+`token_explicit_max_ttl` is what makes "TTL is the bound" (DEC-0007) real.
+Operators MUST set it; the M1 integration suite asserts a minted token's
+TTL is bounded by it on both products. (Alternatively/additionally the
+operator may lower the token mount's `default_lease_ttl` via
+`sys/auth/token/tune`, but that is instance-wide; the per-role
+`token_explicit_max_ttl` is the correct, scoped control.)
 
 Note on the glob: `allowed_policies_glob` uses plain substring globbing
 (`ryanuber/go-glob` — `*` matches ANY characters including `/`; there are
@@ -321,6 +338,18 @@ the service-token cascade cleans up any leases earlier derefs created
 (C3). Leases only survive when the response is a `200`. Pointers are
 followed exactly one level — a deref result is never re-examined for
 `$ref` (no chains, no cycles).
+
+**Limitation — GET-only deref (integration-verified, 2026-07-16):** the
+deref is a bodiless HTTP GET, so `$ref` targets must be **GET-readable**
+dynamic-secret endpoints: `aws/creds/<role>` (DEC-0003's motivating STS
+example), `database/creds/<role>`, `gcp/.../key`, `azure/creds/<role>`,
+and KV reads. It does NOT support engines that require request-body
+parameters on a write — notably `pki/issue/<role>`, which is POST-only
+(`GET` returns 405 on both Vault and OpenBao). Supporting POST-with-body
+derefs would require the KV pointer entry to carry an attacker-writable
+request body into a privileged write — out of scope for M1 and a
+deliberate trust-surface exclusion. If PKI issuance via `$ref` is ever
+needed, that is a post-M1 design change, not a bug.
 
 ### 4.4 `.identity` binding
 

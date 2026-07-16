@@ -30,12 +30,11 @@ import (
 // before runCanary returns (SPEC §3.4: "a token that fails our own trust
 // assertions has no reason to stay alive" — without this, a sustained
 // role misconfiguration mints and abandons a live service token every
-// retryInterval until its own TTL). Revoke failures on that path are
-// swallowed, per §3.4 "revoke failures are logged and do not change the
-// outcome" — this package has no logging infrastructure yet (a later
-// task wires §8 observability), so the discard IS the "logged and
-// ignored" outcome for now; the original assertion error is always what
-// gets returned, never the revoke error.
+// retryInterval until its own TTL). A revoke failure on that path is
+// logged at WARN (SPEC §3.4 "revoke failures are logged") via c.logger —
+// nil-safe by construction (New defaults it to a discard logger); the
+// original assertion error is always what gets returned, never the
+// revoke error.
 //
 // On success it flips canaryOK true itself: Run's seam only strictly
 // needs this on success, since Login already resets canaryOK false
@@ -53,7 +52,9 @@ func (c *Client) runCanary(ctx context.Context, policyPrefix string) error {
 	}
 
 	if assertErr := canaryAssertMintProperties(mint); assertErr != nil {
-		_ = c.RevokeSelf(ctx, mint.Token) // best-effort cleanup; see doc comment above
+		if revokeErr := c.RevokeSelf(ctx, mint.Token); revokeErr != nil { // best-effort cleanup; see doc comment above
+			c.logger.Warn("canary: revoke of failed-assertion token failed", "error", revokeErr)
+		}
 		return assertErr
 	}
 

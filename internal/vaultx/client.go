@@ -13,6 +13,8 @@ package vaultx
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -57,6 +59,24 @@ func WithMetrics(m Metrics) Option {
 	return func(c *Client) { c.metrics = m }
 }
 
+// WithLogger wires logger as Client's observability seam: Run/sessionLoop
+// logs canary failures/recoveries and login problems through it (SPEC §3.5,
+// §3.4). Omitting this option leaves New's default discard logger in place,
+// so existing callers/tests are unaffected.
+func WithLogger(logger *slog.Logger) Option {
+	return func(c *Client) { c.logger = logger }
+}
+
+// SetMetrics wires m as Client's Metrics seam after construction. It exists
+// for callers that cannot supply metrics at New time because the metrics
+// object itself is only available once *their* own dependent (e.g.
+// httpapi.Server) has been constructed from this Client's broker — see
+// Task 12's cmd wiring. SetMetrics is NOT safe to call concurrently with a
+// running Run; callers must call it before the first `go c.Run(...)`.
+func (c *Client) SetMetrics(m Metrics) {
+	c.metrics = m
+}
+
 // Client holds ironbark's own Vault/OpenBao AppRole session: the
 // underlying api.Client (its default token is always ironbark's own
 // session token — Task 8's canary/mint calls authenticate as ironbark
@@ -76,6 +96,11 @@ type Client struct {
 	// set at construction, and every call site guards it — sweep.go's
 	// reads are fully nil-safe without it.
 	metrics Metrics
+
+	// logger is the observability seam (see WithLogger). New defaults it
+	// to a discard logger, so it is never nil and call sites never need to
+	// guard it.
+	logger *slog.Logger
 
 	// canaryFn, renewAfter, and retryInterval below are unguarded
 	// configuration knobs, not runtime state: callers (Task 8/12) must
@@ -114,6 +139,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		cfg:           cfg,
 		renewAfter:    func(leaseSeconds int) time.Duration { return time.Duration(leaseSeconds/2) * time.Second },
 		retryInterval: 60 * time.Second,
+		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	// canaryFn is the real SPEC §3.5 canary (Task 8's canary.go), wired
 	// here so Run's lifecycle (Task 7) actually exercises it after every
@@ -143,10 +169,12 @@ func (c *Client) Login(ctx context.Context) error {
 	})
 	if err != nil {
 		c.setSessionOK(false)
+		c.logger.Error("approle login failed", "error", err)
 		return fmt.Errorf("vaultx: approle login: %w", err)
 	}
 	if secret == nil || secret.Auth == nil || secret.Auth.ClientToken == "" {
 		c.setSessionOK(false)
+		c.logger.Error("approle login failed", "error", "response has no auth")
 		return fmt.Errorf("vaultx: approle login: response has no auth")
 	}
 
@@ -179,6 +207,7 @@ func (c *Client) renewSelf(ctx context.Context) error {
 	secret, err := c.api.Auth().Token().RenewSelfWithContext(ctx, 0)
 	if err != nil {
 		c.setSessionOK(false)
+		c.logger.Warn("token renew-self failed; re-login required", "error", err)
 		return fmt.Errorf("vaultx: renew-self: %w", err)
 	}
 
@@ -273,12 +302,23 @@ func (c *Client) sessionLoop(ctx context.Context, policyPrefix string) bool {
 	}
 	defer disarmCanaryRetry()
 
+	// canaryFailed tracks whether the most recent canary attempt in THIS
+	// session failed, so a later success can be logged as a recovery
+	// (INFO) rather than repeating the same failure-only log path.
+	var canaryFailed bool
+
 	runCanary := func() {
 		if err := c.canaryFn(ctx, policyPrefix); err != nil {
 			c.setCanaryOK(false)
+			c.logger.Error("startup canary failed; /readyz will report not-ready", "error", err)
+			canaryFailed = true
 			canaryTimer = time.NewTimer(c.retryInterval)
 			canaryCh = canaryTimer.C
 			return
+		}
+		if canaryFailed {
+			c.logger.Info("startup canary recovered")
+			canaryFailed = false
 		}
 		c.setCanaryOK(true)
 		disarmCanaryRetry()

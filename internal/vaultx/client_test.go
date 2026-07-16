@@ -1,11 +1,13 @@
 package vaultx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -583,4 +585,74 @@ func TestRun_StopsOnContextCancel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("Run did not return after context cancellation")
 	}
+}
+
+// TestRun_CanaryFailureAndRecoveryAreLogged exercises the WithLogger seam:
+// a failing canary must produce an ERROR log line naming the failure, and a
+// later success (after having failed) must produce an INFO recovery line —
+// both readable from a companion log when /readyz is reporting 503 (SPEC
+// §3.5).
+func TestRun_CanaryFailureAndRecoveryAreLogged(t *testing.T) {
+	fv := newFakeVault()
+	srv := httptest.NewServer(fv.handler())
+	defer srv.Close()
+
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, nil))
+
+	c, err := New(testConfig(srv.URL), WithLogger(logger))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.renewAfter = func(int) time.Duration { return time.Hour }
+	c.retryInterval = 5 * time.Millisecond
+
+	var mu sync.Mutex
+	shouldFail := true
+	c.canaryFn = func(context.Context, string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if shouldFail {
+			return errors.New("token_type = \"batch\", want \"service\"")
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx, "ci")
+
+	waitFor(t, 2*time.Second, func() bool {
+		s := buf.String()
+		return strings.Contains(s, "startup canary failed") && strings.Contains(s, "batch")
+	})
+
+	mu.Lock()
+	shouldFail = false
+	mu.Unlock()
+
+	waitFor(t, 2*time.Second, func() bool {
+		return strings.Contains(buf.String(), "startup canary recovered")
+	})
+}
+
+// syncBuffer is a mutex-guarded bytes.Buffer: client_test.go's Run tests
+// exercise Run's goroutine concurrently with test-goroutine log assertions,
+// so the log sink itself must be safe for concurrent Write/String (unlike a
+// bare bytes.Buffer).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

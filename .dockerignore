@@ -1,0 +1,7 @@
+.git
+.worktrees
+docs
+test
+README.md
+LICENSE
+*.md

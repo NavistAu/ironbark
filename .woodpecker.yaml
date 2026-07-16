@@ -1,0 +1,25 @@
+when:
+  - event: [push, pull_request]
+
+steps:
+  vet:
+    image: golang:1.24
+    commands:
+      - go vet ./...
+
+  test:
+    image: golang:1.24
+    commands:
+      # Fast unit suite only. Integration tests (`-tags integration`) need
+      # docker-in-docker/service containers (Vault, etc.) and run in a
+      # separate pipeline/job, not here.
+      - go test ./...
+
+  build:
+    image: golang:1.24
+    commands:
+      - go build ./...
+
+# No publish/registry step yet: pushing the distroless image is estate-side
+# wiring (SPEC §11, stage-2 bootstrap) and needs a registry token that
+# isn't provisioned for M1. Add a `publish` step once that's in place.

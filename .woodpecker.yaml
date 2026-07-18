@@ -20,6 +20,20 @@ steps:
     commands:
       - go build ./...
 
-# No publish/registry step yet: pushing the distroless image is estate-side
-# wiring (SPEC §11, stage-2 bootstrap) and needs a registry token that
-# isn't provisioned for M1. Add a `publish` step once that's in place.
+  publish:
+    image: golang:1.24
+    environment:
+      REGISTRY_USER:
+        from_secret: registry_user
+      REGISTRY_TOKEN:
+        from_secret: registry_token
+      KO_DOCKER_REPO: forge.example.com/ironbark/ironbark
+      KO_DEFAULTBASEIMAGE: gcr.io/distroless/static-debian12:nonroot
+    commands:
+      - go install github.com/google/ko@v0.19.1
+      - echo "$REGISTRY_TOKEN" | ko login forge.example.com -u "$REGISTRY_USER" --password-stdin
+      - ko build ./cmd/ironbark --bare --tags "$CI_COMMIT_SHA" --image-refs /tmp/image-ref.txt
+      - cat /tmp/image-ref.txt
+    when:
+      - branch: main
+        event: push

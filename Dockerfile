@@ -14,6 +14,8 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" -o /ironbark ./cmd/ironbark
 
 # Stage 2: distroless nonroot runtime.
+# CI publishes this image via ko, not this Dockerfile — see the `publish`
+# step in .woodpecker.yaml (KO_DEFAULTBASEIMAGE matches this base).
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /ironbark /ironbark

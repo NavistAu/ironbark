@@ -28,8 +28,13 @@ steps:
       REGISTRY_TOKEN:
         from_secret: registry_token
       KO_DOCKER_REPO: forge.example.com/ironbark/ironbark
+      # Must track the Dockerfile's runtime base (Stage 2 FROM line).
       KO_DEFAULTBASEIMAGE: gcr.io/distroless/static-debian12:nonroot
     commands:
+      # Pinned to v0.18.0: v0.19.1 requires go>=1.26.3, but this step runs
+      # on golang:1.24 with GOTOOLCHAIN=local, so it can't auto-fetch a
+      # newer toolchain. Bumping ko past v0.18.x requires bumping this
+      # step's image in lockstep.
       - go install github.com/google/ko@v0.18.0
       - echo "$REGISTRY_TOKEN" | ko login forge.example.com -u "$REGISTRY_USER" --password-stdin
       - ko build ./cmd/ironbark --bare --tags "$CI_COMMIT_SHA" --image-refs /tmp/image-ref.txt

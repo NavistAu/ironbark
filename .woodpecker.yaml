@@ -30,7 +30,7 @@ steps:
       KO_DOCKER_REPO: forge.example.com/ironbark/ironbark
       KO_DEFAULTBASEIMAGE: gcr.io/distroless/static-debian12:nonroot
     commands:
-      - go install github.com/google/ko@v0.19.1
+      - go install github.com/google/ko@v0.18.0
       - echo "$REGISTRY_TOKEN" | ko login forge.example.com -u "$REGISTRY_USER" --password-stdin
       - ko build ./cmd/ironbark --bare --tags "$CI_COMMIT_SHA" --image-refs /tmp/image-ref.txt
       - cat /tmp/image-ref.txt

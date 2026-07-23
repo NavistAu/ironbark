@@ -1,7 +1,7 @@
 ---
 id: "DEC-0013"
 title: "Release artifacts: Go module + Docker Hub image only, signed, with SBOM"
-status: accepted
+status: superseded
 date: 2026-07-23
 y-statement: >-
   In the context of what a public ironbark release ships, facing a
@@ -90,6 +90,11 @@ lift consumer pull limits.
   chose Docker Hub.
 
 ## More Information
+
+Superseded by DEC-0017: Docker Hub registration fell through (legacy org
+slug `navistautomatum` cannot be renamed to `navistau`; a new org hits
+current pricing), triggering the GHCR fallback this decision anticipated.
+The artifact set, signing, and SBOM requirements carry over unchanged.
 
 DEC-0012 (the release.yml that produces these), DEC-0010 (runtime surface
 the image must respect), publish plan W3. The distroless base pin and its

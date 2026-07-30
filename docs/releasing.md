@@ -107,7 +107,9 @@ After the release workflow completes, verify from a clean machine:
 - **Version reporting:** the running container's startup log (or
   `--version`, once added) reports `X.Y.Z`.
 - **Package page:** shows the README (the `org.opencontainers.image.source`
-  annotation linked it to the repo).
+  image label linked it to the repo -- confirmed against GitHub's packages
+  docs that this is a Docker/OCI image **label**, not a manifest
+  annotation; `release.yml` sets it via `ko build --image-label`).
 
 ## 7. Post-Release
 

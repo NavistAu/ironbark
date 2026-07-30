@@ -18,6 +18,8 @@ steps:
   build:
     image: golang:1.24
     commands:
+      # Sanity compile only; the published binary is version-stamped
+      # separately below (-ldflags "-X main.version=$(cat VERSION)").
       - go build ./...
 
   publish:
@@ -36,6 +38,9 @@ steps:
       # newer toolchain. Bumping ko past v0.18.x requires bumping this
       # step's image in lockstep.
       - go install github.com/google/ko@v0.18.0
+      # VERSION feeds .ko.yaml's ldflags template (-X main.version=...),
+      # the same injection the Dockerfile build stage performs.
+      - export VERSION=$(cat VERSION)
       - echo "$REGISTRY_TOKEN" | ko login forge.example.com -u "$REGISTRY_USER" --password-stdin
       - ko build ./cmd/ironbark --bare --tags "$CI_COMMIT_SHA" --image-refs /tmp/image-ref.txt
       - cat /tmp/image-ref.txt

@@ -30,6 +30,11 @@ const requestTimeout = 30 * time.Second
 // shutdownDrain bounds graceful shutdown's wait for in-flight requests.
 const shutdownDrain = 5 * time.Second
 
+// version is stamped at build time via -ldflags "-X main.version=$(cat
+// VERSION)" (Dockerfile, .woodpecker.yaml, release.yml); "dev" for
+// unstamped local builds.
+var version = "dev"
+
 func main() {
 	cfg, err := config.Load(os.Getenv, os.ReadFile)
 	if err != nil {
@@ -41,6 +46,7 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
+	logger.Info("ironbark starting", "version", version)
 
 	vc, err := vaultx.New(vaultx.Config{
 		Addr:      cfg.VaultAddr,

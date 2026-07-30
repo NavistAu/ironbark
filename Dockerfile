@@ -10,8 +10,9 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
+COPY VERSION ./VERSION
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" -o /ironbark ./cmd/ironbark
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=$(cat VERSION)" -o /ironbark ./cmd/ironbark
 
 # Stage 2: distroless nonroot runtime.
 # CI publishes this image via ko, not this Dockerfile — see the `publish`

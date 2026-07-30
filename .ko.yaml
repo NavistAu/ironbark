@@ -1,0 +1,7 @@
+builds:
+  - id: ironbark
+    dir: .
+    main: ./cmd/ironbark
+    ldflags:
+      - -s -w
+      - -X main.version={{.Env.VERSION}}

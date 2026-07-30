@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    name: Vet, build, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./cmd/ironbark
+      - name: Test (race detector)
+        run: go test -race ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+
+  integration:
+    name: Integration (Vault + OpenBao)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # ubuntu-latest runners ship Docker + the Compose v2 plugin;
+      # --wait blocks until every service's healthcheck (see
+      # test/integration/docker-compose.yml) reports healthy.
+      - name: Start Vault + OpenBao + Postgres fixtures
+        run: docker compose -f test/integration/docker-compose.yml up -d --wait
+      - name: Run integration suite
+        run: go test -tags integration ./test/integration/...
+      - name: Tear down fixtures
+        if: always()
+        run: docker compose -f test/integration/docker-compose.yml down -v

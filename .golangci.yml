@@ -1,0 +1,41 @@
+version: "2"
+
+# Minimal noise suppression, not a style retrofit — see docs/releasing.md's
+# sibling CI workflow (.github/workflows/ci.yml) for how this gates PRs.
+# Every rule below targets a specific, already-verified non-bug finding
+# from `golangci-lint run` on the codebase as it stood when CI was added;
+# nothing here should be extended to cover future findings without the
+# same scrutiny.
+linters:
+  exclusions:
+    rules:
+      # Test-only httptest handlers write directly to the ResponseWriter;
+      # checking every fmt.Fprint(f) return there is noise, not a bug.
+      - path: _test\.go
+        linters:
+          - errcheck
+      # Test scaffolding kept for fixture states not yet exercised by a
+      # test case (e.g. TTL/warning permutations) — not dead code.
+      - path: _test\.go
+        linters:
+          - unused
+      # `defer resp.Body.Close()` is the standard Go idiom; the error is
+      # deliberately discarded (nothing actionable on a read-then-close).
+      - linters:
+          - errcheck
+        text: "Error return value of `resp.Body.Close` is not checked"
+      # Deprecated in favor of client.Logical().ReadRawWithContext, but
+      # RawRequestWithContext still works correctly; migrating is a
+      # behavior change to the Vault client, out of scope for CI setup.
+      - path: internal/vaultx/(mint|sweep)\.go
+        linters:
+          - staticcheck
+        text: "SA1019"
+      # Well-known staticcheck false positive: SA5011 doesn't recognize
+      # t.Fatal(f) as terminating, so `if x == nil { t.Fatalf(...) };
+      # use(x)` reads as a possible nil dereference. It isn't — t.Fatal(f)
+      # calls runtime.Goexit.
+      - path: _test\.go
+        linters:
+          - staticcheck
+        text: "SA5011"

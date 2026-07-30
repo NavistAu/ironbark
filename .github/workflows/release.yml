@@ -40,6 +40,15 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
             echo "Forced release of ${TAG}."
             echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.repository.private }}" = "true" ]; then
+            # Pre-publish guard: while the repo is private (the bring-up
+            # phase before the public flip), pushes to main must NOT cut a
+            # release -- v0.1.0 is reserved for the post-flip release PR.
+            # Flipping the repo public arms this workflow with no other
+            # change. A deliberate rehearsal is still possible via
+            # workflow_dispatch + force (branch above).
+            echo "Repository is private; releases are disarmed until the public flip."
+            echo "release=false" >> "$GITHUB_OUTPUT"
           elif git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "Tag ${TAG} already exists; nothing to release."
             echo "release=false" >> "$GITHUB_OUTPUT"

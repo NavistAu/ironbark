@@ -62,6 +62,12 @@ runs the full pipeline — creating the `vX.Y.Z` tag on the merge commit
 itself (via the default `GITHUB_TOKEN`; no PAT or App token, because the
 tag is no longer the trigger).
 
+The gate also **disarms releases while the repository is private**: during
+the pre-publish bring-up phase, pushes to `main` skip the publish job
+entirely (flipping the repo public arms releases with no other change). A
+deliberate private rehearsal is possible via workflow_dispatch with
+`force: true` — clean up its tag/package afterwards.
+
 There is **no manual `git tag` step.** Merge the green release PR and walk
 away.
 

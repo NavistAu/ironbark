@@ -1,5 +1,8 @@
 # ironbark
 
+[![CI](https://github.com/navistau/ironbark/actions/workflows/ci.yml/badge.svg)](https://github.com/navistau/ironbark/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/navistau/ironbark)](https://github.com/navistau/ironbark/releases)
+
 A [Woodpecker CI](https://woodpecker-ci.org) **secret extension** that federates
 pipeline identity to [HashiCorp Vault](https://developer.hashicorp.com/vault) or
 [OpenBao](https://openbao.org).
@@ -41,6 +44,18 @@ integration-tested against both Vault 1.20 and OpenBao 2.5.5. See
 the decision log in [`docs/decisionlog/`](docs/decisionlog/). Still future:
 the M2 Terraform module and `ironbark doctor` — onboarding a repo today
 means hand-writing the Vault-side IaC described below.
+
+## Install
+
+From v0.1.0, ironbark publishes exactly two artifacts:
+
+```sh
+docker pull ghcr.io/navistau/ironbark
+```
+
+```sh
+go install github.com/navistau/ironbark/cmd/ironbark@latest
+```
 
 ## Why not just…
 

@@ -1,3 +1,10 @@
+# This is an example/dogfood Woodpecker pipeline for Woodpecker users who
+# want a reference config — it is NOT ironbark's project CI, which runs on
+# GitHub Actions (.github/workflows/). It contains no infrastructure
+# identifiers: the publish step's registry host, repo path, and
+# credentials all come from Woodpecker secrets (from_secret), so it runs
+# unmodified on any Woodpecker instance that supplies them.
+
 when:
   - event: [push, pull_request]
 
@@ -25,12 +32,19 @@ steps:
   publish:
     image: golang:1.24
     environment:
+      # Registry host, repo path, and credentials are all instance-supplied
+      # secrets — this file names no registry (DEC-0014).
+      REGISTRY_HOST:
+        from_secret: registry_host
+      REGISTRY_REPO:
+        from_secret: registry_repo
       REGISTRY_USER:
         from_secret: registry_user
       REGISTRY_TOKEN:
         from_secret: registry_token
-      KO_DOCKER_REPO: forge.example.com/ironbark/ironbark
-      # Must track the Dockerfile's runtime base (Stage 2 FROM line).
+      # Must track the Dockerfile's runtime base (Stage 2 FROM line). A
+      # public value (the base image is publicly pulled), so it stays
+      # hardcoded rather than a secret.
       KO_DEFAULTBASEIMAGE: gcr.io/distroless/static-debian12:nonroot
     commands:
       # Pinned to v0.18.0: v0.19.1 requires go>=1.26.3, but this step runs
@@ -41,7 +55,8 @@ steps:
       # VERSION feeds .ko.yaml's ldflags template (-X main.version=...),
       # the same injection the Dockerfile build stage performs.
       - export VERSION=$(cat VERSION)
-      - echo "$REGISTRY_TOKEN" | ko login forge.example.com -u "$REGISTRY_USER" --password-stdin
+      - export KO_DOCKER_REPO="$REGISTRY_REPO"
+      - echo "$REGISTRY_TOKEN" | ko login "$REGISTRY_HOST" -u "$REGISTRY_USER" --password-stdin
       - ko build ./cmd/ironbark --bare --tags "$CI_COMMIT_SHA" --image-refs /tmp/image-ref.txt
       - cat /tmp/image-ref.txt
     when:

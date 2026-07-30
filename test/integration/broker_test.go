@@ -23,9 +23,9 @@ import (
 
 	"github.com/hashicorp/vault/api"
 
-	"ironbark/internal/broker"
-	"ironbark/internal/identity"
-	"ironbark/internal/vaultx"
+	"github.com/navistau/ironbark/internal/broker"
+	"github.com/navistau/ironbark/internal/identity"
+	"github.com/navistau/ironbark/internal/vaultx"
 )
 
 // canaryPrefix is POLICY_PREFIX as used throughout the fixture (KVPrefix

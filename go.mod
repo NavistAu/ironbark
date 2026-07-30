@@ -1,4 +1,4 @@
-module ironbark
+module github.com/navistau/ironbark
 
 go 1.24.9
 

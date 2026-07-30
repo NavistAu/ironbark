@@ -2,7 +2,7 @@
 // per SPEC §2.3.
 package policy
 
-import "ironbark/internal/identity"
+import "github.com/navistau/ironbark/internal/identity"
 
 // branchfulEvents is the single source of the branchful event set,
 // consumed by Derive and by the broker's Sweep call (SPEC §2.3, §4.1).

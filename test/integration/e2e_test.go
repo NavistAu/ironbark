@@ -36,10 +36,10 @@ import (
 
 	"github.com/hashicorp/vault/api"
 
-	"ironbark/internal/broker"
-	"ironbark/internal/httpapi"
-	"ironbark/internal/vaultx"
-	"ironbark/internal/wpsign/wpsigntest"
+	"github.com/navistau/ironbark/internal/broker"
+	"github.com/navistau/ironbark/internal/httpapi"
+	"github.com/navistau/ironbark/internal/vaultx"
+	"github.com/navistau/ironbark/internal/wpsign/wpsigntest"
 )
 
 // e2eFreshnessWindow is generous relative to the real signing/round-trip

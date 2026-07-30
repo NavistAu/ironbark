@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"ironbark/internal/identity"
+	"github.com/navistau/ironbark/internal/identity"
 )
 
 const (

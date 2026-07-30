@@ -17,10 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"ironbark/internal/broker"
-	"ironbark/internal/config"
-	"ironbark/internal/httpapi"
-	"ironbark/internal/vaultx"
+	"github.com/navistau/ironbark/internal/broker"
+	"github.com/navistau/ironbark/internal/config"
+	"github.com/navistau/ironbark/internal/httpapi"
+	"github.com/navistau/ironbark/internal/vaultx"
 )
 
 // requestTimeout is the SPEC §1.2 hard request timeout (POST / -> 502 past

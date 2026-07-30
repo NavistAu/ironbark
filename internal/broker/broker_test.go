@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"ironbark/internal/identity"
-	"ironbark/internal/vaultx"
+	"github.com/navistau/ironbark/internal/identity"
+	"github.com/navistau/ironbark/internal/vaultx"
 )
 
 // --- mock Vault: a test double for the Vault interface. Every method's

@@ -32,7 +32,7 @@ import (
 
 	"github.com/hashicorp/vault/api"
 
-	"ironbark/internal/identity"
+	"github.com/navistau/ironbark/internal/identity"
 )
 
 // ErrMalformedDirective indicates a .identity or .config entry exists but

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"ironbark/internal/wpsign/wpsigntest"
+	"github.com/navistau/ironbark/internal/wpsign/wpsigntest"
 
 	"github.com/yaronf/httpsign"
 )

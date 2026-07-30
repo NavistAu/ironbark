@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"ironbark/internal/identity"
+	"github.com/navistau/ironbark/internal/identity"
 )
 
 // fakeKV fakes just enough of a KV v2 mount (plus arbitrary "any mount"

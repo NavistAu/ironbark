@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"ironbark/internal/broker"
-	"ironbark/internal/identity"
-	"ironbark/internal/wpsign/wpsigntest"
+	"github.com/navistau/ironbark/internal/broker"
+	"github.com/navistau/ironbark/internal/identity"
+	"github.com/navistau/ironbark/internal/wpsign/wpsigntest"
 )
 
 const testWindow = 10 * time.Second

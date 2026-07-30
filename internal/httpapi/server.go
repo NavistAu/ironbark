@@ -21,10 +21,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"ironbark/internal/broker"
-	"ironbark/internal/identity"
-	"ironbark/internal/vaultx"
-	"ironbark/internal/wpsign"
+	"github.com/navistau/ironbark/internal/broker"
+	"github.com/navistau/ironbark/internal/identity"
+	"github.com/navistau/ironbark/internal/vaultx"
+	"github.com/navistau/ironbark/internal/wpsign"
 )
 
 // maxBodyBytes is the SPEC §1.2 step 1 request-body ceiling.

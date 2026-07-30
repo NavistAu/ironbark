@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Release even if the VERSION file's version is already tagged"
+        type: boolean
+        default: false
+
+jobs:
+  # Every push to `main` is a release: `main` only advances via the
+  # develop->main release PR (the gate; see docs/releasing.md). This job
+  # reads the version from the root VERSION file and the `publish` job
+  # releases it unless that tag already exists. There is no tag-push
+  # trigger anywhere in this repo's workflows, so no PAT / GitHub App
+  # token is needed -- the provenance tag vX.Y.Z is created inside
+  # `publish` with the default GITHUB_TOKEN, and GITHUB_TOKEN's
+  # recursion-suppression on tag pushes (it doesn't re-trigger workflows)
+  # is a non-issue because nothing here is triggered by a tag push.
+  # Manual re-release: run via workflow_dispatch with force: true.
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Decide whether to release
+        id: decide
+        run: |
+          VERSION=$(cat VERSION)
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
+            echo "Forced release of ${TAG}."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists; nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing ${TAG}."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: Publish
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    # contents:write - push the vX.Y.Z tag + create the GitHub Release.
+    # packages:write - push the image to ghcr.io/navistau/ironbark.
+    # id-token:write - cosign keyless signing (GitHub OIDC), no stored key.
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # DEC-0012/D5: no manual `git tag` step for maintainers -- merging
+      # the release PR is the release. This is that tag, created here on
+      # the exact commit that triggered this run.
+      - name: Create release tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ needs.gate.outputs.tag }}" "${{ github.sha }}"
+          git push origin "${{ needs.gate.outputs.tag }}"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # version: omitted -> setup-ko installs the latest ko release. The
+      # v0.18.0 pin in .woodpecker.yaml exists only because that pipeline
+      # runs `go install github.com/google/ko@v0.18.0` INSIDE a golang:1.24
+      # container with GOTOOLCHAIN=local, and ko v0.19+ requires
+      # go>=1.26.3 to build from source there. Here setup-ko downloads a
+      # prebuilt ko binary directly onto the runner -- nothing builds ko
+      # from source, so that constraint doesn't apply.
+      - uses: ko-build/setup-ko@v0.10
+
+      - name: Log in to GHCR
+        run: echo "${GITHUB_TOKEN}" | ko login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Extract CHANGELOG section for this version
+        run: |
+          VERSION="${{ needs.gate.outputs.version }}"
+          awk -v ver="$VERSION" '
+            BEGIN { pat = ver; gsub(/\./, "\\.", pat) }
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ ("^## \\[" pat "\\]")) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "_(no CHANGELOG.md entry found for ${VERSION})_" > release-notes.md
+          fi
+
+      - name: Build and push image
+        env:
+          KO_DOCKER_REPO: ghcr.io/navistau/ironbark
+          # Must track the Dockerfile's stage-2 FROM line (Dockerfile
+          # cross-references this workflow the same way).
+          KO_DEFAULTBASEIMAGE: gcr.io/distroless/static-debian12:nonroot
+        run: |
+          export VERSION="${{ needs.gate.outputs.version }}"  # .ko.yaml ldflags template: -X main.version={{.Env.VERSION}}
+          TAG="${{ needs.gate.outputs.tag }}"
+          # SBOM generation uses ko's default (--sbom spdx) -- left on.
+          # org.opencontainers.image.source is an image LABEL, not an OCI
+          # manifest annotation: that's what GitHub reads to link a GHCR
+          # package page back to its repo (verified against GitHub's
+          # packages docs, "Connecting a repository to a container image
+          # using the container manifest" -- it specifies a Docker LABEL).
+          ko build ./cmd/ironbark \
+            --bare \
+            --platform=linux/amd64,linux/arm64 \
+            --tags "${TAG},latest" \
+            --image-label org.opencontainers.image.source=https://github.com/navistau/ironbark \
+            --image-refs image-refs.txt
+          echo "IMAGE_REF=$(head -n1 image-refs.txt)" >> "$GITHUB_ENV"
+
+      - uses: sigstore/cosign-installer@v4
+
+      # Signs the digest ko just pushed (IMAGE_REF is name@sha256:...),
+      # not a mutable tag.
+      - name: Sign image (keyless, GitHub OIDC)
+        run: cosign sign --yes "$IMAGE_REF"
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "${{ needs.gate.outputs.tag }}" \
+            --title "${{ needs.gate.outputs.tag }}" \
+            --notes-file release-notes.md \
+            --target "${{ github.sha }}"

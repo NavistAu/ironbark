@@ -1,0 +1,10 @@
+# gitleaks config: extend the default ruleset with a single allowlist.
+[extend]
+useDefault = true
+
+# internal/wpsign/testdata/ is a documented throwaway Ed25519 keypair
+# generated for this repository's test suite only (see the README in that
+# directory). It is not used by any production Woodpecker or ironbark
+# deployment. Everything else in the repo is fair game for the scanner.
+[allowlist]
+paths = ['''internal/wpsign/testdata/.*''']

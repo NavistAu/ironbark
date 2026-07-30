@@ -110,8 +110,8 @@ jobs:
       - name: Build and push image
         env:
           KO_DOCKER_REPO: ghcr.io/navistau/ironbark
-          # Must track the Dockerfile's stage-2 FROM line (Dockerfile
-          # cross-references this workflow the same way).
+          # Must track the Dockerfile's stage-2 FROM line -- same
+          # constraint .woodpecker.yaml's publish step documents.
           KO_DEFAULTBASEIMAGE: gcr.io/distroless/static-debian12:nonroot
         run: |
           export VERSION="${{ needs.gate.outputs.version }}"  # .ko.yaml ldflags template: -X main.version={{.Env.VERSION}}

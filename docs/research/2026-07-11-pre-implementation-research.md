@@ -203,7 +203,7 @@ merged, it's done" (6543, 2023). Community workaround
 prior art for the JWT-issuer alternative) is archived. Notable estate-level
 item: a commenter notes **Forgejo v16.0 (mid-July 2026) ships scoped
 short-lived JWT tokens** — forge-level, does not give Woodpecker pipelines
-an identity, but worth tracking for the example.com estate.
+an identity, but worth tracking for the authors' internal estate.
 
 ### 7.6 `allowed_policies` / `allowed_policies_glob` enforcement [self-verified re-run, divergence: none]
 

@@ -17,7 +17,7 @@ Verdicts: codex `high=1 medium=4 low=1`; gemini `high=0 medium=2 low=1`.
 | CP4 | codex | MED | No test for the no-chain deref rule | **ACCEPTED** — deref-returns-`$ref` case added (no second call; `$ref` field name fails validation → skipped). Task 9. |
 | CP5 | codex | MED | SPEC §1.2's 30s hard request timeout unimplemented/untested anywhere | **ACCEPTED** — injectable timeout wired in httpapi; blocking-broker test with `outcome=error` audit assertion. Task 11. |
 | CP6 | codex | LOW | testdata key path inconsistent between creation and smoke usage | **ACCEPTED** — canonical `internal/wpsign/testdata/dev-ed25519.{pem,pub}`, created in Task 4. Task 12. |
-| GP1 | gemini | LOW | Claim: `hashicorp/vault:1.20` is not a valid version | **REJECTED** — stale reviewer memory: Vault 1.20.4 was verified to exist during the 2026-07-10 widgets research session. Spirit adopted: Task 13 now says confirm BOTH image tags at implementation time, symmetric with the OpenBao instruction. |
+| GP1 | gemini | LOW | Claim: `hashicorp/vault:1.20` is not a valid version | **REJECTED** — stale reviewer memory: Vault 1.20.4 was verified to exist during the 2026-07-10 research session. Spirit adopted: Task 13 now says confirm BOTH image tags at implementation time, symmetric with the OpenBao instruction. |
 | GP2 | gemini | MED | TTL-merge test description "role TTL governs" could mislead vs the research §7.4 lesser-of finding | **ACCEPTED (wording)** — restated: request sends no TTL ⇒ token TTL equals role `token_ttl`, consistent with lesser-of when one side is absent; per-product behavior recorded. Task 14. |
 | GP3 | gemini | MED | Non-orphan canary case missing (duplicate of CP2) | **ACCEPTED (dup)** — see CP2. |
 

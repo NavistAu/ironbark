@@ -185,7 +185,7 @@ Response (ironbark → Woodpecker):
 ```json
 { "secrets": [
     { "name": "cf_api_token",       "value": "…", "events": ["push"],
-      "images": ["forge.example.com/infra/iac-toolbox"] },
+      "images": ["registry.example.com/infra/toolbox"] },
     { "name": "aws_access_key",     "value": "…", "events": ["push"] },
     { "name": "aws_secret_key",     "value": "…", "events": ["push"] },
     { "name": "aws_security_token", "value": "…", "events": ["push"] },
@@ -275,7 +275,7 @@ Doctor check: convention templates ⊆ role glob.
 **Accepted 2026-07-11 (DEC-0006; specified in SPEC.md §4.4–§4.6):**
 
 - **Per-secret pins via KV v2 `custom_metadata`** — e.g.
-  `images: forge.example.com/infra/iac-toolbox` on an entry becomes the returned
+  `images: registry.example.com/infra/toolbox` on an entry becomes the returned
   secret's `images` constraint. Replaces the old config-table pinning;
   stays in Vault, stays stateless. Costs one metadata read per entry.
 - **`.identity` binding** — a reserved entry recording the forge's stable
@@ -355,10 +355,10 @@ The broker is an *enhancement*, not a prerequisite. The value ladder:
 ironbark's own repo bootstraps on stage 2 (its image build needs only a
 registry token, not Vault) — no circular dependency.
 
-Related project split (recorded in the widgets design session, 2026-07-10):
-ironbark is a generic, publishable project; the example.com-internal specs for
-standing up Vault/OpenBao and for wiring vault+ironbark+Woodpecker live
-elsewhere and consume ironbark's generic artifacts.
+Related project split: ironbark is a generic, publishable project; the
+specs for standing up Vault/OpenBao and for wiring vault+ironbark+Woodpecker
+in the authors' own deployment live in the authors' internal infrastructure
+and consume ironbark's generic artifacts.
 
 ## 10. Milestones
 

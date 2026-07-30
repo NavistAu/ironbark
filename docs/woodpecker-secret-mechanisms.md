@@ -1,8 +1,12 @@
 # Woodpecker secret mechanisms — facts read from v3.15.0 source (2026-07-11)
 
+> Research doc predating publication; environment details below are the
+> authors' own deployment and are illustrative only — examples elsewhere in
+> this repo use generic hostnames/orgs.
+
 Deployed: Woodpecker appVersion 3.15.0 (chart woodpecker-3.6.4, `dev/woodpecker`
-kit in the authors' internal infrastructure). Forge: Forgejo at forge.example.com. k8s backend, build namespace
-`woodpecker-builds`.
+kit in the authors' internal infrastructure). Forge: Forgejo at
+forge.example.com. k8s backend, build namespace `woodpecker-builds`.
 
 ## 1. Native Kubernetes secret references — instance-wide, NOT per-repo
 

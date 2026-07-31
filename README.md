@@ -54,6 +54,25 @@ model: [`docs/DESIGN.md`](docs/DESIGN.md).
 > Woodpecker drills wood; ironbark is the hardwood bark that decides, per peck,
 > how far in it gets.
 
+## Footguns
+
+Known sharp edges, indexed so you hit them here first, not in production:
+
+- [`WOODPECKER_EXTENSIONS_ALLOWED_HOSTS` blocks in-cluster addresses by
+  default](#deploying-pointing-woodpecker-at-ironbark) — the #1 deployment
+  footgun.
+- [ironbark down = fail-open, not
+  fail-closed](#deploying-pointing-woodpecker-at-ironbark) — Woodpecker runs
+  the pipeline anyway, on DB-only secrets.
+- [`token_ttl` on the role is a silent no-op](#token-role) — use
+  `token_explicit_max_ttl`.
+- [`$ref` is GET-only](#ref-dereference-limitation) — no PKI issuance via
+  pointer.
+- [TTL must budget queue time, not just run time](#ttl-budgeting) — and one
+  mint covers every workflow of the run.
+- [policy glob `*` crosses `/`](#tier-policies-example-acmewidgets) — scope
+  each tier's paths to its own prefix, never a shared trailing wildcard.
+
 ## Status
 
 M1 (the broker) is implemented: a Go service (`cmd/ironbark` +

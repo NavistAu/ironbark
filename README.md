@@ -154,6 +154,16 @@ is no broker-side config for this. Three pieces: the token role ironbark
 mints against, per-repo tier policies, and the AppRole ironbark itself logs
 in with.
 
+**Prerequisites** (once per Vault/OpenBao instance): a KV **v2** engine at
+the configured mount, and AppRole auth enabled. Neither exists by default —
+dev mode mounts kv-v2 at `secret/`, not the `kv/` this contract (and
+ironbark's `IRONBARK_KV_MOUNT` default) assumes:
+
+```
+vault secrets enable -path=kv -version=2 kv
+vault auth enable approle
+```
+
 ### Token role
 
 Create the role ironbark mints pipeline tokens from (default name `ci`,
@@ -238,10 +248,23 @@ ironbark's Vault identity must be able to mint tokens against the role
 above and nothing else — no KV read, no policy read:
 
 ```hcl
-# attached to ironbark's AppRole
+# ironbark-agent policy — the only grant ironbark's own identity holds
 path "auth/token/create/ci" {
   capabilities = ["create", "update"]
 }
+```
+
+Create the AppRole with that policy and read out the credentials that
+become `IRONBARK_VAULT_ROLE_ID` / `IRONBARK_VAULT_SECRET_ID` (AppRole auth
+must already be enabled — see prerequisites above):
+
+```
+vault policy write ironbark-agent ironbark-agent.hcl
+vault write auth/approle/role/ironbark \
+  token_policies=ironbark-agent \
+  token_type=service token_ttl=1h token_max_ttl=4h
+vault read auth/approle/role/ironbark/role-id
+vault write -f auth/approle/role/ironbark/secret-id
 ```
 
 ### KV convention (brief — see [`docs/SPEC.md` §4](docs/SPEC.md) for detail)
@@ -291,9 +314,10 @@ proactively reclaimed.
 
 ## Configuration reference
 
-A `_FILE` suffix variant of any var reads the value from a file path
-instead (for External Secrets Operator / Kubernetes secret mounts). Setting
-both a var and its `_FILE` variant is a configuration error.
+Vars marked `/ _FILE` in the table have a `_FILE` suffix variant that
+reads the value from a file path instead (for External Secrets Operator /
+Kubernetes secret mounts). Setting both a var and its `_FILE` variant is a
+configuration error.
 
 | Var | Default | Required | Notes |
 |---|---|---|---|

@@ -33,6 +33,14 @@ that brokers per-identity access.
   which Vault policies and KV entries exist; onboarding a repo is
   Vault-side IaC.
 
+An aside for readers who know the OIDC id-token pattern from other CI
+systems: Woodpecker has no pipeline id-tokens, but the seam it does have
+turns out *stricter*, not weaker. The identity exchange is server-to-server,
+signed, and finished before the build starts — pipeline code never holds an
+identity credential it could exfiltrate — and ironbark itself can only mint
+tokens, never read secrets, so there is no standing credential at the
+broker to steal either.
+
 **How it works, in one breath:** Woodpecker calls ironbark for each
 pipeline (a signed call — RFC-9421 ed25519 — so the identity is
 verifiable); ironbark derives conventional Vault policy names from the

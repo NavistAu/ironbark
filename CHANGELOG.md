@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-01
+
+First public release.
+
 ### Added
 
 - **M1: the broker.** ironbark's core is implemented: a Go service
@@ -20,5 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Woodpecker secrets.
 - Unit-tested and integration-tested against both Vault 1.20 and OpenBao
   2.5.5.
+- Container image `ghcr.io/navistau/ironbark` (linux/amd64 + linux/arm64,
+  distroless nonroot, SPDX SBOM, cosign keyless signature).
 
 [Unreleased]: https://github.com/navistau/ironbark/compare/main...develop
+[0.1.0]: https://github.com/navistau/ironbark/releases/tag/v0.1.0

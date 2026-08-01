@@ -139,7 +139,9 @@ jobs:
             --image-refs image-refs.txt
           echo "IMAGE_REF=$(head -n1 image-refs.txt)" >> "$GITHUB_ENV"
 
-      - uses: sigstore/cosign-installer@v4
+      # Exact tag: sigstore/cosign-installer publishes no floating major
+      # tag (no `v4`), so dependabot bumps this pin.
+      - uses: sigstore/cosign-installer@v4.1.2
 
       # Signs the digest ko just pushed (IMAGE_REF is name@sha256:...),
       # not a mutable tag.

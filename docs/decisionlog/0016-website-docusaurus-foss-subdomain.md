@@ -1,7 +1,7 @@
 ---
 id: "DEC-0016"
 title: "Website: docusaurus on GitHub Pages at ironbark.foss.navist.au"
-status: accepted
+status: superseded
 date: 2026-07-23
 y-statement: >-
   In the context of giving published ironbark implementer-grade docs in
@@ -97,6 +97,11 @@ rendered decision log.
   operator tool.
 
 ## More Information
+
+Superseded by DEC-0018 (README-first, no website at launch): the
+maintainer reopened the worth-it premise during publish execution and
+chose to concentrate documentation effort on the README and in-repo docs.
+This decision's mechanics remain the blueprint if a site is revived.
 
 Publish plan W4 (site build) and W6 (docs quality gate). Precedent:
 NavistAu/beachcomber website/ + deploy-website.yml + beachcomber.sh.

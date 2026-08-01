@@ -3,36 +3,75 @@
 [![CI](https://github.com/navistau/ironbark/actions/workflows/ci.yml/badge.svg)](https://github.com/navistau/ironbark/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/navistau/ironbark)](https://github.com/navistau/ironbark/releases)
 
-A [Woodpecker CI](https://woodpecker-ci.org) **secret extension** that federates
-pipeline identity to [HashiCorp Vault](https://developer.hashicorp.com/vault) or
-[OpenBao](https://openbao.org).
+Per-pipeline secrets for [Woodpecker CI](https://woodpecker-ci.org) from
+[HashiCorp Vault](https://developer.hashicorp.com/vault) or
+[OpenBao](https://openbao.org): each pipeline gets exactly the secrets its
+identity — repo, event, branch — is entitled to, and nothing else.
 
-Woodpecker has no pipeline OIDC/id-token, so a pipeline can't present a
-verifiable identity to a secrets manager and get short-lived credentials.
-ironbark closes that gap using the one seam Woodpecker does provide — the
-[secret extension](https://woodpecker-ci.org/docs/usage/extensions/secret-extension):
+Without something in between, connecting Woodpecker to a secrets manager
+is all-or-nothing. Woodpecker pipelines have no verifiable identity to
+present to Vault, so whatever you wire up instead — a shared Vault token,
+Kubernetes secrets mounted into the build namespace — is one pool that
+every repo's pipelines can read alike. One repo's deploy credentials are
+effectively every repo's deploy credentials.
 
-1. Woodpecker POSTs each pipeline's `{repo, pipeline}` to ironbark, signed
-   (RFC-9421 ed25519).
-2. ironbark verifies the signature, derives conventional Vault policy names
-   from the forge-set `(repo, event, branch)`, and mints a **short-lived,
-   narrowly-scoped token** via a Vault token-role — a policy set ironbark
-   does not itself hold.
-3. With that token — the pipeline's own — it sweeps the repo's conventional
-   KV subtree (`kv/ci/<org>/<repo>/…`), dereferences pointer entries into
-   dynamic engines (e.g. AWS STS), and returns the values as ordinary
-   Woodpecker secrets — **automatically masked**, `from_secret`-addressable —
-   plus the token itself for anything interactive.
+ironbark is the piece in between: a Woodpecker
+[secret extension](https://woodpecker-ci.org/docs/usage/extensions/secret-extension)
+that brokers per-identity access.
 
-ironbark is **stateless**: no rule table, no path maps. What a pipeline may
-read is decided entirely by which Vault policies and KV entries exist —
-onboarding a repo is Vault-side IaC, not broker config. And ironbark holds
-**no standing read credential**: its own Vault identity can only create
-tokens; every read happens under a per-pipeline, policy-scoped, short-TTL
-token, transiently, storing nothing.
+- **Scoped by identity.** A pull-request build of `acme/widgets` gets that
+  repo's read-only tier; a push to `main` also gets that repo's `main`
+  deploy tier; no pipeline ever sees another repo's secrets.
+- **Short-lived.** Credentials are minted per pipeline run and expire in
+  minutes — including dynamic credentials (e.g. AWS STS) resolved at
+  request time.
+- **Delivered natively.** Values arrive as ordinary Woodpecker secrets:
+  automatically masked in logs, `from_secret`-addressable, adoptable repo
+  by repo alongside Woodpecker's built-in secrets.
+- **Nothing to configure in the broker.** ironbark is stateless — no rule
+  tables, no path maps. What a pipeline may read is decided entirely by
+  which Vault policies and KV entries exist; onboarding a repo is
+  Vault-side IaC.
+
+An aside for readers who know the OIDC id-token pattern from other CI
+systems: Woodpecker has no pipeline id-tokens, but the seam it does have
+turns out *stricter*, not weaker. The identity exchange is server-to-server,
+signed, and finished before the build starts — pipeline code never holds an
+identity credential it could exfiltrate — and ironbark itself can only mint
+tokens, never read secrets, so there is no standing credential at the
+broker to steal either.
+
+**How it works, in one breath:** Woodpecker calls ironbark for each
+pipeline (a signed call — RFC-9421 ed25519 — so the identity is
+verifiable); ironbark derives conventional Vault policy names from the
+pipeline's `(repo, event, branch)`, mints a short-lived token scoped to
+exactly those policies — a policy set ironbark itself does not hold, so
+the broker can never read secrets on its own — sweeps the repo's KV
+subtree (`kv/ci/<org>/<repo>/…`) under that token, and returns the values,
+plus the token itself for anything interactive. Architecture and threat
+model: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 > Woodpecker drills wood; ironbark is the hardwood bark that decides, per peck,
 > how far in it gets.
+
+## Footguns
+
+Known sharp edges, indexed so you hit them here first, not in production:
+
+- [`WOODPECKER_EXTENSIONS_ALLOWED_HOSTS` blocks in-cluster addresses by
+  default](#deploying-pointing-woodpecker-at-ironbark) — the #1 deployment
+  footgun.
+- [ironbark down = fail-open, not
+  fail-closed](#deploying-pointing-woodpecker-at-ironbark) — Woodpecker runs
+  the pipeline anyway, on DB-only secrets.
+- [`token_ttl` on the role is a silent no-op](#token-role) — use
+  `token_explicit_max_ttl`.
+- [`$ref` is GET-only](#ref-dereference-limitation) — no PKI issuance via
+  pointer.
+- [TTL must budget queue time, not just run time](#ttl-budgeting) — and one
+  mint covers every workflow of the run.
+- [policy glob `*` crosses `/`](#tier-policies-example-acmewidgets) — scope
+  each tier's paths to its own prefix, never a shared trailing wildcard.
 
 ## Status
 
@@ -114,6 +153,16 @@ Setting up a repo (or the instance) requires Vault/OpenBao-side IaC — there
 is no broker-side config for this. Three pieces: the token role ironbark
 mints against, per-repo tier policies, and the AppRole ironbark itself logs
 in with.
+
+**Prerequisites** (once per Vault/OpenBao instance): a KV **v2** engine at
+the configured mount, and AppRole auth enabled. Neither exists by default —
+dev mode mounts kv-v2 at `secret/`, not the `kv/` this contract (and
+ironbark's `IRONBARK_KV_MOUNT` default) assumes:
+
+```
+vault secrets enable -path=kv -version=2 kv
+vault auth enable approle
+```
 
 ### Token role
 
@@ -199,10 +248,23 @@ ironbark's Vault identity must be able to mint tokens against the role
 above and nothing else — no KV read, no policy read:
 
 ```hcl
-# attached to ironbark's AppRole
+# ironbark-agent policy — the only grant ironbark's own identity holds
 path "auth/token/create/ci" {
   capabilities = ["create", "update"]
 }
+```
+
+Create the AppRole with that policy and read out the credentials that
+become `IRONBARK_VAULT_ROLE_ID` / `IRONBARK_VAULT_SECRET_ID` (AppRole auth
+must already be enabled — see prerequisites above):
+
+```
+vault policy write ironbark-agent ironbark-agent.hcl
+vault write auth/approle/role/ironbark \
+  token_policies=ironbark-agent \
+  token_type=service token_ttl=1h token_max_ttl=4h
+vault read auth/approle/role/ironbark/role-id
+vault write -f auth/approle/role/ironbark/secret-id
 ```
 
 ### KV convention (brief — see [`docs/SPEC.md` §4](docs/SPEC.md) for detail)
@@ -252,9 +314,10 @@ proactively reclaimed.
 
 ## Configuration reference
 
-A `_FILE` suffix variant of any var reads the value from a file path
-instead (for External Secrets Operator / Kubernetes secret mounts). Setting
-both a var and its `_FILE` variant is a configuration error.
+Vars marked `/ _FILE` in the table have a `_FILE` suffix variant that
+reads the value from a file path instead (for External Secrets Operator /
+Kubernetes secret mounts). Setting both a var and its `_FILE` variant is a
+configuration error.
 
 | Var | Default | Required | Notes |
 |---|---|---|---|

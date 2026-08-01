@@ -10,7 +10,10 @@
 > token itself. ironbark is stateless: no rule tables, no path maps, no
 > standing read credential.
 
-Status: design. Nothing built yet.
+Status: M1 (the broker) is implemented — see [`SPEC.md`](SPEC.md) for the
+accepted, normative interface/behavior spec. This document covers
+architecture, rationale, and threat model; where the two overlap, SPEC
+governs.
 
 Revision note: this document supersedes the 2026-07-10 token-only,
 config-table design (see git history). The changes are recorded in

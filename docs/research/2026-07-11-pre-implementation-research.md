@@ -74,7 +74,7 @@ endpoint, key rotation); per-repo Vault roles (or templating) still needed;
 the pipeline must still exchange the JWT for a token (an extra hop the
 sweep currently hides). Decision deferred until the follow-up workflow's
 token-role facts land — if `allowed_policies_glob`/nonexistent-policy
-minting behave as designed, the current shape stands (DEC-0001/0002); if
+minting behave as designed, the current shape stands (DEC-260711061322/DEC-260711061323); if
 not, the JWT route is the fallback with production precedent.
 
 ## 4. Token/lease mechanics — one hard requirement found
@@ -132,7 +132,7 @@ small `nonAssignablePolicies` blocklist (`response-wrapping`, Vault also
 request evaluation, `PolicyStore.ACL()` silently skips names with no stored
 policy; they contribute zero grants. Identical control flow in both products
 (`vault/token_store.go handleCreateCommon`; OpenBao relocated the policy code
-to `vault/policy/`). DEC-0002's "request the full conventional set
+to `vault/policy/`). DEC-260711061323's "request the full conventional set
 unconditionally" mechanism is therefore sound. Implementation note: ironbark
 should expect and swallow the per-mint warnings (or surface them in its audit
 line), not treat them as errors.
@@ -268,7 +268,7 @@ directly anyway.
 
 ## 8. Synthesis: verdict on the design
 
-The token-role minting design (DEC-0001/0002/0003) survives the full research
+The token-role minting design (DEC-260711061322/DEC-260711061323/DEC-260711061324) survives the full research
 pass intact, and the JWT-issuer alternative is **evaluated and not adopted**:
 
 - The linchpin (nonexistent policies mint clean and grant nothing) is

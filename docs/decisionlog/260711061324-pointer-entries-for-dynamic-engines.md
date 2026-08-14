@@ -1,19 +1,13 @@
 ---
-id: "DEC-0003"
+id: "DEC-260711061324"
 title: "Pointer entries dereference dynamic engines into the masked path"
 status: accepted
 date: 2026-07-11
 y-statement: >-
-  In the context of delivering dynamic engine credentials (e.g. Vault AWS STS)
-  through ironbark's masked value path, facing Vault/OpenBao having no native
-  cross-mount aliasing, we decided for a $ref pointer-entry convention in the
-  conventional KV subtree that ironbark dereferences with the pipeline's own
-  minted token, and against dynamic creds being reachable only via vault_token
-  and against baking engine paths into ironbark config, to achieve masked
-  from_secret delivery of dynamic credentials with policy still gating every
-  dereference, accepting that created leases parent to the minted token (no
-  revoke-after-fetch; TTL must cover pipeline runtime) and that credentials
-  are generated eagerly on every pipeline.
+  In the context of dynamic engine credentials in ironbark's masked path, facing
+  Vault's lack of cross-mount aliasing, we decided for $ref pointer entries
+  dereferenced with the pipeline's token, against vault_token-only access and
+  baked-in engine paths, to achieve masked, policy-gated delivery.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["convention", "dynamic-secrets", "kv"]
 supersedes: []
@@ -23,18 +17,18 @@ supersedes: []
 
 ## Context and Problem Statement
 
-The KV sweep (DEC-0001/0002) only reaches the conventional KV subtree.
+The KV sweep (DEC-260711061322/DEC-260711061323) only reaches the conventional KV subtree.
 Dynamic engine credentials — AWS STS via the Vault AWS secrets engine being
 the motivating case — live on other mounts, and Vault/OpenBao have no
 symlink/alias mechanism to surface them under KV. Without something extra,
 dynamic creds are only reachable via the returned `vault_token`, i.e.
-unmasked curl territory — the exact ergonomics DEC-0001 exists to avoid.
+unmasked curl territory — the exact ergonomics DEC-260711061322 exists to avoid.
 
 ## Decision Drivers
 
 * Dynamic creds are the highest-value secrets (ephemeral, auto-expiring) and
   deserve the masked path most.
-* Statelessness (DEC-0002): the indirection must live in Vault, not ironbark
+* Statelessness (DEC-260711061323): the indirection must live in Vault, not ironbark
   config.
 * Authority must stay with Vault policy: an indirection must not be able to
   grant anything the pipeline's policy does not already allow.
@@ -82,7 +76,7 @@ therefore cannot escalate beyond the policy.
 ### Engine paths in ironbark config
 
 * Good, because explicit.
-* Bad, because reintroduces the path map DEC-0002 just removed.
+* Bad, because reintroduces the path map DEC-260711061323 just removed.
 
 ### $ref pointer entries
 
@@ -91,5 +85,5 @@ therefore cannot escalate beyond the policy.
 
 ## More Information
 
-"Who doesn't love a good pointer." Builds on DEC-0001/0002. Lease/TTL
+"Who doesn't love a good pointer." Builds on DEC-260711061322/DEC-260711061323. Lease/TTL
 interaction is documented as an honest limit in DESIGN.md.

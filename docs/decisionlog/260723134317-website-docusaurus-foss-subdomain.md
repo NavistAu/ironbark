@@ -1,21 +1,13 @@
 ---
-id: "DEC-0016"
+id: "DEC-260723134317"
 title: "Website: docusaurus on GitHub Pages at ironbark.foss.navist.au"
 status: superseded
 date: 2026-07-23
 y-statement: >-
-  In the context of giving published ironbark implementer-grade docs in
-  all forms, facing the constraint of not buying a domain and the org's
-  existing beachcomber docusaurus/GitHub Pages setup, we decided for a
-  docusaurus site reusing the beachcomber scaffold, deployed to GitHub
-  Pages under ironbark.foss.navist.au (CNAME to navistau.github.io on
-  DNS the maintainer already controls, establishing a reusable
-  *.foss.navist.au namespace for future FOSS tools) and against a
-  purchased apex domain, a bare navistau.github.io/ironbark path, or the
-  shorter ironbark.navist.au, to achieve a zero-cost branded docs home
-  consistent with the org's tooling, accepting docusaurus maintenance and
-  that the site re-projects existing docs rather than being a launch
-  blocker.
+  In the context of implementer-grade docs for published ironbark, facing a no-
+  purchased-domain constraint, we decided for a docusaurus site on GitHub Pages
+  under a reusable foss.navist.au subdomain, against a purchased apex domain or
+  bare GitHub Pages path, accepting maintenance cost.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["publishing", "documentation", "website"]
 supersedes: []
@@ -98,7 +90,7 @@ rendered decision log.
 
 ## More Information
 
-Superseded by DEC-0018 (README-first, no website at launch): the
+Superseded by DEC-260801002907 (README-first, no website at launch): the
 maintainer reopened the worth-it premise during publish execution and
 chose to concentrate documentation effort on the README and in-repo docs.
 This decision's mechanics remain the blueprint if a site is revived.

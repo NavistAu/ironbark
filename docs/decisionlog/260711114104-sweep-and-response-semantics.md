@@ -1,20 +1,13 @@
 ---
-id: "DEC-0009"
+id: "DEC-260711114104"
 title: "Sweep and response semantics: independent tiers, specific-wins, string-only"
 status: accepted
 date: 2026-07-11
 y-statement: >-
-  In the context of returning masked secrets from the conventional KV
-  subtree, facing tier isolation via 403s, name collisions, non-string
-  values, and empty results, we decided for independent per-tier LISTs
-  swept most-specific-first with first-writer-wins collisions, dot-entries
-  excluded at every level, string-only values, three entry forms
-  (shorthand, general E_f flattening, single-level $ref dereference), and
-  204-with-revoke for un-onboarded/mismatch/empty-suppressed outcomes with
-  vault_addr excluded from the emptiness decision, and against
-  discovery-based descent, value coercion, and dereference chains, to
-  achieve least-privilege-tolerant, deterministic, Woodpecker-decodable
-  responses, accepting a fixed three-level depth limit in v1.
+  In the context of returning masked secrets from the KV subtree, facing tier
+  isolation via 403s, we decided for independent per-tier sweeps, most-specific-
+  wins, string-only values, against discovery-based descent and value coercion,
+  to achieve deterministic least-privilege-tolerant responses.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["convention", "sweep", "spec-acceptance"]
 supersedes: []

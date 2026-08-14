@@ -1,19 +1,13 @@
 ---
-id: "DEC-0012"
+id: "DEC-260723134042"
 title: "Branch/release model: develop→main gate, VERSION file, SemVer from v0.1.0"
 status: accepted
 date: 2026-07-23
 y-statement: >-
-  In the context of ironbark's public release process, facing a choice
-  between a lightweight tag-driven flow and the develop→main release-gate
-  model already used by the org's other published tool (beachcomber), we
-  decided for the beachcomber model — develop as default/integration
-  branch, protected main as release branch, releases promoted by a
-  develop→main PR whose merge triggers release.yml, which reads a root
-  VERSION file and tags vX.Y.Z in-run — and against tag-driven releases,
-  to achieve cross-project consistency and a CI-enforced release gate,
-  accepting more ceremony than a single-maintainer trunk flow strictly
-  needs; versioning is SemVer with v0.1.0 as the first public release.
+  In the context of ironbark's public release process, facing tag-driven
+  releases versus the org's proven develop-main gate, we decided for the
+  develop-main gate with a VERSION file and SemVer from v0.1.0, against tag-
+  driven releases, to achieve cross-project consistency.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["publishing", "release-process", "versioning"]
 supersedes: []
@@ -23,7 +17,7 @@ supersedes: []
 
 ## Context and Problem Statement
 
-ironbark is moving to a public GitHub home (DEC-0011) and needs a release
+ironbark is moving to a public GitHub home (DEC-260723134041) and needs a release
 process. The publish plan initially recommended tag-driven releases as
 lighter ceremony for a single-maintainer repo; the maintainer preferred
 consistency with beachcomber's proven develop→main model. Go adds one
@@ -81,6 +75,6 @@ operator contract is specified but young, and pre-1.0 signals it.
 
 ## More Information
 
-DEC-0011 (publish home), DEC-0013 (what the release publishes). Process
+DEC-260723134041 (publish home), DEC-260723134043 (what the release publishes). Process
 detail lives in docs/plans/2026-07-23-publish.md (W3) and, once written,
 docs/releasing.md. Mirrors NavistAu/beachcomber's release.yml gate design.

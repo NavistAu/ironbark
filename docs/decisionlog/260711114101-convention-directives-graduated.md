@@ -1,20 +1,14 @@
 ---
-id: "DEC-0006"
+id: "DEC-260711114101"
 title: "Convention directives: .identity binding, .config, custom_metadata pins"
 status: accepted
 date: 2026-07-11
 y-statement: >-
-  In the context of ironbark's stateless KV convention, facing the
-  repo-rename inheritance hole, per-repo opt-outs, and per-secret
-  event/image pinning without broker config, we decided for reserved
-  dot-entry directives (.identity forge-ID binding with fail-closed
-  malformation handling; .config flat string-map directives) plus KV v2
-  custom_metadata keys (ironbark_images, ironbark_events), and against
-  broker-side configuration and yaml-declared metadata (the extension
-  protocol has no channel for it), to achieve Vault-resident,
-  IaC-writable control data consistent with DEC-0002, accepting extra
-  reads per pipeline and fail-closed 502/204 outcomes on malformed
-  directives.
+  In ironbark's stateless KV convention, facing the repo-rename inheritance hole
+  and lost per-secret pinning, we decided for dot-entry directives (.identity,
+  .config) plus custom_metadata pins, against broker-side configuration, to
+  achieve Vault-resident control data, accepting extra reads and fail-closed
+  malformation handling.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["convention", "kv", "spec-acceptance"]
 supersedes: []
@@ -28,14 +22,14 @@ Three mechanisms were proposed in DESIGN.md §5 (2026-07-11) and marked
 pending: a forge-remote-ID binding to close the repo-rename/recreate
 inheritance hole; a per-repo directive entry for opt-outs (notably
 suppressing `vault_token`); and per-secret `events`/`images` pins that
-lost their home when the config table was deleted (DEC-0002). Research
+lost their home when the config table was deleted (DEC-260711061323). Research
 confirmed their preconditions (`forge_remote_id` present in the payload;
 custom_metadata supported), and SPEC.md §4.4–§4.6 specified them with
 fail-closed semantics that survived four adversarial review cycles.
 
 ## Decision Drivers
 
-* Statelessness (DEC-0002): control data must live in Vault, not broker
+* Statelessness (DEC-260711061323): control data must live in Vault, not broker
   config.
 * Repo rename/recreate inheritance is a real threat-table row.
 * A broken directive must never silently degrade (review finding C1).
@@ -74,7 +68,7 @@ never returned as secrets at any level.
 ### Broker-side configuration
 
 * Good, because fewer Vault reads.
-* Bad, because reintroduces the config table DEC-0002 deleted.
+* Bad, because reintroduces the config table DEC-260711061323 deleted.
 
 ### No mechanism
 

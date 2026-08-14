@@ -1,19 +1,13 @@
 ---
-id: "DEC-0011"
+id: "DEC-260723134041"
 title: "Publish home: GitHub NavistAu/ironbark, canonical, private-first flip"
 status: accepted
 date: 2026-07-23
 y-statement: >-
-  In the context of publishing ironbark as an open-source project, facing
-  the need for public contribution workflows, CI a stranger can trust, and
-  continuity of the authors' existing internal deployment, we decided for
-  github.com/NavistAu/ironbark as the canonical repository — created
-  private, brought to green CI and docs quality, then flipped public —
-  with the authors' internal forge consuming it as a pull mirror, and
-  against making the internal forge canonical with a push mirror to
-  GitHub, to achieve first-class public PRs and issues alongside an
-  unchanged internal deployment pipeline, accepting that the repository
-  home moves and contributors interact only via GitHub.
+  In the context of publishing ironbark, facing the need for public contribution
+  workflows and trustworthy CI, we decided for GitHub as canonical, private then
+  flipped public, internal forge pull-mirroring it, against making the forge
+  canonical with a push mirror.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["publishing", "repository", "process"]
 supersedes: []
@@ -80,5 +74,5 @@ passes. The authors' forge becomes a pull mirror consuming GitHub.
 ## More Information
 
 Publish plan: docs/plans/2026-07-23-publish.md (W2 covers the private
-repo bring-up and pre-flight gate). Related: DEC-0012 (release model on
-the new home), DEC-0014 (content genericization gating the public flip).
+repo bring-up and pre-flight gate). Related: DEC-260723134042 (release model on
+the new home), DEC-260723134044 (content genericization gating the public flip).

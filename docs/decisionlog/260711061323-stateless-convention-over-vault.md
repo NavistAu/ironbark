@@ -1,18 +1,13 @@
 ---
-id: "DEC-0002"
+id: "DEC-260711061323"
 title: "Stateless broker: convention over Vault, no configuration tables"
 status: accepted
 date: 2026-07-11
 y-statement: >-
-  In the context of ironbark's policy model, facing config drift and a second
-  source of authority if ironbark carries its own rule table and path maps,
-  we decided for a fully stateless broker that derives policy names and KV
-  paths from the signed payload by fixed convention with Vault-side data
-  determining what exists, and against an ironbark-side rule table and against
-  yaml-declared fetch lists, to achieve a single source of authority in
-  Vault/OpenBao and repo onboarding that touches only Vault, accepting that
-  the Vault tree must match convention exactly and misconfiguration tooling
-  becomes necessary (DEC-0004).
+  In ironbark's policy model, facing config drift from a broker-side rule table,
+  we decided for a stateless broker deriving names from convention, against a
+  rule table and yaml-declared fetch lists, to achieve single-authority
+  onboarding, accepting the tree must match convention.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["architecture", "policy-model", "statelessness"]
 supersedes: []
@@ -24,7 +19,7 @@ supersedes: []
 
 The original design gave ironbark a declarative rule table mapping
 `(repo, branch, event)` to token-roles, policies, and TTLs. Adding value
-return (DEC-0001) would have grown that into per-repo fetch lists too — a
+return (DEC-260711061322) would have grown that into per-repo fetch lists too — a
 partial policy engine, explicitly a non-goal. The user requirement: ironbark
 holds no rule tables or path maps. A constraint shapes the solution: the
 secret-extension request carries only `{repo, pipeline}` (forge-set
@@ -70,7 +65,7 @@ the convention templates.
 * Good, because there is no state to back up, replicate, or drift.
 * Bad, because correct operation depends on the Vault tree matching
   convention exactly; typo'd policy names fail silently and over-wide globs
-  fail open — motivating DEC-0004.
+  fail open — motivating DEC-260711061325.
 * Bad, because the KV path layout must mirror the policy convention
   (event/branch tiers in the path) or the sweep breaks tiering.
 * Bad, because path/policy-name encoding of attacker-chosen branch names
@@ -99,7 +94,7 @@ the convention templates.
 
 ## More Information
 
-Builds on DEC-0001. The misconfiguration failure modes drive DEC-0004
+Builds on DEC-260711061322. The misconfiguration failure modes drive DEC-260711061325
 (IaC module + doctor). Working choice: one glob token-role (`ci`) for M1;
 per-repo roles stamped by the IaC module remain a hardening option for a
 stronger per-repo backstop.

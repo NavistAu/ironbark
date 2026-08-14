@@ -1,39 +1,30 @@
 ---
-id: "DEC-0017"
+id: "DEC-260723140246"
 title: "Release artifacts: Go module + GHCR image only, signed, with SBOM"
 status: accepted
 date: 2026-07-23
 y-statement: >-
-  In the context of what a public ironbark release ships, facing the
-  discovery that the maintainer's legacy Docker Hub org is slugged
-  navistautomatum and cannot be renamed to navistau while a new org would
-  hit current Docker Hub org pricing, we decided for exactly two release
-  artifacts — the tagged Go module (github.com/navistau/ironbark) and a
-  multi-arch ghcr.io/navistau/ironbark image built with ko on the
-  distroless nonroot base, cosign-signed keylessly with SPDX SBOMs,
-  pushed with the workflow's own GITHUB_TOKEN — and against Docker Hub
-  under a mismatched or paid org name, prebuilt binaries, OS packages,
-  and a Helm chart, to achieve a minimal, zero-cost, zero-external-secret
-  artifact surface with signed provenance, accepting the full ghcr.io
-  pull path in docs and a one-time make-package-public step at first
-  release.
+  In the context of what a public release ships, facing an unrenameable legacy
+  Docker Hub org and paid pricing for a new one, we decided for GHCR as sole
+  registry, against Docker Hub's mismatched namespace, accepting a make-public
+  step.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["publishing", "artifacts", "supply-chain"]
-supersedes: ["DEC-0013"]
+supersedes: ["DEC-260723134043"]
 ---
 
 # Release artifacts: Go module + GHCR image only, signed, with SBOM
 
 ## Context and Problem Statement
 
-DEC-0013 chose Docker Hub (`docker.io/navistau/ironbark`) pending org
+DEC-260723134043 chose Docker Hub (`docker.io/navistau/ironbark`) pending org
 registration, with GHCR named as the fallback if registration proved
 unacceptable. It did: the maintainer's existing pre-pricing-change Docker
 Hub org has the slug `navistautomatum`, Docker Hub does not allow renaming
 it to `navistau`, and creating a fresh `navistau` org falls under current
 org pricing. The namespace mismatch with the GitHub org (and the cost)
 triggers the fallback. The artifact set itself (module + image, no
-binaries) is unchanged from DEC-0013.
+binaries) is unchanged from DEC-260723134043.
 
 ## Decision Drivers
 
@@ -101,7 +92,7 @@ check; all documented pull commands use the full `ghcr.io/` path.
 
 ## More Information
 
-Supersedes DEC-0013 (Docker Hub as primary registry; its artifact set,
+Supersedes DEC-260723134043 (Docker Hub as primary registry; its artifact set,
 signing, and SBOM requirements carry over unchanged). See publish plan
-docs/plans/2026-07-23-publish.md D6/W3, and DEC-0012 for the release.yml
+docs/plans/2026-07-23-publish.md D6/W3, and DEC-260723134042 for the release.yml
 that produces these artifacts.

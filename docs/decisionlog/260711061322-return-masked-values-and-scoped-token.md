@@ -1,18 +1,13 @@
 ---
-id: "DEC-0001"
+id: "DEC-260711061322"
 title: "Return masked secret values and a scoped token, not a token alone"
 status: accepted
 date: 2026-07-11
 y-statement: >-
-  In the context of ironbark's secret-extension response, facing loss of
-  Woodpecker's automatic log masking and curl-based pipeline ergonomics under
-  a token-only response, we decided for sweeping the pipeline's conventional
-  Vault KV subtree with the freshly-minted scoped token and returning the
-  values as masked Woodpecker secrets alongside the token, and against a
-  token-only response and against a broker holding a standing read credential,
-  to achieve full masking and from_secret ergonomics with no standing read
-  capability anywhere, accepting that secret values transit ironbark's memory
-  transiently and that every pipeline triggers reads of its subtree.
+  In the context of ironbark's extension response, facing lost log masking under
+  token-only, we decided for masked values plus the scoped token, against token-
+  only and a standing-credential broker, to achieve full masking with no
+  standing credential, accepting transient value exposure.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["security-model", "extension-response"]
 supersedes: []
@@ -67,7 +62,7 @@ interactive uses (mid-run renewals, transit, off-convention paths).
 * Good, because the security posture is unchanged against an active attacker
   and improved in honesty of description.
 * Good, because dynamic-engine credentials can also flow through the masked
-  path (see DEC-0003).
+  path (see DEC-260711061324).
 * Bad, because values transit ironbark's memory transiently each pipeline
   (accepted: nothing at rest, nothing logged).
 * Bad, because every pipeline reads its whole visible subtree even if unused
@@ -100,5 +95,5 @@ interactive uses (mid-run renewals, transit, off-convention paths).
 
 Supersedes the "What the extension returns: a token" row of the 2026-07-10
 DESIGN.md decisions table (pre-dates this decision log; see git history).
-See DEC-0002 (statelessness) and DEC-0003 (pointer entries), which build on
+See DEC-260711061323 (statelessness) and DEC-260711061324 (pointer entries), which build on
 this response shape.

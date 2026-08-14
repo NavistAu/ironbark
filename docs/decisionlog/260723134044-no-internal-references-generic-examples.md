@@ -1,21 +1,13 @@
 ---
-id: "DEC-0014"
+id: "DEC-260723134044"
 title: "No internal-infrastructure references; generic exemplars; parameterized Woodpecker example"
 status: accepted
 date: 2026-07-23
 y-statement: >-
-  In the context of publishing a repository developed against the authors'
-  private infrastructure, facing docs, CI config, and test fixtures that
-  name internal hostnames, registries, and personal repositories as worked
-  examples, we decided for a full genericization sweep — every published
-  file uses generic exemplar identifiers, the retained .woodpecker.yaml
-  becomes an example pipeline whose publish step takes registry host,
-  repository, and credentials entirely from Woodpecker secrets, and a
-  mechanical zero-hit grep gate blocks the public flip — and against
-  scoping the scrub to a single document or deleting the Woodpecker file,
-  to achieve published content with no internal references that still
-  dogfoods a runnable Woodpecker pipeline, accepting churn in test
-  fixtures and historical docs.
+  In the context of publishing a repo built against private infrastructure,
+  facing docs and CI naming internal hosts, we decided for a genericization
+  sweep with a parameterized Woodpecker example and a grep gate, against
+  scrubbing one document, accepting fixture churn.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["publishing", "documentation", "hygiene"]
 supersedes: []
@@ -99,6 +91,6 @@ Whether pre-publish *history* is also scrubbed is a separate open decision
 
 ## More Information
 
-DEC-0011 (private-first flip this gates), publish plan
+DEC-260723134041 (private-first flip this gates), publish plan
 docs/plans/2026-07-23-publish.md (W1.2 lists known sites; the grep gate is
 in the pre-flight checklist). History scrub question tracked as plan D2.

@@ -1,22 +1,13 @@
 ---
-id: "DEC-0008"
+id: "DEC-260711114103"
 title: "Identity encoding: branch case preserved injectively; event-tier mapping"
 status: accepted
 date: 2026-07-11
 y-statement: >-
-  In the context of deriving policy names and KV paths from forge-set
-  identity, facing attacker-chosen branch names (case variants,
-  delimiters, path-special strings) and unverified branch fields on some
-  events, we decided for lowercasing org/repo/event while preserving
-  branch bytes through injective percent-encoding (uppercase and leading
-  dots encoded; output lowercase, single-segment, never dot-prefixed),
-  with branchful tiers only for push/pull_request/pull_request_closed/
-  release/cron and event-tier-only handling for manual/deployment/tag and
-  unknown events, and against case-folding branch names and against
-  rejecting unknown events, to achieve escalation-proof injective naming
-  aligned with Vault's policy lowercasing and Woodpecker's secret
-  matching, accepting that case-colliding repo names remain an
-  operator-flagged concern and unknown events get only coarse tiers.
+  In the context of deriving policy names from forge identity, facing attacker-
+  chosen branch names and Vault's lowercasing, we decided for case-preserving
+  injective percent-encoding of branches, against folding branch case and
+  rejecting unusual names, to achieve escalation-proof naming.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["convention", "encoding", "security-model", "spec-acceptance"]
 supersedes: []

@@ -1,22 +1,13 @@
 ---
-id: "DEC-0007"
+id: "DEC-260711114102"
 title: "Minted-token lifecycle: orphan non-renewable service tokens, canary-gated"
 status: accepted
 date: 2026-07-11
 y-statement: >-
-  In the context of the per-pipeline tokens ironbark mints, facing lease
-  parenting, revocation needs, renewal escape, and silent role
-  misconfiguration, we decided for orphan non-renewable service tokens
-  minted against a role contract (token_type=service forced,
-  renewable=false, token_no_default_policy=false, glob covering the
-  convention) enforced at runtime by a startup canary that hard-gates
-  minting plus a per-mint token_type assertion, with revocation by
-  outcome (every non-200 revokes via revoke-self, cascading leases; a 200
-  never revokes), and against batch tokens, renewable tokens, num_uses
-  caps, and role-read preflight, to achieve TTL as the single absolute
-  lifetime bound and fail-closed behavior on misconfiguration without
-  widening ironbark's create-only Vault footprint, accepting that
-  operators must configure the role exactly as documented.
+  In the context of ironbark's minted per-pipeline tokens, facing lease-
+  parenting and renewal-escape risk, we decided for orphan non-renewable service
+  tokens under a canary-gated role contract, against batch tokens and role-read
+  preflight, to achieve TTL as the sole lifetime bound.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["security-model", "vault", "spec-acceptance"]
 supersedes: []
@@ -38,7 +29,7 @@ and renewal behavior needed pinning.
 ## Decision Drivers
 
 * Pipeline STS lease lifetime must bind to the pipeline token, not
-  ironbark's AppRole session (DEC-0003).
+  ironbark's AppRole session (DEC-260711061324).
 * "Leaked token dies in minutes" must be literally true — no renewal
   escape, no unbounded lifetime.
 * ironbark's Vault identity stays create-only; no role-read permission.

@@ -17,7 +17,9 @@ governs.
 
 Revision note: this document supersedes the 2026-07-10 token-only,
 config-table design (see git history). The changes are recorded in
-[`docs/decisionlog/`](decisionlog/) as DEC-0001 … DEC-0005.
+[`docs/decisionlog/`](decisionlog/) as DEC-260711061322 … DEC-260711061325
+(a fifth item from that batch, the custom Vault auth-method plugin, is
+recorded as a research note below rather than as a decision).
 
 ## 1. Why this exists
 
@@ -46,7 +48,7 @@ per-peck basis, exactly how far in the woodpecker gets.
 
 Two decisions define the shape:
 
-**It returns masked values *and* a scoped token** (DEC-0001). Woodpecker's
+**It returns masked values *and* a scoped token** (DEC-260711061322). Woodpecker's
 extension-returned secrets are native secrets — automatically masked in logs,
 addressable via `from_secret`, pinnable per-secret to events and images. So
 ironbark mints the pipeline's token, then *uses that token itself* to read the
@@ -56,7 +58,7 @@ interactive uses. No standing read credential exists anywhere: ironbark's own
 Vault identity can only create tokens; every read happens under a
 per-pipeline, policy-scoped, short-TTL token.
 
-**It is stateless** (DEC-0002). No rule table, no path maps. Everything is
+**It is stateless** (DEC-260711061323). No rule table, no path maps. Everything is
 derived from the signed payload by fixed convention; *which* policies and
 secrets exist is Vault-side data. Onboarding a repo touches only Vault.
 (A constraint forces this shape: the extension request carries only
@@ -93,7 +95,7 @@ location is the only stateless way to know what to fetch.)
 5. **Sweep** the conventional KV v2 subtree `kv/ci/<org>/<repo>/…` with the
    minted token (§5), tolerating partial denials — the 403s *are* the tiering
    mechanism.
-6. **Dereference pointer entries** (`$ref`, DEC-0003) with the same token;
+6. **Dereference pointer entries** (`$ref`, DEC-260711061324) with the same token;
    policy gates every deref; denied pointers are skipped.
 7. **Respond** with each value as a Woodpecker secret (masked), events pinned
    to the minting event, plus `vault_token`.
@@ -136,7 +138,7 @@ design actually buys, versus a broker with a standing read credential:
   expire in minutes.
 
 These are hardening and auditability properties, not a categorical boundary;
-the design accepts that trade openly (DEC-0001).
+the design accepts that trade openly (DEC-260711061322).
 
 ### Threat table
 
@@ -232,7 +234,7 @@ Tolerate 403/404 at every level (partial visibility is the mechanism —
 never fail the response on a denied subtree). Entries whose name begins with
 `.` are ironbark directives, never returned as secrets.
 
-**Pointer entries** (DEC-0003) — an entry valued
+**Pointer entries** (DEC-260711061324) — an entry valued
 `{"$ref": "aws/creds/widgets-deploy"}` is dereferenced with the minted token;
 multi-field results flatten as `<entry>_<field>`.
 
@@ -240,7 +242,7 @@ multi-field results flatten as `<entry>_<field>`.
 attacker-chosen strings containing `-` and `/`; naive concatenation lets
 `(repo=a, branch=b-x)` collide with `(repo=a-b, branch=x)` constructions.
 Fixed field order plus a reversible escape (percent-encoding the branch into
-a single path segment is the working candidate) — and the DEC-0004 IaC module
+a single path segment is the working candidate) — and the DEC-260711061325 IaC module
 generates all names, so humans never hand-write them. `/` itself is legal in
 policy names (route regex `.+`, both products) but `/`-named policies do not
 appear in a flat `LIST sys/policies/acl` — a doctor concern, not a blocker.
@@ -275,7 +277,7 @@ requested policy outside `allowed_policies_glob` errors the mint outright
 (research §7.6) — the glob (e.g. `ci/*`) is load-bearing for availability.
 Doctor check: convention templates ⊆ role glob.
 
-**Accepted 2026-07-11 (DEC-0006; specified in SPEC.md §4.4–§4.6):**
+**Accepted 2026-07-11 (DEC-260711114101; specified in SPEC.md §4.4–§4.6):**
 
 - **Per-secret pins via KV v2 `custom_metadata`** — e.g.
   `images: registry.example.com/infra/toolbox` on an entry becomes the returned
@@ -318,9 +320,9 @@ freshness window pending the replay investigation, §13).
 
 - Not a secrets store. Vault/OpenBao is the store; ironbark is a federation
   seam.
-- Not a policy engine — ironbark carries no rules at all (DEC-0002); Vault
+- Not a policy engine — ironbark carries no rules at all (DEC-260711061323); Vault
   enforces the ACLs and the convention names them.
-- No GUI (DEC-0004). IaC is a form of UI; UI is not GUI. The control surface
+- No GUI (DEC-260711061325). IaC is a form of UI; UI is not GUI. The control surface
   is the Terraform/OpenTofu module plus `ironbark doctor`.
 - Not multi-CI in v1. Woodpecker-first. (Drone protocol kinship noted, not
   promised.)
@@ -371,7 +373,7 @@ OpenBao (containerized), with a fake-Woodpecker signing harness. Encoding
 and naming conventions locked by end of M1 iteration (expected to evolve
 during build — accepted 2026-07-11).
 
-**M2 — the control surface** (DEC-0004). Generic `ironbark-repo`
+**M2 — the control surface** (DEC-260711061325). Generic `ironbark-repo`
 Terraform/OpenTofu module (policies, KV skeleton, pointer entries,
 `.identity` binding) shipping in this repo; `ironbark doctor` read-only
 convention lint (separate admin-ish credential at invocation).
@@ -382,16 +384,15 @@ Current decisions live in [`docs/decisionlog/`](decisionlog/) (MADR):
 
 | ID | Decision |
 |---|---|
-| DEC-0001 | Return masked values (KV sweep under the minted token) *plus* the scoped token — supersedes the token-only response |
-| DEC-0002 | Stateless: convention over Vault; no rule tables or path maps; yaml-declared fetch lists are protocol-impossible |
-| DEC-0003 | `$ref` pointer entries dereference dynamic engines into the masked path |
-| DEC-0004 | Control surface = IaC module + `ironbark doctor`; no GUI |
-| DEC-0005 | Custom Vault auth-method plugin: research note only, with revisit trigger |
-| DEC-0006 | Convention directives graduated: `.identity`, `.config`, custom_metadata pins |
-| DEC-0007 | Minted-token lifecycle: orphan non-renewable service tokens, canary-gated |
-| DEC-0008 | Identity encoding: branch case preserved injectively; event-tier mapping |
-| DEC-0009 | Sweep/response semantics: independent tiers, specific-wins, string-only |
-| DEC-0010 | M1 runtime surface: 10s freshness, env-only config, dual audit shapes |
+| DEC-260711061322 | Return masked values (KV sweep under the minted token) *plus* the scoped token — supersedes the token-only response |
+| DEC-260711061323 | Stateless: convention over Vault; no rule tables or path maps; yaml-declared fetch lists are protocol-impossible |
+| DEC-260711061324 | `$ref` pointer entries dereference dynamic engines into the masked path |
+| DEC-260711061325 | Control surface = IaC module + `ironbark doctor`; no GUI |
+| DEC-260711114101 | Convention directives graduated: `.identity`, `.config`, custom_metadata pins |
+| DEC-260711114102 | Minted-token lifecycle: orphan non-renewable service tokens, canary-gated |
+| DEC-260711114103 | Identity encoding: branch case preserved injectively; event-tier mapping |
+| DEC-260711114104 | Sweep/response semantics: independent tiers, specific-wins, string-only |
+| DEC-260711114105 | M1 runtime surface: 10s freshness, env-only config, dual audit shapes |
 
 Earlier decisions still standing from the 2026-07-10 revision: Go
 implementation (fork `woodpecker-ci/example-extensions` for the transport
@@ -400,15 +401,19 @@ AppRole via ESO for ironbark's own auth; Woodpecker-first scope; AGPL-3.0.
 
 ## 12. Research notes
 
-**Custom Vault auth-method plugin** (DEC-0005). ironbark forwards the
+**Custom Vault auth-method plugin.** ironbark forwards the
 Woodpecker-signed request into Vault; a plugin verifies the ed25519 signature
 inside Vault's trust boundary and issues the token natively. Buys: a
 cryptographic chain from Woodpecker's signing key into Vault's audit log;
 structured route config instead of convention-encoded policy names. Costs:
 binary plugin build/registration version-matched against both Vault and
 OpenBao (plugin APIs drifting apart post-fork); managed Vault offerings
-disallow custom plugins; sharply narrows adoption of a published tool.
-**Revisit trigger:** the convention encoding proves too brittle in practice.
+disallow custom plugins; sharply narrows adoption of a published tool. Not
+roadmapped: stock-Vault/OpenBao compatibility stays intact, at the cost of a
+weaker audit chain meanwhile — Vault's audit log records ironbark's mint,
+not Woodpecker's signature; that trust is attested only in ironbark's own
+logs. **Revisit trigger:** the convention encoding proves too brittle in
+practice.
 
 **JWT-issuer alternative — evaluated 2026-07-11, not adopted** (research
 §3/§7.7/§8). ironbark as an OIDC/JWT issuer consumed by Vault's `jwt` auth
@@ -489,4 +494,4 @@ Still open:
   which.
 
 (The former §5 proposals — `custom_metadata` pins, `.identity` binding,
-`.config` directives — were accepted 2026-07-11 as DEC-0006.)
+`.config` directives — were accepted 2026-07-11 as DEC-260711114101.)

@@ -1,19 +1,13 @@
 ---
-id: "DEC-0015"
+id: "DEC-260723134316"
 title: "Publish full git history rewritten with filter-repo to remove internal references"
 status: accepted
 date: 2026-07-23
 y-statement: >-
-  In the context of taking ironbark's repository public with a
-  no-internal-references guarantee (DEC-0014), facing a 34-commit history
-  whose old file versions and commit messages name internal hostnames and
-  personal repositories, we decided for a git filter-repo rewrite of the
-  full history — --replace-text for blob contents and --replace-message
-  for commit messages, run on a fresh clone before the first push to
-  GitHub — and against publishing history as-is or squashing to a fresh
-  initial commit, to achieve commit-level provenance with zero internal
-  strings anywhere including history, accepting that every commit hash
-  changes and the pre-rewrite repo survives only as an internal archive.
+  In the context of taking ironbark's repo public, facing history whose old file
+  versions and messages name internal infrastructure, we decided for a filter-
+  repo rewrite before the first push, against publishing history as-is or
+  squashing fresh, accepting hash churn.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["publishing", "git", "hygiene"]
 supersedes: []
@@ -23,7 +17,7 @@ supersedes: []
 
 ## Context and Problem Statement
 
-DEC-0014 guarantees no internal-infrastructure references in published
+DEC-260723134044 guarantees no internal-infrastructure references in published
 content, and the genericization sweep cleans HEAD — but git history
 retains every old file version, and several commit messages name the
 internal registry. The references are audited-benign (worked examples, no
@@ -92,5 +86,5 @@ case-insensitive grep for the internal identifiers over
 
 ## More Information
 
-DEC-0014 (the reference policy this extends to history), DEC-0011 (the
+DEC-260723134044 (the reference policy this extends to history), DEC-260723134041 (the
 private-first flip this precedes), publish plan W2.1 and pre-flight gate.

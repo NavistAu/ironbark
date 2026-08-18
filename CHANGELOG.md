@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `$ref` pointer dereference (SPEC §4.3) now recognizes KV v2-shaped
+  targets — KV v2 itself, or a KV v2-wire-compatible view — by response
+  shape (a nested `data`+`metadata` object pairing), and unwraps them to
+  apply the same single-field-shorthand/general-form classification as a
+  swept entry. Flat dynamic-engine deref targets (`aws/sts/*` etc.) are
+  unaffected — unchanged, general-form-only flattening.
+
 ## [0.1.0] - 2026-08-01
 
 First public release.

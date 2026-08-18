@@ -6,7 +6,10 @@
 # unmodified on any Woodpecker instance that supplies them.
 
 when:
-  - event: [push, pull_request]
+  # `manual` admitted deliberately: the estate forge copy is a pull
+  # mirror whose sync does not always fire a push webhook, so operator-
+  # triggered API pipelines are the fallback build path (2026-08-19).
+  - event: [push, pull_request, manual]
 
 steps:
   vet:
@@ -61,4 +64,4 @@ steps:
       - cat /tmp/image-ref.txt
     when:
       - branch: main
-        event: push
+        event: [push, manual]

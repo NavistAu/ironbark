@@ -340,6 +340,22 @@ the service-token cascade cleans up any leases earlier derefs created
 followed exactly one level — a deref result is never re-examined for
 `$ref` (no chains, no cycles).
 
+**KV v2-shaped deref targets.** A `$ref` may point at a target whose
+response is itself KV v2 wire-shaped — KV v2 read directly, or a
+KV v2-wire-compatible view (e.g. a voidstar view: `vs/data/...`) — rather
+than a flat dynamic-engine response (`aws/sts/*` etc.). Detection is
+shape-based, never path-based: the response's `.data` is treated as KV
+v2-shaped only when it contains BOTH a nested `data` object AND a
+`metadata` object (mirroring the envelope §4.1's own KV v2 data-GET
+already unwraps). Only then is it unwrapped to the inner field map and
+classified exactly like a swept entry (§4.2: single `{"value": v}` →
+secret named `E` alone; otherwise general form, `E_f`) — pointer-form
+(`$ref`) classification is never applied to a deref result, preserving
+the no-chain rule above. A flat response — including one that happens to
+carry a field literally named `data` or `metadata` without the paired
+object shape — is unaffected and keeps flattening unconditionally as
+`E_f`, byte-identical to prior behavior.
+
 **Limitation — GET-only deref (integration-verified, 2026-07-16):** the
 deref is a bodiless HTTP GET, so `$ref` targets must be **GET-readable**
 dynamic-secret endpoints: `aws/creds/<role>` (DEC-260711061324's motivating STS

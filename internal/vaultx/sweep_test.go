@@ -114,6 +114,27 @@ func derefBody(fields map[string]interface{}, leaseID string) string {
 	return string(b)
 }
 
+// derefKV2Body builds a KV v2 wire-shaped deref target response: the
+// outer "data" envelope itself nests "data"/"metadata", the shape
+// isKV2Shaped (sweep.go) detects — e.g. KV v2 read via $ref, or a
+// voidstar view. metadata may be nil (still marshals as a present "{}"
+// object, satisfying the shape check).
+func derefKV2Body(fields, metadata map[string]interface{}) string {
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	var wire struct {
+		Data struct {
+			Data     map[string]interface{} `json:"data"`
+			Metadata map[string]interface{} `json:"metadata"`
+		} `json:"data"`
+	}
+	wire.Data.Data = fields
+	wire.Data.Metadata = metadata
+	b, _ := json.Marshal(wire)
+	return string(b)
+}
+
 // --- fixtures ---
 
 func sweepTestIdentity() identity.Identity {
@@ -379,6 +400,155 @@ func TestSweep_Deref_500ReturnsTypedError(t *testing.T) {
 	}
 	if errors.Is(err, ErrMalformedDirective) {
 		t.Errorf("Sweep error wraps ErrMalformedDirective, want a plain read-error class")
+	}
+}
+
+// TestSweep_Deref_KV2Unwrap_SingleField proves a KV v2-shaped deref
+// target (e.g. a voidstar view, or KV v2 itself) with a single "value"
+// field classifies via the SPEC §4.2 shorthand rule after unwrap: the
+// secret is named after the entry alone, "ptr", not "ptr_value" — unlike
+// the flat-response path, which never applies shorthand naming.
+func TestSweep_Deref_KV2Unwrap_SingleField(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"ptr"}))
+	fv.set(dataEntryPath(sweepBase, "ptr"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "vs/data/widgets/prod-token"}, nil))
+	fv.set("/v1/vs/data/widgets/prod-token", http.StatusOK, derefKV2Body(
+		map[string]interface{}{"value": "shh"},
+		map[string]interface{}{"version": 3},
+	))
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Secrets) != 1 {
+		t.Fatalf("Secrets = %+v, want exactly 1", res.Secrets)
+	}
+	got := res.Secrets[0]
+	if got.Name != "ptr" {
+		t.Errorf("secret name = %q, want %q (KV v2 single-field shorthand names the entry alone)", got.Name, "ptr")
+	}
+	if got.Value != "shh" {
+		t.Errorf("secret value = %q, want %q", got.Value, "shh")
+	}
+}
+
+// TestSweep_Deref_KV2Unwrap_MultiField proves a KV v2-shaped deref
+// target's multi-field inner data map flattens as key_f1, key_f2 — the
+// SPEC §4.2 general form, applied post-unwrap.
+func TestSweep_Deref_KV2Unwrap_MultiField(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"ptr"}))
+	fv.set(dataEntryPath(sweepBase, "ptr"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "vs/data/widgets/db-creds"}, nil))
+	fv.set("/v1/vs/data/widgets/db-creds", http.StatusOK, derefKV2Body(
+		map[string]interface{}{"user": "u", "pass": "p"},
+		map[string]interface{}{"version": 1, "custom_metadata": map[string]interface{}{"owner": "someone-else"}},
+	))
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Secrets) != 2 {
+		t.Fatalf("Secrets = %+v, want 2 (ptr_user, ptr_pass)", res.Secrets)
+	}
+	if got := findSecret(t, res.Secrets, "ptr_user").Value; got != "u" {
+		t.Errorf("ptr_user = %q, want %q", got, "u")
+	}
+	if got := findSecret(t, res.Secrets, "ptr_pass").Value; got != "p" {
+		t.Errorf("ptr_pass = %q, want %q", got, "p")
+	}
+	// The deref target's own "metadata" block (including its
+	// custom_metadata) must never surface as a secret or override the
+	// entry's own pins — only the swept entry's own KV v2
+	// custom_metadata drives pins (SPEC §4.6).
+	for _, s := range res.Secrets {
+		if s.Name == "ptr_metadata" || s.Name == "ptr_version" {
+			t.Errorf("unwanted secret %q present (deref target's metadata block must not flatten)", s.Name)
+		}
+	}
+}
+
+// TestSweep_Deref_FlatSTSUnchanged is a regression test: a flat
+// dynamic-engine response (no "metadata" key — the pre-existing
+// aws/sts-shaped case) must NOT be detected as KV v2-shaped and must keep
+// its exact prior behavior — general-form key_field flattening, never
+// single-name shorthand, even for a single-field response.
+func TestSweep_Deref_FlatSTSUnchanged(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"sts", "single"}))
+	fv.set(dataEntryPath(sweepBase, "sts"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/sts/deploy"}, nil))
+	fv.set("/v1/aws/sts/deploy", http.StatusOK, derefBody(map[string]interface{}{
+		"access_key": "ak", "secret_key": "sk", "security_token": "st",
+	}, "lease-sts-1"))
+	fv.set(dataEntryPath(sweepBase, "single"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/creds/single-field"}, nil))
+	// Flat response with exactly one field, named "value" — must still
+	// flatten as "single_value", NOT be shorthand-named "single": shorthand
+	// classification only ever applies post-KV2-unwrap.
+	fv.set("/v1/aws/creds/single-field", http.StatusOK, derefBody(map[string]interface{}{"value": "solo"}, ""))
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if !res.LeasesCreated {
+		t.Errorf("LeasesCreated = false, want true (flat sts deref carried a non-empty lease_id)")
+	}
+	want := map[string]string{
+		"sts_access_key":     "ak",
+		"sts_secret_key":     "sk",
+		"sts_security_token": "st",
+		"single_value":       "solo",
+	}
+	if len(res.Secrets) != len(want) {
+		t.Fatalf("Secrets = %v, want names %v", secretNames(res.Secrets), want)
+	}
+	for name, value := range want {
+		got := findSecret(t, res.Secrets, name)
+		if got.Value != value {
+			t.Errorf("secret %q value = %q, want %q", name, got.Value, value)
+		}
+	}
+}
+
+// TestSweep_Deref_AmbiguousDataFieldDoesNotMisfire proves the ambiguous
+// case the shape check exists for: a flat dynamic-engine response that
+// happens to carry a field literally named "data" must not be
+// misdetected as KV v2-shaped. Only a STRING "data" field is exercised
+// here (an object-valued "data" field would still require a paired
+// "metadata" object to trip detection — isKV2Shaped's own doc comment
+// covers that half); the point here is that the mere presence of the
+// name "data" is not itself the signal.
+func TestSweep_Deref_AmbiguousDataFieldDoesNotMisfire(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"weird"}))
+	fv.set(dataEntryPath(sweepBase, "weird"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "database/creds/weird"}, nil))
+	// No "metadata" key at all — just a dynamic secret whose engine
+	// happens to name one of its own fields "data".
+	fv.set("/v1/database/creds/weird", http.StatusOK, derefBody(map[string]interface{}{
+		"data": "not-actually-kv2", "username": "u",
+	}, ""))
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Secrets) != 2 {
+		t.Fatalf("Secrets = %+v, want 2 (weird_data, weird_username — flat general-form flattening, no misfire)", res.Secrets)
+	}
+	if got := findSecret(t, res.Secrets, "weird_data").Value; got != "not-actually-kv2" {
+		t.Errorf("weird_data = %q, want %q", got, "not-actually-kv2")
+	}
+	if got := findSecret(t, res.Secrets, "weird_username").Value; got != "u" {
+		t.Errorf("weird_username = %q, want %q", got, "u")
 	}
 }
 

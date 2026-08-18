@@ -1,20 +1,12 @@
 ---
-id: "DEC-0013"
+id: "DEC-260723134043"
 title: "Release artifacts: Go module + Docker Hub image only, signed, with SBOM"
 status: superseded
 date: 2026-07-23
 y-statement: >-
-  In the context of what a public ironbark release ships, facing a
-  container-first server whose consumers deploy an image or build from
-  source, we decided for exactly two artifacts — the tagged Go module
-  (go-installable as github.com/navistau/ironbark) and a multi-arch
-  docker.io/navistau/ironbark image built with ko on the distroless
-  nonroot base, cosign-signed keylessly with SPDX SBOMs — and against
-  prebuilt release binaries, OS packages, a Helm chart, and GHCR as
-  primary registry, to achieve a minimal artifact surface with signed
-  provenance appropriate to a credential-custody tool, accepting that
-  binary-wanting users must go install and that Docker Hub org
-  registration (and its pricing) is a prerequisite.
+  In the context of what a public release ships, facing a container-first
+  server, we decided for a Go module plus a signed Docker Hub image with SBOM,
+  against prebuilt binaries and GHCR, accepting a registration prerequisite.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["publishing", "artifacts", "supply-chain"]
 supersedes: []
@@ -25,7 +17,7 @@ supersedes: []
 ## Context and Problem Statement
 
 ironbark is a stateless server deployed as a container behind a Woodpecker
-instance. Publishing (DEC-0011) forces the question of what a release
+instance. Publishing (DEC-260723134041) forces the question of what a release
 actually ships and to which registry, and how much of the beachcomber
 packaging matrix (deb/rpm/AUR/nix/brew, SDK publishes, installer shims)
 transfers to a server-shaped project.
@@ -91,12 +83,12 @@ lift consumer pull limits.
 
 ## More Information
 
-Superseded by DEC-0017: Docker Hub registration fell through (legacy org
+Superseded by DEC-260723140246: Docker Hub registration fell through (legacy org
 slug `navistautomatum` cannot be renamed to `navistau`; a new org hits
 current pricing), triggering the GHCR fallback this decision anticipated.
 The artifact set, signing, and SBOM requirements carry over unchanged.
 
-DEC-0012 (the release.yml that produces these), DEC-0010 (runtime surface
+DEC-260723134042 (the release.yml that produces these), DEC-260711114105 (runtime surface
 the image must respect), publish plan W3. The distroless base pin and its
 lockstep constraint with the Dockerfile predate this decision (see
 .woodpecker.yaml history).

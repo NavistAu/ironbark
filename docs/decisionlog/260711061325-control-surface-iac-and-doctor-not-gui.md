@@ -1,18 +1,13 @@
 ---
-id: "DEC-0004"
+id: "DEC-260711061325"
 title: "Control surface is IaC plus a doctor CLI, not a GUI"
 status: accepted
 date: 2026-07-11
 y-statement: >-
-  In the context of managing ironbark's convention-critical Vault/OpenBao
-  configuration (milestone 2), facing silent-failure (typo'd policy names
-  grant nothing) and fail-open (over-wide role globs) misconfiguration modes,
-  we decided for a generic Terraform/OpenTofu module that stamps out per-repo
-  policies and KV skeleton plus a read-only `ironbark doctor` lint command,
-  and against a web GUI management plane and against unaided hand
-  configuration, to achieve onboarding-as-code with machine-generated
-  convention names, accepting that doctor requires a separate admin-ish
-  credential and the module is a maintained artifact.
+  In the context of ironbark's convention-critical Vault config, facing silent-
+  failure and fail-open misconfiguration, we decided for a Terraform module plus
+  a read-only doctor lint, against a GUI management plane and hand
+  configuration, to achieve machine-generated onboarding with no new credential.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["milestones", "operations", "iac"]
 supersedes: []
@@ -22,12 +17,13 @@ supersedes: []
 
 ## Context and Problem Statement
 
-DEC-0002 moved all authority into Vault-side convention. The convention's
+DEC-260711061323 moved all authority into Vault-side convention. The convention's
 weakness is that admins must configure Vault pitch-perfectly: a typo'd
 policy name attaches harmlessly and grants nothing (pipelines just 403,
 silently), and a fat-fingered `allowed_policies_glob` fails open. Some
 control surface is needed. Candidates ranged from IaC modules through a
-management UI to a custom Vault plugin (the latter split out to DEC-0005).
+management UI to a custom Vault plugin (the latter recorded as a research
+note, DESIGN.md §12).
 Framing adopted: IaC is a form of UI; UI is not GUI — and a GUI has little
 value inside an already-automated space.
 
@@ -97,4 +93,5 @@ need survives M2.
 
 ## More Information
 
-Depends on DEC-0002. Custom Vault plugin alternative recorded in DEC-0005.
+Depends on DEC-260711061323. Custom Vault plugin alternative recorded as a
+research note in DESIGN.md §12.

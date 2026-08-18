@@ -1,23 +1,13 @@
 ---
-id: "DEC-0010"
+id: "DEC-260711114105"
 title: "M1 runtime surface: 10s freshness, env-only config, dual audit shapes"
 status: accepted
 date: 2026-07-11
 y-statement: >-
-  In the context of ironbark's operational envelope, facing replay risk
-  bounded only by a signed created timestamp, key-rotation needs, audit
-  requirements, and deployment simplicity, we decided for a 10-second
-  created-freshness window, env-only configuration with _FILE variants
-  and no in-process TLS, restart-based key rotation (SIGHUP optional),
-  dual-shape audit lines (refused-signature lines carry no
-  payload-derived fields; verified lines carry identity, policy warnings,
-  names-only secrets, and the token accessor), and an AppRole session
-  contract retaining the default policy with safe re-login degradation,
-  and against config files, in-process TLS, and nonce-based replay
-  prevention (the protocol has none), to achieve a small auditable
-  surface consistent with the threat model, accepting that byte-identical
-  replays inside the window mint duplicate tokens and rotation requires a
-  restart.
+  In the context of ironbark's operational envelope, facing replay risk bounded
+  only by a signed timestamp, we decided for a 10-second freshness window, env-
+  only config, and dual-shape audit lines, against config files and nonce-based
+  replay prevention, accepting in-window replay duplicates.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["operations", "configuration", "spec-acceptance"]
 supersedes: []

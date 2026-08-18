@@ -452,14 +452,54 @@ func sortedFieldNames(d map[string]json.RawMessage) []string {
 	return names
 }
 
+// isKV2Shaped reports whether d — a deref response's top-level "data"
+// map, exactly as sweepDeref decodes it — is itself KV v2 wire-shaped: a
+// nested "data" object alongside a "metadata" object, the same envelope
+// sweepEntry already destructures for a genuine KV v2 data-GET (SPEC
+// §4.1/§4.2). sweepDeref's refPath can point at any mount, so unlike
+// sweepEntry there is no reliable path signal to key off — a `$ref` may
+// aim at a flat dynamic-engine response (`aws/creds/*`) or a KV
+// v2-wire-compatible one (KV v2 itself, or a voidstar view). Detection is
+// therefore shape-based: BOTH "data" and "metadata" must be present and
+// each must decode as a JSON object. That pairing is what keeps a flat
+// dynamic-engine response safe even if it happens to carry a field
+// literally named "data" or "metadata" — a lone field under either name,
+// or one whose value isn't itself an object (the ordinary case: a flat
+// field's value is a string/number/bool), fails the check and falls
+// through to the unchanged flat path below.
+func isKV2Shaped(d map[string]json.RawMessage) (inner map[string]json.RawMessage, ok bool) {
+	rawData, hasData := d["data"]
+	rawMeta, hasMeta := d["metadata"]
+	if !hasData || !hasMeta {
+		return nil, false
+	}
+	if err := json.Unmarshal(rawData, &inner); err != nil {
+		return nil, false
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(rawMeta, &meta); err != nil {
+		return nil, false
+	}
+	return inner, true
+}
+
 // sweepDeref performs the SPEC §4.3 pointer dereference for entry key
 // (GET refPath, any mount, authenticated as token) and flattens the
-// result's .data fields as key_f, applying the entry's own pins (images,
-// events — read from key's own KV v2 custom_metadata, never the deref
-// target's) to every field it yields. A 403/404 skips the entry (no
-// secrets, no error). The deref result is never re-examined for its own
-// "$ref"/"value" shape (SPEC §4.3's no-chain rule) — its fields are
-// always flattened via the general-form path, unconditionally.
+// result's fields, applying the entry's own pins (images, events — read
+// from key's own KV v2 custom_metadata, never the deref target's) to
+// every field it yields. A 403/404 skips the entry (no secrets, no
+// error).
+//
+// If the response is KV v2-shaped (isKV2Shaped), it is first unwrapped to
+// its inner field map and then classified exactly like a swept entry
+// (SPEC §4.2): a single `{"value": v}` field names the secret `key`
+// alone, otherwise every field flattens as `key_field`. This never
+// includes pointer-form ($ref) detection — SPEC §4.3's no-chain rule
+// means a deref result's own "$ref", if any, is just another field name,
+// never re-dereferenced. A flat (non-KV2-shaped) response — the pre-
+// existing dynamic-engine case (`aws/creds/*` etc.) — keeps its
+// byte-identical behavior: every field flattens as `key_field`
+// unconditionally, never single-name shorthand.
 func (c *Client) sweepDeref(ctx context.Context, token, key, refPath string, images, events []string, sw *sweepAccumulator) error {
 	resp, found, err := c.vaultGet(ctx, token, refPath, false)
 	if err != nil {
@@ -485,8 +525,19 @@ func (c *Client) sweepDeref(ctx context.Context, token, key, refPath string, ima
 		sw.leasesCreated = true
 	}
 
-	for _, f := range sortedFieldNames(parsed.Data) {
-		v, ok := stringField(parsed.Data[f])
+	fields := parsed.Data
+	if inner, ok := isKV2Shaped(fields); ok {
+		if isShorthandForm(inner) {
+			if v, ok := stringField(inner["value"]); ok {
+				sw.add(normalizeName(key), v, images, events)
+			}
+			return nil
+		}
+		fields = inner
+	}
+
+	for _, f := range sortedFieldNames(fields) {
+		v, ok := stringField(fields[f])
 		if !ok {
 			continue // non-string deref field: skip with warning, siblings survive
 		}

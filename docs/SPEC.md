@@ -3,9 +3,10 @@
 Status: ACCEPTED 2026-07-11, after a 4-cycle adversarial cross-AI review
 (codex + gemini, zero remaining HIGH concerns —
 [`reviews/SPEC-REVIEWS.md`](reviews/SPEC-REVIEWS.md)). The §12 decisions
-are logged as [DEC-0006…DEC-0010](decisionlog/).
+are logged as [DEC-260711114101…DEC-260711114105](decisionlog/).
 Sources of truth: [`DESIGN.md`](DESIGN.md) (architecture + threat model),
-[`decisionlog/`](decisionlog/) (DEC-0001…0005),
+[`decisionlog/`](decisionlog/) (DEC-260711061322…260711061325; a fifth item
+from that batch is a DESIGN.md §12 research note, not a decision),
 [`woodpecker-secret-mechanisms.md`](woodpecker-secret-mechanisms.md)
 (source-verified Woodpecker facts, cited as **[WP§n]**),
 [`research/2026-07-11-pre-implementation-research.md`](research/2026-07-11-pre-implementation-research.md)
@@ -18,7 +19,7 @@ criteria — not implementations.
 M1 delivers the broker: one Go binary implementing the Woodpecker secret
 extension against Vault or OpenBao, its test suite, and a container image.
 Out of scope for M1: the Terraform module and `ironbark doctor` (M2,
-DEC-0004), Drone compatibility, any UI.
+DEC-260711061325), Drone compatibility, any UI.
 
 ## 1. Runtime behavior
 
@@ -198,7 +199,7 @@ So `token_ttl` on the role is a NO-OP and would leave CI tokens alive for
 actually bounds a role-minted token's lifetime is
 `token_explicit_max_ttl` (a hard, unrenewable expiry cap the role backend
 does honor on both products). ironbark still sends no `ttl` at mint (§3.2);
-`token_explicit_max_ttl` is what makes "TTL is the bound" (DEC-0007) real.
+`token_explicit_max_ttl` is what makes "TTL is the bound" (DEC-260711114102) real.
 Operators MUST set it; the M1 integration suite asserts a minted token's
 TTL is bounded by it on both products. (Alternatively/additionally the
 operator may lower the token mount's `default_lease_ttl` via
@@ -248,7 +249,7 @@ authenticated as the *minted* token (powered by the `default` policy —
   created leases: the service-token cascade revokes those leases too,
   which is the desired cleanup since nothing was delivered.
 - **A `200` never revokes** — returned dereferenced leases and/or the
-  returned `vault_token` must outlive the response (DEC-0003); TTL is
+  returned `vault_token` must outlive the response (DEC-260711061324); TTL is
   the cleanup.
 
 Revoke failures are logged and do not change the response code
@@ -339,9 +340,25 @@ the service-token cascade cleans up any leases earlier derefs created
 followed exactly one level — a deref result is never re-examined for
 `$ref` (no chains, no cycles).
 
+**KV v2-shaped deref targets.** A `$ref` may point at a target whose
+response is itself KV v2 wire-shaped — KV v2 read directly, or a
+KV v2-wire-compatible view (e.g. a voidstar view: `vs/data/...`) — rather
+than a flat dynamic-engine response (`aws/sts/*` etc.). Detection is
+shape-based, never path-based: the response's `.data` is treated as KV
+v2-shaped only when it contains BOTH a nested `data` object AND a
+`metadata` object (mirroring the envelope §4.1's own KV v2 data-GET
+already unwraps). Only then is it unwrapped to the inner field map and
+classified exactly like a swept entry (§4.2: single `{"value": v}` →
+secret named `E` alone; otherwise general form, `E_f`) — pointer-form
+(`$ref`) classification is never applied to a deref result, preserving
+the no-chain rule above. A flat response — including one that happens to
+carry a field literally named `data` or `metadata` without the paired
+object shape — is unaffected and keeps flattening unconditionally as
+`E_f`, byte-identical to prior behavior.
+
 **Limitation — GET-only deref (integration-verified, 2026-07-16):** the
 deref is a bodiless HTTP GET, so `$ref` targets must be **GET-readable**
-dynamic-secret endpoints: `aws/creds/<role>` (DEC-0003's motivating STS
+dynamic-secret endpoints: `aws/creds/<role>` (DEC-260711061324's motivating STS
 example), `database/creds/<role>`, `gcp/.../key`, `azure/creds/<role>`,
 and KV reads. It does NOT support engines that require request-body
 parameters on a write — notably `pki/issue/<role>`, which is POST-only
@@ -461,7 +478,7 @@ ESO/k8s mounts):
 | `IRONBARK_ADVERTISE_VAULT_ADDR` | unset | §6 |
 | `IRONBARK_LOG_LEVEL` | `info` | |
 
-No config file, no rule tables, no path maps (DEC-0002). TLS termination
+No config file, no rule tables, no path maps (DEC-260711061323). TLS termination
 is the deployment's concern (in-cluster service mesh / ingress); ironbark
 serves plain HTTP.
 

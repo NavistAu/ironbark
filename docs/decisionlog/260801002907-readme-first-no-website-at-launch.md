@@ -1,31 +1,23 @@
 ---
-id: "DEC-0018"
+id: "DEC-260801002907"
 title: "README-first documentation: no website at launch"
 status: accepted
 date: 2026-07-30
 y-statement: >-
-  In the context of launching ironbark with implementer-grade
-  documentation, facing the reopened question of whether a multi-page
-  docusaurus site is worth building for a niche operator audience that
-  reads repositories, we decided for README-first — no website at launch,
-  with the docs-quality effort concentrated on the README and in-repo
-  docs — and against the docusaurus site at ironbark.foss.navist.au that
-  DEC-0016 had planned, to achieve full documentation quality investment
-  in the single surface the audience actually uses with no extra
-  toolchain or drift surface, accepting that there is no branded docs
-  home and that reviving the site later must meet the recorded
-  conditions (registered in the maintainer's analytics as a tracked
-  site, DNS via the maintainer's DNS IaC).
+  In the context of launching ironbark's docs, facing whether a docusaurus site
+  is worth building, we decided for README-first with no website at launch,
+  against building the site DEC-260723134317 had planned, to achieve doc investment
+  where the audience reads.
 decision-makers: ["Joshua Hogendorn", "Claude"]
 tags: ["publishing", "documentation", "website"]
-supersedes: ["DEC-0016"]
+supersedes: ["DEC-260723134317"]
 ---
 
 # README-first documentation: no website at launch
 
 ## Context and Problem Statement
 
-DEC-0016 chose a docusaurus site on GitHub Pages at
+DEC-260723134317 chose a docusaurus site on GitHub Pages at
 `ironbark.foss.navist.au`. During publish execution the maintainer
 reopened the premise: is a multi-page documentation site worth the effort
 versus a good comprehensive README? The audience is Woodpecker+Vault
@@ -47,7 +39,7 @@ on GitHub.
 ## Considered Options
 
 * README-first, no website at launch
-* Build the docusaurus site pre-flip (DEC-0016 as ratified)
+* Build the docusaurus site pre-flip (DEC-260723134317 as ratified)
 
 ## Decision Outcome
 
@@ -58,7 +50,7 @@ maintenance costs for this tool today.
 The W6 docs-quality gate absorbs the effort as a higher bar on the README
 and in-repo docs (value-first framing, walkthrough-tested commands,
 cross-doc consistency with SPEC normative). The website plan is shelved,
-not deleted: DEC-0016's mechanics (docusaurus scaffold reuse, GitHub
+not deleted: DEC-260723134317's mechanics (docusaurus scaffold reuse, GitHub
 Pages, `ironbark.foss.navist.au` CNAME, org domain verification) remain
 the blueprint if revived, and revival carries two standing conditions
 recorded from the maintainer: the site must be a tracked property in the
@@ -74,7 +66,7 @@ through the maintainer's DNS IaC.
 * Bad, because no branded docs home and no pageview signal — accepted;
   GitHub traffic insights partially substitute.
 * Bad, because if demand appears, the site is a from-scratch effort at a
-  busier time — mitigated by DEC-0016 remaining as the blueprint.
+  busier time — mitigated by DEC-260723134317 remaining as the blueprint.
 
 ## Pros and Cons of the Options
 
@@ -94,6 +86,6 @@ through the maintainer's DNS IaC.
 
 ## More Information
 
-Supersedes DEC-0016 (website: docusaurus at ironbark.foss.navist.au) —
+Supersedes DEC-260723134317 (website: docusaurus at ironbark.foss.navist.au) —
 its status is updated to superseded; its mechanics remain the revival
 blueprint. See publish plan docs/plans/2026-07-23-publish.md W4/W6.

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-19
+
+### Fixed
+
+- KV v2-shaped `$ref` deref now applies the single-field convention:
+  an unwrapped target carrying a string `value` field yields ONE secret
+  named for the entry, ignoring metadata siblings (id/title/staleness
+  fields that 1P-style field-engine views return alongside the value).
+  The strict exactly-one-key shorthand test flattened such views into
+  `E_id`/`E_title`/… general-form names, so the expected secret never
+  existed (first production deref, 2026-08-19). Multi-field targets
+  without a `value` field flatten general-form, unchanged.
+
+
 ## [0.1.1] - 2026-08-19
 
 ### Added

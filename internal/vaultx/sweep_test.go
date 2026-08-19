@@ -517,6 +517,46 @@ func TestSweep_Deref_FlatSTSUnchanged(t *testing.T) {
 	}
 }
 
+// TestSweep_Deref_KV2Unwrap_ValueWithMetadataSiblings proves the
+// single-field convention: a KV v2-shaped deref target whose inner map
+// carries a string "value" field PLUS metadata siblings (the shape 1P-
+// style field-engine views return: id/title/type/updated_at/staleness
+// flags) yields ONE secret named for the entry — the siblings never
+// flatten. Regression for the 2026-08-19 production failure where the
+// strict exactly-one-key shorthand test flattened such a view into
+// E_id/E_title/… and the expected secret name never existed.
+func TestSweep_Deref_KV2Unwrap_ValueWithMetadataSiblings(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"ptr"}))
+	fv.set(dataEntryPath(sweepBase, "ptr"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "vs/data/widgets/token"}, nil))
+	fv.set("/v1/vs/data/widgets/token", http.StatusOK, derefKV2Body(
+		map[string]interface{}{
+			"value":               "s3cr3t",
+			"id":                  "abc123",
+			"title":               "widgets token",
+			"type":                "CONCEALED",
+			"updated_at":          "2026-08-19T00:00:00Z",
+			"replica_age_seconds": 42,
+			"stale":               false,
+			"stale_suspect":       false,
+		},
+		map[string]interface{}{"version": 1},
+	))
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Secrets) != 1 {
+		t.Fatalf("Secrets = %+v, want exactly 1 (ptr)", res.Secrets)
+	}
+	if got := findSecret(t, res.Secrets, "ptr").Value; got != "s3cr3t" {
+		t.Errorf("ptr = %q, want %q", got, "s3cr3t")
+	}
+}
+
 // TestSweep_Deref_AmbiguousDataFieldDoesNotMisfire proves the ambiguous
 // case the shape check exists for: a flat dynamic-engine response that
 // happens to carry a field literally named "data" must not be

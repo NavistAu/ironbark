@@ -527,10 +527,19 @@ func (c *Client) sweepDeref(ctx context.Context, token, key, refPath string, ima
 
 	fields := parsed.Data
 	if inner, ok := isKV2Shaped(fields); ok {
-		if isShorthandForm(inner) {
-			if v, ok := stringField(inner["value"]); ok {
-				sw.add(normalizeName(key), v, images, events)
-			}
+		// Single-field convention, not strict shorthand: a KV v2-shaped
+		// deref target that carries a string "value" field is served as
+		// the entry's single secret (named for the entry key), and any
+		// SIBLING fields are ignored. Views over 1P-style field engines
+		// return metadata alongside the value (id/title/type/updated_at/
+		// staleness flags) — under the strict exactly-one-key shorthand
+		// test those flattened general-form into E_id/E_title/… and the
+		// expected secret name never existed (found live 2026-08-19,
+		// first production deref of such a view). A genuine multi-field
+		// KV v2 target without a "value" field still flattens
+		// general-form below, unchanged.
+		if v, ok := stringField(inner["value"]); ok {
+			sw.add(normalizeName(key), v, images, events)
 			return nil
 		}
 		fields = inner

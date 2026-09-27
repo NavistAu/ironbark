@@ -51,7 +51,7 @@ func TestResolve_ChosenTierAndPinFiltering(t *testing.T) {
 
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	secrets, leaseIDs, err := resolve(context.Background(), resolveOpts{
+	secrets, leaseIDs, _, err := resolve(context.Background(), resolveOpts{
 		Runner: gitenv.ExecRunner{Dir: fx.clone},
 		Vault:  vc,
 		Token:  rtToken,
@@ -116,7 +116,7 @@ func TestResolve_DirectMatchSkipsStaleCheck(t *testing.T) {
 
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	_, _, err := resolve(context.Background(), resolveOpts{
+	_, _, _, err := resolve(context.Background(), resolveOpts{
 		Runner: gitenv.ExecRunner{Dir: fx.clone},
 		Vault:  vc,
 		Token:  rtToken,
@@ -145,7 +145,7 @@ func TestResolve_NoBranchTiers(t *testing.T) {
 
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	secrets, _, err := resolve(context.Background(), resolveOpts{
+	secrets, _, _, err := resolve(context.Background(), resolveOpts{
 		Runner: gitenv.ExecRunner{Dir: fx.clone},
 		Vault:  vc,
 		Token:  rtToken,
@@ -182,7 +182,7 @@ func TestResolve_NearestAncestorVisibilityLine(t *testing.T) {
 
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	_, _, err := resolve(context.Background(), resolveOpts{
+	_, _, _, err := resolve(context.Background(), resolveOpts{
 		Runner: gitenv.ExecRunner{Dir: fx.clone},
 		Vault:  vc,
 		Token:  rtToken,
@@ -218,7 +218,7 @@ func TestResolve_SlashBranchDirectMatch(t *testing.T) {
 
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	_, _, err := resolve(context.Background(), resolveOpts{
+	_, _, _, err := resolve(context.Background(), resolveOpts{
 		Runner: gitenv.ExecRunner{Dir: fx.clone},
 		Vault:  vc,
 		Token:  rtToken,
@@ -254,7 +254,7 @@ func TestResolve_Ambiguous(t *testing.T) {
 
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	_, _, err := resolve(context.Background(), resolveOpts{
+	_, _, _, err := resolve(context.Background(), resolveOpts{
 		Runner: gitenv.ExecRunner{Dir: fx.clone},
 		Vault:  vc,
 		Token:  rtToken,
@@ -298,7 +298,7 @@ func TestResolve_SkippedDerefsStderrLine(t *testing.T) {
 
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	secrets, _, err := resolve(context.Background(), resolveOpts{
+	secrets, _, _, err := resolve(context.Background(), resolveOpts{
 		Runner: gitenv.ExecRunner{Dir: fx.clone},
 		Vault:  vc,
 		Token:  rtToken,
@@ -329,7 +329,7 @@ func TestResolve_NoSkippedDerefsNoStderrLine(t *testing.T) {
 
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	_, _, err := resolve(context.Background(), resolveOpts{
+	_, _, _, err := resolve(context.Background(), resolveOpts{
 		Runner: gitenv.ExecRunner{Dir: fx.clone},
 		Vault:  vc,
 		Token:  rtToken,
@@ -365,7 +365,7 @@ func TestResolve_SweepFailureRevokesPartialLeases(t *testing.T) {
 
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	_, _, err := resolve(context.Background(), resolveOpts{
+	_, _, _, err := resolve(context.Background(), resolveOpts{
 		Runner: gitenv.ExecRunner{Dir: fx.clone},
 		Vault:  vc,
 		Token:  rtToken,

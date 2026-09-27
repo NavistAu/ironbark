@@ -62,22 +62,25 @@ type resolveOpts struct {
 // because their $ref target 403/404'd. On a sweep failure it revokes any
 // leases the partial sweep created (CLIENT-SPEC §4) before returning the
 // error. Images (CLIENT-SPEC §4, ironbark_images) are never applied — ib
-// has no step image locally.
-func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecret, []string, error) {
+// has no step image locally. The returned gitenv.Selection is the §3
+// branch choice (Branch/Rule) — cmdEnv's `--output json` (CLIENT-SPEC
+// §1.3) reports it alongside the secrets; callers that don't need it
+// (get, run) discard it.
+func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecret, []string, gitenv.Selection, error) {
 	info, err := gitenv.Checkout(opts.Runner)
 	if err != nil {
-		return nil, nil, err // *gitenv.CheckoutError -> exit 2
+		return nil, nil, gitenv.Selection{}, err // *gitenv.CheckoutError -> exit 2
 	}
 
 	org, repo, err := identity.ParseRemote(info.OriginURL)
 	if err != nil {
-		return nil, nil, err // wraps identity.ErrInvalidRemote -> exit 2
+		return nil, nil, gitenv.Selection{}, err // wraps identity.ErrInvalidRemote -> exit 2
 	}
 	id := identity.Identity{Org: org, Repo: repo, Event: "push"}
 
 	tiers, err := opts.Vault.ListBranchTiers(ctx, opts.Token, id)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: list branch tiers: %v", errVault, err)
+		return nil, nil, gitenv.Selection{}, fmt.Errorf("%w: list branch tiers: %v", errVault, err)
 	}
 
 	tracked := gitenv.TrackedBranches(opts.Runner, info.Branch, tiers)
@@ -108,7 +111,7 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 		ReflogFrom: reflogFrom,
 	})
 	if err != nil {
-		return nil, nil, err // *gitenv.SelectError -> exit 4
+		return nil, nil, gitenv.Selection{}, err // *gitenv.SelectError -> exit 4
 	}
 	printSelection(opts.Stderr, sel)
 
@@ -122,7 +125,7 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 				fmt.Fprintf(opts.Stderr, "ib: revoke lease failed: %v\n", revokeErr)
 			}
 		}
-		return nil, nil, fmt.Errorf("%w: sweep: %v", errVault, err)
+		return nil, nil, sel, fmt.Errorf("%w: sweep: %v", errVault, err)
 	}
 
 	if len(sweep.SkippedDerefs) > 0 {
@@ -141,7 +144,7 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 		secrets[s.Name] = s
 	}
 
-	return secrets, sweep.LeaseIDs, nil
+	return secrets, sweep.LeaseIDs, sel, nil
 }
 
 func containsString(list []string, s string) bool {

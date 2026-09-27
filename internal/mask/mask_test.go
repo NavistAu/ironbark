@@ -72,6 +72,33 @@ func TestLongestFirst(t *testing.T) {
 	}
 }
 
+// TestOverlappingValues proves overlapping match intervals are merged
+// before replacement: "abcd" and "bcdefgh" over "abcdefgh" overlap at
+// "bcd" without either containing the other, so masking one at a time
+// (longest match at each position, then advancing past it) leaves the
+// other's non-overlapping tail ("efgh") exposed unless the two match
+// spans are merged into one before any placeholder is written.
+func TestOverlappingValues(t *testing.T) {
+	var dst bytes.Buffer
+	w := NewWriter(&dst, []string{"abcd", "bcdefgh"})
+
+	if _, err := w.Write([]byte("xabcdefghx")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	got := dst.String()
+	want := "x" + placeholder + "x"
+	if got != want {
+		t.Errorf("dst = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "efgh") {
+		t.Errorf("dst = %q leaks %q (part of the second value, past the first's match)", got, "efgh")
+	}
+}
+
 // TestShortValueUntouched proves values shorter than 4 bytes are never
 // matched.
 func TestShortValueUntouched(t *testing.T) {

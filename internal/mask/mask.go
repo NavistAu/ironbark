@@ -88,31 +88,70 @@ func (w *Writer) Flush() error {
 	return w.err
 }
 
+// matchInterval is a masked span [start, end) within w.buf.
+type matchInterval struct{ start, end int }
+
 // scan walks w.buf from the start, deciding (and masking) every position
 // strictly before limit; a match found at a position < limit is consumed
 // in full even if it extends past limit (those bytes are already present
 // in w.buf, just not yet flushed). It returns the resulting bytes and
 // how many bytes of w.buf they account for.
+//
+// Matches are found independently at every starting position (the longest
+// value matching there, values being sorted longest-first), then merged
+// wherever two matches overlap (e.g. "abcd" and "bcdefgh" over
+// "abcdefgh") into a single span before any placeholder is written — one
+// match's start-to-end replacement alone would otherwise leave the other
+// value's non-overlapping tail exposed.
 func (w *Writer) scan(limit int) (out []byte, consumed int) {
-	var b bytes.Buffer
-	i := 0
-	for i < limit {
-		matched := false
+	var matches []matchInterval
+	for i := 0; i < limit; i++ {
 		for _, v := range w.values {
 			end := i + len(v)
 			if end <= len(w.buf) && string(w.buf[i:end]) == v {
-				b.WriteString(placeholder)
-				i = end
-				matched = true
-				break
+				matches = append(matches, matchInterval{i, end})
+				break // longest match at this position (values sorted longest-first)
 			}
 		}
-		if !matched {
-			b.WriteByte(w.buf[i])
-			i++
+	}
+	merged := mergeIntervals(matches)
+
+	var b bytes.Buffer
+	i := 0
+	mi := 0
+	for i < limit {
+		if mi < len(merged) && i == merged[mi].start {
+			b.WriteString(placeholder)
+			i = merged[mi].end
+			mi++
+			continue
 		}
+		b.WriteByte(w.buf[i])
+		i++
 	}
 	return b.Bytes(), i
+}
+
+// mergeIntervals sorts in by start and coalesces any overlapping or
+// touching intervals into one.
+func mergeIntervals(in []matchInterval) []matchInterval {
+	if len(in) == 0 {
+		return nil
+	}
+	sort.Slice(in, func(a, b int) bool { return in[a].start < in[b].start })
+
+	merged := []matchInterval{in[0]}
+	for _, iv := range in[1:] {
+		last := &merged[len(merged)-1]
+		if iv.start <= last.end {
+			if iv.end > last.end {
+				last.end = iv.end
+			}
+			continue
+		}
+		merged = append(merged, iv)
+	}
+	return merged
 }
 
 func (w *Writer) emit(p []byte) {

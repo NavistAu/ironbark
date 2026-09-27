@@ -393,9 +393,26 @@ implementation, never a second copy.
   not values.
 
 Identity comes from the checkout, not flags: `<org>/<repo>` from the `origin`
-remote, branch from `HEAD`, event fixed as `push` (a local run reads the tiers
-a push to that branch reads). The caller's own token does every read — no
+remote, event fixed as `push`. The caller's own token does every read — no
 mint, no signature verification — so the caller's policy bounds the result.
+
+Which branch's tiers to read is an *environment choice*, not access control:
+the local checkout is untrusted, and the caller's policy is the only bound.
+Tracked branches are the `push/<branch>/` tiers the caller can LIST.
+
+1. Direct match: the checked-out branch is tracked → use it.
+2. Otherwise walk: for each tracked B, count commits in `HEAD` not in
+   `origin/B` (from `git merge-base`); the lowest count wins.
+3. Tie → the default branch (`origin/HEAD`) if it is among the tied.
+4. Otherwise fail, listing the tied branches. Never guess.
+
+No common ancestor with any tracked branch → fail. `--branch` / `IB_BRANCH`
+overrides the choice. The choice is always printed to stderr. Before the walk,
+`git ls-remote origin` is compared with each `origin/B`; a difference warns
+(stale refs) but does not stop the run.
+
+Later: a config cascade (e.g. `develop` before `stage` before `main`) applied
+at step 3, before the default branch, for ties the walk cannot break.
 
 Later, when needed: an in-repo config file (remote disambiguation, naming);
 nested map entries — the sweep descends subdirectories and joins the path into

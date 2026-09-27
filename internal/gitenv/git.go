@@ -204,7 +204,7 @@ func TrackedBranches(r Runner, current string, tiers []string) []string {
 func Ancestry(r Runner, current string, tracked []string) (dist map[string]int, reflogFrom string, stale []string, lsRemoteErr error) {
 	dist = make(map[string]int)
 	for _, t := range tracked {
-		ref := "origin/" + t
+		ref := "refs/remotes/origin/" + t // fully qualified: a local branch named origin/T would otherwise shadow it
 		if _, err := r.Git("rev-parse", "--verify", "-q", ref); err != nil {
 			continue // no origin/T
 		}
@@ -269,7 +269,7 @@ func Ancestry(r Runner, current string, tracked []string) (dist map[string]int, 
 
 	var staleList []string
 	for _, t := range tracked {
-		localSHA, err := r.Git("rev-parse", "origin/"+t)
+		localSHA, err := r.Git("rev-parse", "refs/remotes/origin/"+t)
 		if err != nil {
 			continue
 		}

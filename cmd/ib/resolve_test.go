@@ -281,6 +281,68 @@ func TestResolve_Ambiguous(t *testing.T) {
 	}
 }
 
+// TestResolve_SkippedDerefsStderrLine exercises CLIENT-SPEC §4's deref-403
+// hint: the caller's token can list/read the "ptr" map entry but gets a
+// 403 dereferencing its $ref target. The sweep still silently produces no
+// secret for it (unchanged, correct per SPEC), but resolve must print one
+// stderr line naming it, so `ib env` returning fewer secrets than expected
+// has a hint instead of being silent.
+func TestResolve_SkippedDerefsStderrLine(t *testing.T) {
+	fx := newIBFixture(t, nil) // clone stays on "main"
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
+	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"ptr"}))
+	fv.set("/v1/kv/data/"+rtMain+"/ptr", 200, entryBody(map[string]interface{}{"$ref": "database/creds/readonly"}, nil))
+	fv.set("/v1/database/creds/readonly", 403, `{"errors":["denied"]}`)
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	secrets, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if len(secrets) != 0 {
+		t.Errorf("secrets = %v, want none (deref 403 skips the entry)", secretNames(secrets))
+	}
+
+	want := "ib: skipped 1 entries: no read on their targets (ptr)"
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+}
+
+// TestResolve_NoSkippedDerefsNoStderrLine proves the skipped-derefs line
+// is only ever printed when the sweep actually skipped one.
+func TestResolve_NoSkippedDerefsNoStderrLine(t *testing.T) {
+	fx := newIBFixture(t, nil) // clone stays on "main"
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
+	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"shared"}))
+	fv.set("/v1/kv/data/"+rtMain+"/shared", 200, entryBody(map[string]interface{}{"value": "shared-value"}, nil))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "skipped") {
+		t.Errorf("stderr = %q, want no skipped-derefs line (nothing was skipped)", stderr.String())
+	}
+}
+
 // TestResolve_SweepFailureRevokesPartialLeases exercises CLIENT-SPEC §4:
 // a lease minted by the branch tier's deref, followed by a non-403/404
 // failure listing the event tier, must revoke that lease before resolve

@@ -64,11 +64,16 @@ type SweptSecret struct {
 // accumulated before the failure (CLIENT-SPEC §8) — the broker ignores
 // this result on error (it revokes the minted token, cascading the
 // leases instead); ib run has no such token to cascade from and revokes
-// these lease IDs itself.
+// these lease IDs itself. SkippedDerefs names, distinct and in first-seen
+// order, every pointer entry whose own LIST/GET succeeded but whose $ref
+// target 403/404'd (SPEC §4.3): the sweep still silently produces no
+// secret for it (that behavior is unchanged), but the name is carried
+// here so a caller (cmd/ib) can surface a hint instead of a silent gap.
 type SweepResult struct {
 	Secrets       []SweptSecret
 	LeasesCreated bool
 	LeaseIDs      []string
+	SkippedDerefs []string
 }
 
 // validNameRe is the SPEC §4.2 final-name validator, applied AFTER
@@ -90,6 +95,9 @@ type sweepAccumulator struct {
 	secrets     []SweptSecret
 	leaseIDs    []string
 	leaseIDSeen map[string]bool
+
+	skippedDerefs     []string
+	skippedDerefsSeen map[string]bool
 }
 
 // add implements SPEC §4.2's name validation and first-writer-wins
@@ -123,6 +131,22 @@ func (sw *sweepAccumulator) addLeaseID(id string) {
 	}
 	sw.leaseIDSeen[id] = true
 	sw.leaseIDs = append(sw.leaseIDs, id)
+}
+
+// addSkippedDeref records name (the pointer entry's own normalized name)
+// in sw.skippedDerefs, distinct and in first-seen order — mirrors
+// addLeaseID. Called when a pointer entry's LIST/GET succeeded but its
+// $ref target 403/404'd (SPEC §4.3's silent-skip rule): no secret is
+// produced for it, but the name survives here for cmd/ib to surface.
+func (sw *sweepAccumulator) addSkippedDeref(name string) {
+	if sw.skippedDerefsSeen[name] {
+		return
+	}
+	if sw.skippedDerefsSeen == nil {
+		sw.skippedDerefsSeen = make(map[string]bool)
+	}
+	sw.skippedDerefsSeen[name] = true
+	sw.skippedDerefs = append(sw.skippedDerefs, name)
 }
 
 // normalizeName applies SPEC §4.2's name normalization: lowercase, then
@@ -382,6 +406,7 @@ func (c *Client) Sweep(ctx context.Context, token string, id identity.Identity, 
 		Secrets:       sw.secrets,
 		LeaseIDs:      sw.leaseIDs,
 		LeasesCreated: len(sw.leaseIDs) > 0,
+		SkippedDerefs: sw.skippedDerefs,
 	}, sweepErr
 }
 
@@ -593,6 +618,7 @@ func (c *Client) sweepDeref(ctx context.Context, token, key, refPath string, ima
 		return fmt.Errorf("vaultx: sweep: deref %s: %w", refPath, err)
 	}
 	if !found {
+		sw.addSkippedDeref(normalizeName(key))
 		return nil
 	}
 	if c.metrics != nil {

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/navistau/ironbark/internal/gitenv"
 	"github.com/navistau/ironbark/internal/identity"
@@ -21,18 +22,21 @@ import (
 // (exitcode.go) pattern-matches on these — and on gitenv's own
 // *CheckoutError/*SelectError types, and identity.ErrInvalidRemote, which
 // are already distinguishable on their own — to map every command's
-// failure to its CLIENT-SPEC §7 exit code, in one place.
+// failure to its CLIENT-SPEC §7 exit code, in one place. These carry no
+// "ib: " prefix of their own: every call site that prints one of these
+// errors to stderr already adds that prefix (`fmt.Fprintln(stderr, "ib:",
+// err)`), so baking it in here as well doubled it ("ib: ib: ...").
 var (
 	// errConfig covers CLIENT-SPEC §7 exit 2 causes that don't already
 	// have their own typed error: a bad ibcfg.Load or vaultx.New.
-	errConfig = errors.New("ib: configuration error")
+	errConfig = errors.New("configuration error")
 	// errUnknownSecret is wrapped with the requested name by get/run.
-	errUnknownSecret = errors.New("ib: unknown secret name")
+	errUnknownSecret = errors.New("unknown secret name")
 	// errVault covers exit 5: any Vault error other than 403/404
 	// encountered while discovering branch tiers or sweeping.
-	errVault = errors.New("ib: vault error")
+	errVault = errors.New("vault error")
 	// errUsage covers exit 1: a CLI invocation error (bad flags/args).
-	errUsage = errors.New("ib: usage error")
+	errUsage = errors.New("usage error")
 )
 
 // resolveOpts is everything resolve needs beyond the identity it derives
@@ -53,10 +57,12 @@ type resolveOpts struct {
 
 // resolve runs the CLIENT-SPEC §2–4 pipeline: checkout -> identity ->
 // branch-tier discovery -> environment selection -> sweep. It writes every
-// CLIENT-SPEC §3 visibility/staleness line to opts.Stderr as it goes. On a
-// sweep failure it revokes any leases the partial sweep created
-// (CLIENT-SPEC §4) before returning the error. Images (CLIENT-SPEC §4,
-// ironbark_images) are never applied — ib has no step image locally.
+// CLIENT-SPEC §3 visibility/staleness line to opts.Stderr as it goes, plus
+// (CLIENT-SPEC §4) one line naming any pointer entries the sweep skipped
+// because their $ref target 403/404'd. On a sweep failure it revokes any
+// leases the partial sweep created (CLIENT-SPEC §4) before returning the
+// error. Images (CLIENT-SPEC §4, ironbark_images) are never applied — ib
+// has no step image locally.
 func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecret, []string, error) {
 	info, err := gitenv.Checkout(opts.Runner)
 	if err != nil {
@@ -117,6 +123,10 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 			}
 		}
 		return nil, nil, fmt.Errorf("%w: sweep: %v", errVault, err)
+	}
+
+	if len(sweep.SkippedDerefs) > 0 {
+		fmt.Fprintf(opts.Stderr, "ib: skipped %d entries: no read on their targets (%s)\n", len(sweep.SkippedDerefs), strings.Join(sweep.SkippedDerefs, ", "))
 	}
 
 	secrets := make(map[string]vaultx.SweptSecret, len(sweep.Secrets))

@@ -341,6 +341,98 @@ func TestFacts_StaleRef(t *testing.T) {
 	}
 }
 
+// TestFacts_LocalBranchNameCollisionWithRemoteShortName reproduces a git
+// `%(refname:short)` gotcha (M5): when a LOCAL branch happens to be named
+// "origin/<name>" — colliding with what a remote-tracking branch's short
+// form would otherwise be — git's shortening degrades
+// refs/remotes/origin/<name> to the unhelpful "remotes/origin/<name>"
+// instead of "origin/<name>" (verified against git 2.x: shortening avoids
+// an ambiguous result). A plain TrimPrefix("origin/") then leaves the
+// name unrecognizable and the branch silently looks untracked.
+// `%(refname:lstrip=3)` sidesteps the ambiguity entirely: it always
+// strips exactly the three refs/remotes/origin/ components, regardless of
+// any colliding local branch.
+func TestFacts_LocalBranchNameCollisionWithRemoteShortName(t *testing.T) {
+	fx := newFixture(t)
+
+	gitRaw(t, fx.seed, "checkout", "-q", "-b", "conflict", "main")
+	commit(t, fx.seed, "c-conflict", "conflict-commit")
+	gitRaw(t, fx.seed, "push", "-q", "origin", "conflict")
+
+	gitRaw(t, fx.clone, "fetch", "-q", "origin")
+	// A LOCAL branch literally named "origin/conflict" collides with the
+	// short form git would otherwise give refs/remotes/origin/conflict.
+	gitRaw(t, fx.clone, "branch", "origin/conflict", "main")
+
+	r := ExecRunner{Dir: fx.clone}
+	tracked, _, _, _, lsErr := Facts(r, "main", []string{"conflict"})
+	if lsErr != nil {
+		t.Fatalf("lsRemoteErr = %v, want nil", lsErr)
+	}
+	if !contains(tracked, "conflict") {
+		t.Errorf("tracked = %v, want it to include %q despite the colliding local branch name", tracked, "conflict")
+	}
+}
+
+// TestFacts_ReflogHexLetteredBranchName reproduces M6: a branch named
+// entirely with hex-alphabet letters (e.g. "cafe") looks, byte for byte,
+// exactly like an abbreviated SHA. isSHA's old byte-pattern heuristic
+// misclassified it as a SHA and cleared reflogFrom to "", losing the
+// CLIENT-SPEC §3 rule 4 tie-break entirely for such a branch. Checking
+// whether refs/heads/<X> or refs/remotes/origin/<X> actually exists
+// (rather than guessing from X's byte pattern) gets this right.
+func TestFacts_ReflogHexLetteredBranchName(t *testing.T) {
+	fx := newFixture(t)
+
+	gitRaw(t, fx.seed, "checkout", "-q", "-b", "cafe", "main")
+	commit(t, fx.seed, "c-cafe", "cafe-commit")
+	gitRaw(t, fx.seed, "push", "-q", "origin", "cafe")
+
+	gitRaw(t, fx.clone, "fetch", "-q", "origin")
+	gitRaw(t, fx.clone, "checkout", "-q", "-b", "work", "origin/cafe")
+
+	r := ExecRunner{Dir: fx.clone}
+	_, _, reflogFrom, _, lsErr := Facts(r, "work", []string{"cafe"})
+	if lsErr != nil {
+		t.Fatalf("lsRemoteErr = %v, want nil", lsErr)
+	}
+	if reflogFrom != "cafe" {
+		t.Errorf("reflogFrom = %q, want %q (a hex-lettered branch name is not a SHA)", reflogFrom, "cafe")
+	}
+}
+
+// TestFacts_ReflogNonexistentNameIgnored reproduces T2's "leading '.'"
+// case: a git reflog's "branch: Created from <X>" message is free text,
+// not itself validated against real refs — X could name something that
+// isn't (and, since git rejects any dot-led ref component, could never
+// be) an actual branch. Facts must treat that as unknown (reflogFrom ==
+// "") rather than propagating an impossible name forward, which the old
+// isSHA-only check did not do (a non-hex string was always accepted as a
+// branch name, with no existence check at all).
+func TestFacts_ReflogNonexistentNameIgnored(t *testing.T) {
+	fx := newFixture(t)
+	gitRaw(t, fx.clone, "checkout", "-q", "-b", "work", "main")
+
+	// Fabricate a reflog entry no real git operation could produce: a
+	// "Created from" target that is not, and could never be, a real ref
+	// (git rejects any dot-led ref component).
+	sha := gitRaw(t, fx.clone, "rev-parse", "HEAD")
+	logPath := filepath.Join(fx.clone, ".git", "logs", "refs", "heads", "work")
+	line := sha + " " + sha + " ib-test <ib-test@example.com> 1700000000 +0000\tbranch: Created from .hidden\n"
+	if err := os.WriteFile(logPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := ExecRunner{Dir: fx.clone}
+	_, _, reflogFrom, _, lsErr := Facts(r, "work", []string{"main", "develop"})
+	if lsErr != nil {
+		t.Fatalf("lsRemoteErr = %v, want nil", lsErr)
+	}
+	if reflogFrom != "" {
+		t.Errorf("reflogFrom = %q, want empty (no such branch exists)", reflogFrom)
+	}
+}
+
 func TestFacts_LsRemoteFailure(t *testing.T) {
 	fx := newFixture(t)
 	gitRaw(t, fx.clone, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "does-not-exist.git"))

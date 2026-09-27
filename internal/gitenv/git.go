@@ -117,16 +117,16 @@ func Facts(r Runner, current string, tiers []string) (tracked []string, dist map
 	}
 
 	trackedSet := make(map[string]bool)
-	if out, err := r.Git("for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"); err == nil {
+	// M5: %(refname:lstrip=3) always strips exactly the three
+	// refs/remotes/origin/ path components, unlike %(refname:short) —
+	// whose shortening degrades to a longer, unstripped form (e.g.
+	// "remotes/origin/<name>") when a LOCAL branch happens to collide
+	// with the short name it would otherwise produce.
+	if out, err := r.Git("for-each-ref", "--format=%(refname:lstrip=3)", "refs/remotes/origin"); err == nil {
 		for _, line := range strings.Split(out, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || line == "origin" {
-				// "origin" is refs/remotes/origin/HEAD, whose
-				// refname:short form drops the "/HEAD" suffix entirely.
-				continue
-			}
-			name := strings.TrimPrefix(line, "origin/")
-			if name == "HEAD" {
+			name := strings.TrimSpace(line)
+			if name == "" || name == "HEAD" {
+				// refs/remotes/origin/HEAD lstrips to "HEAD".
 				continue
 			}
 			if tierSet[identity.Esc(name)] {
@@ -182,7 +182,7 @@ func Facts(r Runner, current string, tiers []string) (tracked []string, dist map
 				ref = strings.TrimPrefix(ref, "refs/heads/")
 				ref = strings.TrimPrefix(ref, "refs/remotes/origin/")
 				ref = strings.TrimPrefix(ref, "origin/")
-				if ref == "HEAD" || isSHA(ref) {
+				if ref == "HEAD" || !branchRefExists(r, ref) {
 					reflogFrom = ""
 				} else {
 					reflogFrom = ref
@@ -225,18 +225,20 @@ func Facts(r Runner, current string, tiers []string) (tracked []string, dist map
 	return tracked, dist, reflogFrom, staleList, nil
 }
 
-// isSHA reports whether s looks like a (possibly abbreviated) git object
-// id rather than a branch name, per CLIENT-SPEC §3's reflog normalisation
-// ("HEAD or a SHA -> \"\"").
-func isSHA(s string) bool {
-	if len(s) < 4 || len(s) > 40 {
-		return false
+// branchRefExists reports whether name is a real branch — a local
+// refs/heads/<name> or remote-tracking refs/remotes/origin/<name> ref
+// actually exists. Used to classify a git reflog's free-text "Created
+// from <X>" entry (CLIENT-SPEC §3 rule 4): X is a branch only if one of
+// these refs exists; anything else — a SHA, or free text that merely
+// looks like one (M6: a byte-pattern heuristic alone misclassifies a
+// valid hex-lettered branch name like "cafe" as a SHA), or a name that
+// could never be a real ref at all — is not.
+func branchRefExists(r Runner, name string) bool {
+	if _, err := r.Git("rev-parse", "--verify", "-q", "refs/heads/"+name); err == nil {
+		return true
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
-			return false
-		}
+	if _, err := r.Git("rev-parse", "--verify", "-q", "refs/remotes/origin/"+name); err == nil {
+		return true
 	}
-	return true
+	return false
 }

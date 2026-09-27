@@ -94,3 +94,16 @@ func entryBody(fields map[string]interface{}, customMeta map[string]string) stri
 	b, _ := json.Marshal(wire)
 	return string(b)
 }
+
+// derefBody builds a flat (non-KV2-shaped) dereference-target response —
+// the dynamic-engine shape (e.g. database/creds/*) — with a lease_id.
+func derefBody(fields map[string]interface{}, leaseID string) string {
+	var wire struct {
+		LeaseID string                 `json:"lease_id,omitempty"`
+		Data    map[string]interface{} `json:"data"`
+	}
+	wire.LeaseID = leaseID
+	wire.Data = fields
+	b, _ := json.Marshal(wire)
+	return string(b)
+}

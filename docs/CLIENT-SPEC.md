@@ -91,12 +91,26 @@ stale refs, skipped entries, lease notes) stays on stderr, unchanged by
 
 ### 1.4 `ib run [--env-file <file>]… [--no-masking] -- <cmd> [args…]`
 
-Runs `<cmd>` with an environment built from:
+Runs `<cmd>` with an environment built from the caller's environment,
+plus one of two modes:
 
-1. the caller's environment, then
-2. each `--env-file` in order (later files override earlier ones), where
-   a value of the exact form `ironbark://<name>` is replaced by secret
-   `<name>` from the sweep, and any other value is passed through as is.
+- **No `--env-file` (the normal way to invoke `ib run`).** The sweep
+  always runs, and every secret it produces is injected as
+  `SECRET_<NAME>` — `<NAME>` upper-cased, exactly the naming `ib env`
+  (§1.3) uses. A caller env var already named `SECRET_<NAME>` is
+  overwritten by the swept value. This is the default: no file to write
+  or keep in sync, and nothing to name per secret — just run the command.
+- **One or more `--env-file` (to use a subset, or your own names).**
+  Each file is applied in order (later files override earlier ones): a
+  value of the exact form `ironbark://<name>` is replaced by secret
+  `<name>` from the sweep, and any other value is passed through as is.
+  Reach for this when `<cmd>` expects specific variable names, only some
+  secrets should reach it, or it needs literal values (like `DEBUG=true`)
+  alongside secrets. Since a reference file holds only `ironbark://`
+  names, never values, it's safe to commit to the repo. The sweep runs
+  once per `ib run`, and only if at least one value across the given
+  files is an `ironbark://` reference — a file with no reference at all
+  never touches Vault.
 
 Env file syntax: `KEY=value` entries, one per logical line; blank lines
 and lines starting with `#` outside any open quote are ignored; `KEY` must
@@ -107,14 +121,15 @@ ends the entry, so a literal newline inside an open quote (as `ib env`,
 §1.3, emits) is part of the value, not a line break. A file written by
 `ib env` is valid input.
 
-A reference to a name the sweep did not produce → exit 3 before `<cmd>`
-starts; `ib run` never starts a command with a half-resolved environment.
+A `--env-file` reference to a name the sweep did not produce → exit 3
+before `<cmd>` starts; `ib run` never starts a command with a
+half-resolved environment. (There's no such failure in the no-file mode:
+it injects whatever the sweep produced, under names it derives itself.)
 
-The sweep runs once per `ib run`, and only if at least one value is an
-`ironbark://` reference.
-
-**Masking** (default on): every resolved value of length ≥ 4 is replaced
-by `<concealed by ib>` in the child's stdout and stderr, which `ib` pipes
+**Masking** (default on): every injected or resolved value of length ≥ 4
+— every swept secret in the no-file mode, every value substituted for an
+`ironbark://` reference in `--env-file` mode — is replaced by
+`<concealed by ib>` in the child's stdout and stderr, which `ib` pipes
 through, scanning as a byte stream rather than line-by-line (so a match
 split across two reads is still caught) and matching longest-value-first
 (so one resolved value that is a substring of another is never left
@@ -125,10 +140,10 @@ accidental logging, not a security boundary — the child holds the values.
 Exit status is the child's. Signals received by `ib` are forwarded to the
 child.
 
-**Leases.** If any resolved secret came from a lease-bearing deref
-(SPEC §4.3, e.g. a dynamic-engine credential), `ib run` revokes each such
-lease after the child exits by its `lease_id` (`PUT sys/leases/revoke`),
-authenticated with the caller's own token — never
+**Leases.** If any injected or resolved secret came from a lease-bearing
+deref (SPEC §4.3, e.g. a dynamic-engine credential), `ib run` revokes each
+such lease after the child exits by its `lease_id` (`PUT
+sys/leases/revoke`), authenticated with the caller's own token — never
 `auth/token/revoke-self`, which would revoke the caller's actual Vault
 session, not a lease. This is every lease the sweep created, referenced
 or not — not only the leases behind values actually substituted into the
@@ -137,6 +152,7 @@ child's environment. This needs the caller's policy to grant `update` on
 logged to stderr and does not change `ib run`'s exit status (best-effort,
 matching SPEC §3.4's revoke philosophy — the lease's TTL is the backstop).
 `get` and `env` leave leases to expire on their TTL, and say so on stderr.
+Applies to both modes above.
 
 ## 2. Identity
 

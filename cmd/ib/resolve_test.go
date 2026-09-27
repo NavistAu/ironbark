@@ -196,6 +196,42 @@ func TestResolve_NearestAncestorVisibilityLine(t *testing.T) {
 	}
 }
 
+// TestResolve_SlashBranchDirectMatch is T2's "branch with /" case,
+// exercised end to end through resolve(): a tracked branch named
+// "release/2.0" (identity.Esc("release/2.0") == "release%2f2.0" — the
+// tier name a Vault LIST would report) must be correctly recognized and
+// selected via the Esc-match path all the way through the resolve
+// pipeline (identity, tier discovery, selection). The dedicated
+// regression test for the refname:short collision gotcha itself (M5)
+// lives at the gitenv package level
+// (TestFacts_LocalBranchNameCollisionWithRemoteShortName), where it can
+// assert on TrackedBranches directly without an unrelated ambiguous-ref
+// side effect on distance computation.
+func TestResolve_SlashBranchDirectMatch(t *testing.T) {
+	fx := newIBFixture(t, func(seedDir string) {
+		pushBranch(t, seedDir, "release/2.0", "main", 1)
+	})
+	gitRaw(t, fx.clone, "checkout", "-q", "-b", "release/2.0", "origin/release/2.0")
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"release%2f2.0/"}))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ib: env release/2.0 (direct match)") {
+		t.Errorf("stderr = %q, want release/2.0 selected via the Esc-matched direct match", stderr.String())
+	}
+}
+
 // TestResolve_Ambiguous exercises CLIENT-SPEC §3 rule 6: a tie that
 // survives both the reflog and cascade tie-breaks fails with the
 // candidates (and their distances) named on stderr, asking for --branch.

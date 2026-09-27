@@ -391,9 +391,8 @@ implementation, never a second copy.
 - `ib get <name>` — one secret, resolved across tiers as the sweep does.
 - `ib env` — every secret as `SECRET_<NAME>=<value>` lines (break-glass;
   values on disk).
-- `ib run --env-file <file> -- <cmd>` — resolves `ironbark://<name>` refs in
-  the file and runs `<cmd>` with them set, like `op run`. The file holds refs,
-  not values.
+- `ib run -- <cmd>` — runs `<cmd>` with every secret as `SECRET_<NAME>`;
+  `--env-file <file>` sets only the `ironbark://<name>` refs in that file.
 
 Identity comes from the checkout, not flags: `<org>/<repo>` from the `origin`
 remote, event fixed as `push`. The caller's own token does every read — no

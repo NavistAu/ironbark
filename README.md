@@ -120,12 +120,13 @@ Four commands:
 - `ib env` — every secret as `SECRET_<NAME>='<value>'` lines (break-glass —
   values land on disk if you redirect this to a file; `ib run` below is the
   normal path).
-- `ib run --env-file <file> -- <cmd> [args…]` — resolves `ironbark://<name>`
-  references in the file and runs `<cmd>` with them set, masking resolved
-  values in the child's stdout/stderr; the way to use a secret without it
-  ever touching disk.
+- `ib run -- <cmd> [args…]` — runs `<cmd>` with every secret set as
+  `SECRET_<NAME>`, masking the values in its stdout/stderr; the way to use
+  secrets without them touching disk. `--env-file <file>` instead sets only
+  the `ironbark://<name>` references in that file (a subset, or your own
+  variable names).
 
-Example env file, consumed by `ib run --env-file`:
+Example env file, for `ib run --env-file`:
 
 ```
 API_TOKEN=ironbark://api_token

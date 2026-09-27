@@ -21,18 +21,21 @@ import (
 // (exitcode.go) pattern-matches on these — and on gitenv's own
 // *CheckoutError/*SelectError types, and identity.ErrInvalidRemote, which
 // are already distinguishable on their own — to map every command's
-// failure to its CLIENT-SPEC §7 exit code, in one place.
+// failure to its CLIENT-SPEC §7 exit code, in one place. These carry no
+// "ib: " prefix of their own: every call site that prints one of these
+// errors to stderr already adds that prefix (`fmt.Fprintln(stderr, "ib:",
+// err)`), so baking it in here as well doubled it ("ib: ib: ...").
 var (
 	// errConfig covers CLIENT-SPEC §7 exit 2 causes that don't already
 	// have their own typed error: a bad ibcfg.Load or vaultx.New.
-	errConfig = errors.New("ib: configuration error")
+	errConfig = errors.New("configuration error")
 	// errUnknownSecret is wrapped with the requested name by get/run.
-	errUnknownSecret = errors.New("ib: unknown secret name")
+	errUnknownSecret = errors.New("unknown secret name")
 	// errVault covers exit 5: any Vault error other than 403/404
 	// encountered while discovering branch tiers or sweeping.
-	errVault = errors.New("ib: vault error")
+	errVault = errors.New("vault error")
 	// errUsage covers exit 1: a CLI invocation error (bad flags/args).
-	errUsage = errors.New("ib: usage error")
+	errUsage = errors.New("usage error")
 )
 
 // resolveOpts is everything resolve needs beyond the identity it derives

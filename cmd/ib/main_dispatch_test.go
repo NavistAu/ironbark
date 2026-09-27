@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -138,5 +140,71 @@ func TestBuildResolveOpts_MissingConfig(t *testing.T) {
 	}
 	if exitCode(err) != 2 {
 		t.Errorf("exitCode(err) = %d, want 2", exitCode(err))
+	}
+}
+
+// TestDispatchGet_MissingVaultAddress_StderrText proves the printed stderr
+// line for a missing Vault address carries exactly one "ib: " prefix.
+// buildResolveOpts wraps ibcfg's own error with errConfig, and dispatchGet
+// prints that error prefixed with "ib: " — before the dogfood fix,
+// errConfig's own message already started with "ib: ", doubling it to
+// "ib: ib: configuration error: ...".
+func TestDispatchGet_MissingVaultAddress_StderrText(t *testing.T) {
+	t.Setenv("BAO_ADDR", "")
+	t.Setenv("VAULT_ADDR", "")
+	t.Setenv("BAO_TOKEN", "")
+	t.Setenv("VAULT_TOKEN", "")
+
+	var stdout, stderr bytes.Buffer
+	code := dispatchGet([]string{"name"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("dispatchGet = %d, want 2 (stderr: %s)", code, stderr.String())
+	}
+
+	want := "ib: configuration error: ibcfg: no Vault address set (BAO_ADDR or VAULT_ADDR)\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q (exactly one \"ib: \" prefix)", stderr.String(), want)
+	}
+}
+
+// TestDispatchGet_UnknownName_StderrText proves the printed stderr line for
+// an unknown secret name carries exactly one "ib: " prefix. get.go wraps
+// the miss with errUnknownSecret, and dispatchGet prints that error
+// prefixed with "ib: " — before the dogfood fix, errUnknownSecret's own
+// message already started with "ib: ", doubling it to
+// "ib: ib: unknown secret name: ...".
+func TestDispatchGet_UnknownName_StderrText(t *testing.T) {
+	fx, fv := setupGetEnvFixture(t)
+	srv := httptest.NewServer(fv.handler())
+	t.Cleanup(srv.Close)
+
+	t.Setenv("BAO_ADDR", srv.URL)
+	t.Setenv("BAO_TOKEN", rtToken)
+	t.Setenv("VAULT_ADDR", "")
+	t.Setenv("VAULT_TOKEN", "")
+	t.Setenv("IB_KV_MOUNT", "")
+	t.Setenv("IB_KV_PREFIX", "")
+	t.Setenv("IB_BRANCH", "")
+
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(fx.clone); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	var stdout, stderr bytes.Buffer
+	code := dispatchGet([]string{"nope"}, &stdout, &stderr)
+	if code != 3 {
+		t.Fatalf("dispatchGet = %d, want 3 (stderr: %s)", code, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
+	last := lines[len(lines)-1]
+	want := `ib: unknown secret name: "nope"`
+	if last != want {
+		t.Errorf("last stderr line = %q, want %q (exactly one \"ib: \" prefix)", last, want)
 	}
 }

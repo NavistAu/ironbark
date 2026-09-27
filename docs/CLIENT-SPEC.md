@@ -8,9 +8,9 @@ of the form "SPEC §n" point there.
 
 `ib` gives a local run — an operator's shell, an agent, a script — the same
 secrets a CI run on the same repository and environment would get, read
-from the same KV layout (SPEC §2.4) the broker sweeps. One layout, one
-resolution algorithm, two callers: the broker for CI, `ib` for everything
-else.
+from the same KV layout (SPEC §2.4) the broker sweeps, subject to the
+divergences named in §6. One layout, one resolution algorithm, two
+callers: the broker for CI, `ib` for everything else.
 
 In scope: resolving secrets for a local checkout; delivering them as a
 single value, an env file, or a child process environment.
@@ -63,10 +63,14 @@ Runs `<cmd>` with an environment built from:
    a value of the exact form `ironbark://<name>` is replaced by secret
    `<name>` from the sweep, and any other value is passed through as is.
 
-Env file syntax: `KEY=value` lines; blank lines and lines starting with
-`#` ignored; `KEY` must match `[A-Za-z_][A-Za-z0-9_]*`; a value may be
-single- or double-quoted (quotes stripped, no escape processing beyond
-`'\''` in single quotes). A file written by `ib env` is valid input.
+Env file syntax: `KEY=value` entries, one per logical line; blank lines
+and lines starting with `#` outside any open quote are ignored; `KEY` must
+match `[A-Za-z_][A-Za-z0-9_]*`; a value may be single- or double-quoted
+(quotes stripped, no escape processing beyond `'\''` in single quotes).
+Parsing is quote-aware: a quoted value's closing quote, not end-of-line,
+ends the entry, so a literal newline inside an open quote (as `ib env`,
+§1.3, emits) is part of the value, not a line break. A file written by
+`ib env` is valid input.
 
 A reference to a name the sweep did not produce → exit 3 before `<cmd>`
 starts; `ib run` never starts a command with a half-resolved environment.
@@ -76,17 +80,26 @@ The sweep runs once per `ib run`, and only if at least one value is an
 
 **Masking** (default on): every resolved value of length ≥ 4 is replaced
 by `<concealed by ib>` in the child's stdout and stderr, which `ib` pipes
-through. `--no-masking` passes the child's stdio through untouched (use
-for interactive commands). Masking is a guard against accidental logging,
-not a security boundary — the child holds the values.
+through, scanning as a byte stream rather than line-by-line (so a match
+split across two reads is still caught) and matching longest-value-first
+(so one resolved value that is a substring of another is never left
+partially exposed). `--no-masking` passes the child's stdio through
+untouched (use for interactive commands). Masking is a guard against
+accidental logging, not a security boundary — the child holds the values.
 
 Exit status is the child's. Signals received by `ib` are forwarded to the
 child.
 
 **Leases.** If any resolved secret came from a lease-bearing deref
-(SPEC §4.3, e.g. a dynamic-engine credential), `ib run` revokes those
-leases after the child exits. `get` and `env` leave leases to expire on
-their TTL, and say so on stderr.
+(SPEC §4.3, e.g. a dynamic-engine credential), `ib run` revokes each such
+lease after the child exits by its `lease_id` (`PUT sys/leases/revoke`),
+authenticated with the caller's own token — never
+`auth/token/revoke-self`, which would revoke the caller's actual Vault
+session, not a lease. This needs the caller's policy to grant `update` on
+`sys/leases/revoke` (or the lease's own prefix); a revoke failure is
+logged to stderr and does not change `ib run`'s exit status (best-effort,
+matching SPEC §3.4's revoke philosophy — the lease's TTL is the backstop).
+`get` and `env` leave leases to expire on their TTL, and say so on stderr.
 
 ## 2. Identity
 
@@ -107,8 +120,11 @@ The checkout is located with `git rev-parse` (so linked worktrees, whose
 `.git` is a file, work unchanged). A detached `HEAD` is valid.
 
 `.identity` (SPEC §4.4) is not checked: `ib` has no forge-verified remote
-id to compare against. `.config` (SPEC §4.5) is not read: `vault_token`
-suppression concerns tokens handed to pipelines, and `ib` hands out none.
+id to compare against — see §6 for the security implication where an
+operator relies on `.identity` hardening. `.config` (SPEC §4.5) is not
+read: `vault_token` suppression concerns tokens handed to pipelines, and
+`ib` hands out none — but its fail-closed enforcement (§4.5) is skipped
+too; see §6.
 
 ## 3. Environment (branch) selection
 
@@ -133,7 +149,9 @@ Selection, in order; the first rule that yields one branch wins:
    ancestor with `HEAD` are dropped. Lowest `d` wins.
 4. **Tie → reflog.** If the checked-out branch's reflog creation entry
    (`branch: Created from <ref>`) names one of the tied branches (as `T`
-   or `origin/T`), it wins.
+   or `origin/T`), it wins. In a detached `HEAD` there is no checked-out
+   branch and therefore no branch reflog entry to consult — this rule is
+   skipped and rule 5 applies directly.
 5. **Tie → cascade.** The first tied branch in the cascade list wins.
    Built-in list, least to most production-like, so an unresolved guess
    lands on a lower environment: `dev`, `develop`, `development`, `test`,
@@ -181,8 +199,15 @@ caller's token, via the **same code** the broker uses (§8):
 
 Address: `BAO_ADDR`, else `VAULT_ADDR`; neither → exit 2. Token:
 `BAO_TOKEN`, else `VAULT_TOKEN`, else the token helper file
-`~/.vault-token`; none → exit 2 with a hint to run `ib auth`. CA and TLS
-settings follow the standard `VAULT_CACERT`/`BAO_CACERT` variables.
+`~/.vault-token` — the default Vault/OpenBao CLI token-helper path only;
+`ib` does not shell out to a custom `token_helper` program a CLI config
+may point at instead; none → exit 2 with a hint to run `ib auth`. CA and
+TLS settings follow the standard `VAULT_CACERT`/`BAO_CACERT` variables:
+`VAULT_CACERT` (and the other `VAULT_*` TLS vars) are picked up for free
+by the underlying Vault API client; `BAO_CACERT` and its siblings are not
+— the client library only recognizes `VAULT_*` names, so `ib` maps any set
+`BAO_*` TLS variable onto the same config fields itself (§8), the same
+precedence pattern as `BAO_ADDR`/`BAO_TOKEN`.
 
 ### 5.2 Layout
 
@@ -210,6 +235,21 @@ until needed.
   only change which *permitted* set is returned.
 - Values never touch disk except via `ib env` redirected by the caller.
   `ib` itself writes no cache.
+- `ib` does not evaluate `.identity` (§4.4) or `.config` (§4.5) — see §2.
+  Where an operator has enabled `.identity` binding as hardening against a
+  forge repo-rename/recreate inheriting an old repo's KV tree (SPEC §4.4,
+  DESIGN §3), that hardening is CI-only: a binding mismatch that makes the
+  broker fail closed (204, no secrets) does not stop `ib` from returning
+  the full sweep to whoever holds a token scoped to that tier. Operators
+  relying on `.identity` for that protection should treat `ib` access as
+  bypassing it — the caller's Vault policy remains the only bound, the
+  same model as the `ironbark_images` divergence (§1.3).
+- Likewise, a malformed `.config` entry (§4.5) makes the broker fail
+  closed for every CI run against that repo (502, no secrets, until
+  fixed); `ib` never reads `.config`, so it is unaffected and keeps
+  returning secrets normally in that state. Accepted for M3 — `.config`'s
+  only fields concern the minted `vault_token` `ib` never hands out — not
+  a bug to fix silently.
 
 ## 7. Exit codes
 
@@ -228,13 +268,24 @@ until needed.
 - Shared, not copied: the sweep, entry classification, naming, pin
   handling and dereference in `internal/vaultx` are refactored so they
   take a token and an address and do not depend on the broker's AppRole
-  session (`vaultx.Config` today carries `RoleID`/`SecretID`). The broker
-  and `ib` call the same functions; SPEC §9.2–9.3 sweep tests cover both.
+  session (`vaultx.Config` today carries `RoleID`/`SecretID`). `Sweep`
+  already reads under a caller-supplied token; the remaining gap is
+  `SweepResult`, which today reports only a `LeasesCreated bool` — `ib
+  run`'s lease revocation (§1.4) needs each deref's `lease_id` itself, so
+  `SweepResult`/`SweptSecret` gain a `LeaseID` field. The broker and `ib`
+  call the same functions; SPEC §9.2–9.3 sweep tests cover both.
 - `internal/identity` — `Esc` reused as is. Remote-URL parsing is new and
   lives there.
 - `internal/gitenv` (new) — §2 checkout discovery and §3 selection,
   shelling out to `git`. Unit-tested against scripted fixture repos
   (branch, worktree, detached, orphan, tie cases).
+- A new `ib`-specific config loader for §5's env vars — distinct from
+  `internal/config`, which is the broker's own surface (SPEC §7) and
+  requires broker-only fields (`IRONBARK_WOODPECKER_PUBLIC_KEY`,
+  `IRONBARK_VAULT_ROLE_ID`/`_SECRET_ID`, …) `ib` has no reason to supply.
+  It also maps any set `BAO_*` TLS variable (§5.1) onto the `api.Config`
+  `vaultx.New` builds, since the underlying client only reads `VAULT_*`
+  names for that.
 - Integration: the SPEC §9.3 containerized Vault and OpenBao harness,
   plus a test asserting `ib env` and a broker response agree on the same
   layout and branch.

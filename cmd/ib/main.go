@@ -8,10 +8,10 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/navistau/ironbark/internal/gitenv"
 	"github.com/navistau/ironbark/internal/ibcfg"
@@ -95,26 +95,52 @@ func stdoutIsTerminal(w io.Writer) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-func dispatchGet(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("get", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	branch := fs.String("branch", "", "override the selected branch (CLIENT-SPEC §3 rule 1)")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(stderr, "ib: usage: ib get [--branch <name>] <name>")
-		return 1
+// splitBranchFlag pulls a --branch <name> (or --branch=<name>, or the
+// single-dash form) pair out of args wherever it appears, returning the
+// branch value ("" if not given) and the remaining args in their original
+// relative order (M8). Go's flag package alone stops parsing at the first
+// non-flag argument, so `ib get NAME --branch x` would otherwise leave
+// both NAME and --branch/x as unrecognized positional args — get/env's
+// --branch (CLIENT-SPEC §1) needs to work regardless of where it appears.
+// ib run does NOT use this: its own "--" already marks where ib's flags
+// end and the child command begins, so flags-after-positionals has no
+// meaning there.
+func splitBranchFlag(args []string) (branch string, rest []string, err error) {
+	rest = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--branch" || a == "-branch":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("%w: %s needs a value", errUsage, a)
+			}
+			i++
+			branch = args[i]
+		case strings.HasPrefix(a, "--branch="):
+			branch = strings.TrimPrefix(a, "--branch=")
+		case strings.HasPrefix(a, "-branch="):
+			branch = strings.TrimPrefix(a, "-branch=")
+		default:
+			rest = append(rest, a)
+		}
 	}
-	if fs.NArg() != 1 {
+	return branch, rest, nil
+}
+
+func dispatchGet(args []string, stdout, stderr io.Writer) int {
+	branch, rest, err := splitBranchFlag(args)
+	if err != nil || len(rest) != 1 {
 		fmt.Fprintln(stderr, "ib: usage: ib get [--branch <name>] <name>")
 		return 1
 	}
 
-	opts, err := buildResolveOpts(*branch, stderr)
+	opts, err := buildResolveOpts(branch, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return exitCode(err)
 	}
 
-	if err := cmdGet(context.Background(), fs.Arg(0), opts, stdout, stdoutIsTerminal(stdout)); err != nil {
+	if err := cmdGet(context.Background(), rest[0], opts, stdout, stdoutIsTerminal(stdout)); err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return exitCode(err)
 	}
@@ -122,19 +148,13 @@ func dispatchGet(args []string, stdout, stderr io.Writer) int {
 }
 
 func dispatchEnv(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("env", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	branch := fs.String("branch", "", "override the selected branch (CLIENT-SPEC §3 rule 1)")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(stderr, "ib: usage: ib env [--branch <name>]")
-		return 1
-	}
-	if fs.NArg() != 0 {
+	branch, rest, err := splitBranchFlag(args)
+	if err != nil || len(rest) != 0 {
 		fmt.Fprintln(stderr, "ib: usage: ib env [--branch <name>]")
 		return 1
 	}
 
-	opts, err := buildResolveOpts(*branch, stderr)
+	opts, err := buildResolveOpts(branch, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return exitCode(err)

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ib`, a local client (`cmd/ib`) giving an operator's or agent's local run
+  the same secrets a CI run on the same repo/branch would get: `ib auth`,
+  `ib get <name>`, `ib env`, and `ib run --env-file <file> -- <cmd>`. Shares
+  the broker's sweep/deref/naming code (`internal/vaultx`); every read uses
+  the caller's own Vault/OpenBao token, never a mint. Unit- and
+  integration-tested against both Vault and OpenBao. See
+  [CLIENT-SPEC.md](docs/CLIENT-SPEC.md). Not published as a release artifact
+  yet — install from source (`go install ./cmd/ib`); see DEC-260723140246.
+
 ## [0.1.2] - 2026-08-19
 
 ### Fixed

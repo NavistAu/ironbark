@@ -73,6 +73,16 @@ func Parse(r io.Reader) ([]Entry, error) {
 	line := 1
 
 	for i < n {
+		// M3: leading whitespace (including a bare '\r' from a CRLF line
+		// ending) never starts a key — skip it before classifying the
+		// line as blank, a comment, or KEY=value. This also makes a
+		// whitespace-only line blank and an indented '#' line a comment.
+		for i < n && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r') {
+			i++
+		}
+		if i >= n {
+			break
+		}
 		switch data[i] {
 		case '\n':
 			i++
@@ -102,29 +112,43 @@ func Parse(r io.Reader) ([]Entry, error) {
 		i++ // skip '='
 
 		var value string
+		var quoted bool
 		switch {
 		case i < n && data[i] == '\'':
+			quoted = true
 			value, i, line, err = scanQuoted(data, i+1, line, '\'')
 		case i < n && data[i] == '"':
+			quoted = true
 			value, i, line, err = scanQuoted(data, i+1, line, '"')
 		default:
 			vStart := i
 			for i < n && data[i] != '\n' {
 				i++
 			}
-			value = string(data[vStart:i])
+			end := i
+			if end > vStart && data[end-1] == '\r' {
+				// M3: strip a trailing \r (CRLF line ending).
+				end--
+			}
+			value = string(data[vStart:end])
 		}
 		if err != nil {
 			return nil, fmt.Errorf("envfile: line %d: %w", keyLine, err)
 		}
 
-		entries = append(entries, Entry{Key: key, Value: value, Line: keyLine})
-
-		// Ignore any trailing bytes to end of line (well-formed input is
-		// already positioned at '\n' or EOF here).
+		// M3: after a closing quote, only whitespace (and a trailing \r
+		// before the newline) may follow on the same line — anything else
+		// is an error rather than silently discarded. A bare (unquoted)
+		// value already consumed to end of line, so this is a no-op there.
+		restStart := i
 		for i < n && data[i] != '\n' {
 			i++
 		}
+		if quoted && strings.Trim(string(data[restStart:i]), " \t\r") != "" {
+			return nil, fmt.Errorf("envfile: line %d: unexpected text after closing quote", keyLine)
+		}
+
+		entries = append(entries, Entry{Key: key, Value: value, Line: keyLine})
 	}
 
 	return entries, nil

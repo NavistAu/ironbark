@@ -84,6 +84,27 @@ func TestParse(t *testing.T) {
 				{Key: "B", Value: "z", Line: 3},
 			},
 		},
+		{
+			// M3: whitespace-only lines are blank, an indented '#' line is
+			// still a comment, and leading whitespace before a key is
+			// skipped rather than rejected as an invalid key.
+			name: "whitespace-only and indented lines",
+			in:   "   \nFOO='bar'\n  # indented comment\n  BAZ='qux'\n",
+			want: []Entry{
+				{Key: "FOO", Value: "bar", Line: 2},
+				{Key: "BAZ", Value: "qux", Line: 4},
+			},
+		},
+		{
+			// M3: a trailing \r (CRLF line ending) is stripped from a bare
+			// (unquoted) value, and a CRLF blank line is still blank.
+			name: "CRLF line endings",
+			in:   "\r\nFOO=bar\r\nBAZ='qux'\r\n",
+			want: []Entry{
+				{Key: "FOO", Value: "bar", Line: 2},
+				{Key: "BAZ", Value: "qux", Line: 3},
+			},
+		},
 	}
 
 	for _, c := range cases {
@@ -99,6 +120,30 @@ func TestParse(t *testing.T) {
 				if got[i] != c.want[i] {
 					t.Errorf("entry %d = %+v, want %+v", i, got[i], c.want[i])
 				}
+			}
+		})
+	}
+}
+
+// TestParseTrailingWhitespaceAfterQuoteAllowed proves M3's "non-blank text
+// after a closing quote is an error" doesn't reject harmless trailing
+// whitespace or a CRLF line ending after the closing quote.
+func TestParseTrailingWhitespaceAfterQuoteAllowed(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"trailing spaces", "FOO='bar'   \n"},
+		{"trailing CRLF", "FOO='bar'\r\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := Parse(strings.NewReader(c.in))
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", c.in, err)
+			}
+			if len(got) != 1 || got[0].Value != "bar" {
+				t.Errorf("Parse(%q) = %+v, want one entry FOO=bar", c.in, got)
 			}
 		})
 	}
@@ -140,6 +185,20 @@ func TestParseErrors(t *testing.T) {
 			in:         "GOOD='fine'\n1BAD=x\n",
 			wantLine:   2,
 			wantSubstr: "key",
+		},
+		{
+			// M3: text after a closing quote (other than trailing
+			// whitespace/CRLF) is an error, not silently discarded.
+			name:       "non-blank text after closing quote",
+			in:         "FOO='bar'baz\n",
+			wantLine:   1,
+			wantSubstr: "after closing quote",
+		},
+		{
+			name:       "trailing comment after closing quote is still an error",
+			in:         "FOO='bar' # comment\n",
+			wantLine:   1,
+			wantSubstr: "after closing quote",
 		},
 	}
 

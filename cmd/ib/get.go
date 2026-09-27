@@ -18,7 +18,7 @@ const leaseNote = "ib: leases created; they expire on TTL"
 // ModeCharDevice bit). An unknown name wraps errUnknownSecret, which
 // exitCode maps to exit 3.
 func cmdGet(ctx context.Context, name string, opts resolveOpts, stdout io.Writer, isTerminal bool) error {
-	secrets, leaseIDs, err := resolve(ctx, opts)
+	secrets, leaseIDs, _, err := resolve(ctx, opts)
 	if err != nil {
 		return err
 	}

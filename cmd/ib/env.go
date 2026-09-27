@@ -14,7 +14,7 @@ import (
 // as one envfile.Format line per secret, sorted by name (CLIENT-SPEC
 // §1.3).
 func cmdEnv(ctx context.Context, opts resolveOpts, stdout io.Writer) error {
-	secrets, leaseIDs, err := resolve(ctx, opts)
+	secrets, leaseIDs, _, err := resolve(ctx, opts)
 	if err != nil {
 		return err
 	}

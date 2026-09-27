@@ -175,7 +175,7 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, buildOpts func(
 
 		var leaseIDs []string
 		var rerr error
-		secrets, leaseIDs, rerr = resolve(ctx, ropts)
+		secrets, leaseIDs, _, rerr = resolve(ctx, ropts)
 		if rerr != nil {
 			fmt.Fprintln(stderr, "ib:", rerr)
 			return exitCode(rerr)

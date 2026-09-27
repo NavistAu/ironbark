@@ -171,7 +171,13 @@ Selection, in order; the first rule that yields one branch wins:
    for `--branch`. `ib` never guesses past this point, and never falls back
    to the default branch on its own.
 
-No tracked branches visible, or none sharing history with `HEAD` → exit 4.
+**No branch tiers at all.** If the caller can see no branch directory under
+`<B>/push/` (the repository keeps its secrets only in the event and base
+tiers, which the broker serves to every push), selection is skipped: `ib`
+sweeps `<B>/push` and `<B>` only, as a CI push to a branch with no branch
+tier does, and says so on stderr (`ib: no branch tiers; event and base tiers
+only`). An override naming a branch is then an error (exit 4). If branch
+tiers exist but none shares history with `HEAD`, rule 6 applies (exit 4).
 
 **Stale refs.** Before rule 3, `ib` runs `git ls-remote origin` once and
 compares each tracked `origin/T` with the forge. Any difference → a

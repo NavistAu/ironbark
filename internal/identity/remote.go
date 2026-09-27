@@ -51,6 +51,13 @@ func ParseRemote(remote string) (org, repo string, err error) {
 		if idx < 0 {
 			return "", "", fmt.Errorf("%w: not a URL and not scp-like syntax", ErrInvalidRemote)
 		}
+		host := remote[:idx]
+		if strings.HasPrefix(host, ".") || strings.HasPrefix(host, "/") {
+			// A colon does not make this scp-like syntax: a local path can
+			// itself contain one (e.g. an absolute path, or a leading
+			// "./"), and scp-like hosts never start with "." or "/".
+			return "", "", fmt.Errorf("%w: %q looks like a local path, not scp-like syntax", ErrInvalidRemote, remote)
+		}
 		path = remote[idx+1:]
 	}
 
@@ -61,11 +68,33 @@ func ParseRemote(remote string) (org, repo string, err error) {
 	if len(segments) < 2 {
 		return "", "", fmt.Errorf("%w: %q has fewer than two path segments", ErrInvalidRemote, remote)
 	}
-	org = segments[len(segments)-2]
-	repo = segments[len(segments)-1]
+	org = strings.ToLower(segments[len(segments)-2])
+	repo = strings.ToLower(segments[len(segments)-1])
 	if org == "" || repo == "" {
 		return "", "", fmt.Errorf("%w: %q has an empty org or repo segment", ErrInvalidRemote, remote)
 	}
+	if !isIdentitySegment(org) || !isIdentitySegment(repo) {
+		return "", "", fmt.Errorf("%w: %q has an org or repo outside the identity charset", ErrInvalidRemote, remote)
+	}
 
-	return strings.ToLower(org), strings.ToLower(repo), nil
+	return org, repo, nil
+}
+
+// isIdentitySegment reports whether s (already lowercased) is safe to use
+// as an org or repo path segment: every byte in the broker's identity
+// charset (isUnescaped, in esc.go — the same [a-z0-9._-] set esc()
+// guarantees its output stays within), and not "..", which fits that
+// charset byte-for-byte but would walk SPEC §2.4's KV base path
+// (`<prefix>/<org>/<repo>`, built unescaped — unlike the branch, org/repo
+// are never run through esc()) up a level.
+func isIdentitySegment(s string) bool {
+	if s == ".." {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isUnescaped(s[i]) {
+			return false
+		}
+	}
+	return true
 }

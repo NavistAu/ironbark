@@ -63,6 +63,36 @@ func TestParseRemote(t *testing.T) {
 			url:     "file:///x/y",
 			wantErr: true,
 		},
+		{
+			name:    "org outside the identity charset",
+			url:     "https://git.example.com/ac!me/widgets",
+			wantErr: true,
+		},
+		{
+			name:    "repo outside the identity charset (space)",
+			url:     "https://git.example.com/acme/wid gets",
+			wantErr: true,
+		},
+		{
+			name:    "org is a path-traversal segment",
+			url:     "https://git.example.com/../widgets",
+			wantErr: true,
+		},
+		{
+			name:    "repo is a path-traversal segment",
+			url:     "https://git.example.com/acme/..",
+			wantErr: true,
+		},
+		{
+			name:    "scp-like host that is really an absolute local path",
+			url:     "/local/path:acme/widgets",
+			wantErr: true,
+		},
+		{
+			name:    "scp-like host that is really a relative local path",
+			url:     "./local:acme/widgets",
+			wantErr: true,
+		},
 	}
 
 	for _, c := range cases {

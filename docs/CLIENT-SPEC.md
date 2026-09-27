@@ -22,14 +22,20 @@ bound on what `ib` returns (§6).
 
 ## 1. Commands
 
+`get`, `env`, and `run` each also accept a global `--branch <name>` (or
+`IB_BRANCH=<name>`) override, §3 rule 1; omitted from the synopses below
+for brevity. `auth` takes no such flag — it has no environment to select.
+
 ### 1.1 `ib auth [args…]`
 
 Convenience wrapper over the Vault/OpenBao CLI login. Runs `bao login
 [args…]` if `bao` is on `PATH`, else `vault login [args…]`, else fails
 with a message naming both. Arguments pass through unchanged (method,
-path, username). The token lands wherever that CLI's token helper puts it
-(default `~/.vault-token`), which is where `ib` reads it (§5.1). `ib auth`
-adds nothing else — no token storage of its own.
+path, username). The token lands wherever that CLI's token helper puts
+it, but `ib` itself only reads it back from the default location,
+`~/.vault-token` (§5.1) — a `bao`/`vault` config pointing `token_helper`
+elsewhere breaks the `ib auth` → `ib get` handoff. `ib auth` adds nothing
+else — no token storage of its own.
 
 ### 1.2 `ib get <name>`
 
@@ -134,9 +140,11 @@ trusted for authorization — the caller's policy is (§6).
 
 **Tracked branches** are the branch directories under
 `<mount>/metadata/<B>/push/` that the caller's token can LIST (SPEC §2.4
-layout). They are matched to git branch names by escaping each
-remote-tracking branch name with SPEC §2.2 `Esc` and comparing — no
-unescaping.
+layout). They are matched against `T`, the short name of each
+remote-tracking branch (`origin/T` with the `origin/` remote prefix
+stripped — never the full ref), by escaping `T` with SPEC §2.2 `Esc` and
+comparing — no unescaping. `origin/T`, ref intact, is used only for the
+ancestry and freshness checks below.
 
 Selection, in order; the first rule that yields one branch wins:
 
@@ -176,8 +184,9 @@ printed to stderr: `ib: env develop (nearest ancestor, 3 commits)`.
 
 ## 4. Sweep
 
-Exactly SPEC §4 with identity (§2) and branch (§3), made with the
-caller's token, via the **same code** the broker uses (§8):
+SPEC §4.1–§4.3 and §4.6 with identity (§2) and branch (§3), made with the
+caller's token, via the **same code** the broker uses (§8) — except the
+`.identity`/`.config`/image-pin divergences noted in §6:
 
 - Tiers `<B>/push/<esc(branch)>`, `<B>/push`, `<B>`, most specific first;
   plain keys only; dot-keys skipped; 403/404 skip that tier or entry.

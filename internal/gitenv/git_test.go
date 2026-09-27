@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // setGitTestEnv isolates git's config resolution for the fixture repos
@@ -430,6 +431,87 @@ func TestFacts_ReflogNonexistentNameIgnored(t *testing.T) {
 	}
 	if reflogFrom != "" {
 		t.Errorf("reflogFrom = %q, want empty (no such branch exists)", reflogFrom)
+	}
+}
+
+// writeFakeGit writes an executable named "git" at dir/git running script
+// (a #!/bin/sh body), and prepends dir to PATH for the duration of the
+// test — so ExecRunner's hardcoded exec.Command("git", ...) resolves to
+// this fake instead of the real git.
+func writeFakeGit(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "git")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestExecRunner_GitEnvNonInteractive proves every git invocation from ib
+// runs with GIT_TERMINAL_PROMPT=0 and GIT_SSH_COMMAND set to a
+// non-interactive (BatchMode) form (I4), regardless of whatever the
+// caller's own environment already has set for either variable.
+func TestExecRunner_GitEnvNonInteractive(t *testing.T) {
+	writeFakeGit(t, `echo "TERM_PROMPT=$GIT_TERMINAL_PROMPT"
+echo "SSH_COMMAND=$GIT_SSH_COMMAND"
+`)
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("GIT_SSH_COMMAND", "ssh -oSomethingInteractive=yes")
+
+	r := ExecRunner{Dir: t.TempDir()}
+	out, err := r.Git("status")
+	if err != nil {
+		t.Fatalf("Git: %v", err)
+	}
+	if !strings.Contains(out, "TERM_PROMPT=0") {
+		t.Errorf("output = %q, want GIT_TERMINAL_PROMPT=0 regardless of the caller's own env", out)
+	}
+	if !strings.Contains(out, "SSH_COMMAND=ssh -o BatchMode=yes") {
+		t.Errorf("output = %q, want a forced non-interactive GIT_SSH_COMMAND", out)
+	}
+}
+
+// TestExecRunner_LsRemoteTimeout proves a hanging `git ls-remote` is
+// bounded by lsRemoteTimeout (I4) rather than blocking forever — shrunk
+// here so the test itself stays fast.
+func TestExecRunner_LsRemoteTimeout(t *testing.T) {
+	writeFakeGit(t, "sleep 5\n")
+
+	orig := lsRemoteTimeout
+	lsRemoteTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { lsRemoteTimeout = orig })
+
+	r := ExecRunner{Dir: t.TempDir()}
+	start := time.Now()
+	_, err := r.Git("ls-remote", "--heads", "origin")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Git(ls-remote): expected an error (timeout), got nil")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Git(ls-remote) took %v, want it bounded by the shrunk lsRemoteTimeout", elapsed)
+	}
+}
+
+// TestExecRunner_NonLsRemoteCommandsNotTimeBounded proves the 10s bound is
+// specific to ls-remote (the one git command ib runs that touches the
+// network) — an ordinary local git command is not subject to it.
+func TestExecRunner_NonLsRemoteCommandsNotTimeBounded(t *testing.T) {
+	orig := lsRemoteTimeout
+	lsRemoteTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { lsRemoteTimeout = orig })
+
+	writeFakeGit(t, "sleep 0.2\necho ok\n")
+
+	r := ExecRunner{Dir: t.TempDir()}
+	out, err := r.Git("status")
+	if err != nil {
+		t.Fatalf("Git(status): %v, want it to finish (not ls-remote-bounded)", err)
+	}
+	if strings.TrimSpace(out) != "ok" {
+		t.Errorf("Git(status) = %q, want %q", out, "ok")
 	}
 }
 

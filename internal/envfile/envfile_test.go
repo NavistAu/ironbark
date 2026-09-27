@@ -41,6 +41,17 @@ func TestFormat(t *testing.T) {
 	}
 }
 
+// TestKey proves Key alone produces the same SECRET_<UPPER(name)> name
+// Format embeds — the naming `ib run`'s no-file injection mode (CLIENT-SPEC
+// §1.4) shares with it.
+func TestKey(t *testing.T) {
+	got := Key("aws_key")
+	want := "SECRET_AWS_KEY"
+	if got != want {
+		t.Errorf("Key() = %q, want %q", got, want)
+	}
+}
+
 func TestParse(t *testing.T) {
 	cases := []struct {
 		name string

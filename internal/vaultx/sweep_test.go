@@ -361,6 +361,32 @@ func TestSweep_Deref_Success(t *testing.T) {
 	}
 }
 
+// TestSweep_Deref_LeaseIDOnSecrets proves a deref response's lease_id is
+// recorded on every secret it produces (SweptSecret.LeaseID) and surfaces
+// once, distinctly, on SweepResult.LeaseIDs.
+func TestSweep_Deref_LeaseIDOnSecrets(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"ptr"}))
+	fv.set(dataEntryPath(sweepBase, "ptr"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/creds/x"}, nil))
+	fv.set("/v1/aws/creds/x", http.StatusOK, derefBody(map[string]interface{}{"user": "u", "pass": "p"}, "aws/creds/x/abc"))
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.LeaseIDs) != 1 || res.LeaseIDs[0] != "aws/creds/x/abc" {
+		t.Fatalf("LeaseIDs = %v, want [aws/creds/x/abc]", res.LeaseIDs)
+	}
+	for _, name := range []string{"ptr_user", "ptr_pass"} {
+		got := findSecret(t, res.Secrets, name)
+		if got.LeaseID != "aws/creds/x/abc" {
+			t.Errorf("%s.LeaseID = %q, want %q", name, got.LeaseID, "aws/creds/x/abc")
+		}
+	}
+}
+
 // TestSweep_Deref_403SkipsEntry proves a deref 403 skips the entry
 // without error and without setting LeasesCreated.
 func TestSweep_Deref_403SkipsEntry(t *testing.T) {

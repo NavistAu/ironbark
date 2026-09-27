@@ -137,17 +137,20 @@ func childExitCode(waitErr error) int {
 // cmdRun implements `ib run` (CLIENT-SPEC §1.4): builds the child's
 // environment from environ plus each env file in opts.EnvFiles (in
 // order, later wins), resolving any exact `ironbark://<name>` value via a
-// single resolve() call — performed only if at least one such reference
-// exists. An unresolved reference exits 3 before the child starts.
-// Masking (default on) pipes the child's stdout/stderr through a
+// single resolve() call — performed, and buildOpts (which loads Vault
+// configuration — CLIENT-SPEC §5, M2) called, only if at least one such
+// reference exists. An unresolved reference exits 3 before the child
+// starts. Masking (default on) pipes the child's stdout/stderr through a
 // mask.Writer for every resolved reference's value; --no-masking passes
 // stdio straight through. Signals in the forwarded set are relayed to the
-// child. After the child exits, any lease-bearing secret actually
-// referenced has its lease revoked (best-effort; failures go to stderr
-// without changing the exit code). The return value is the process exit
-// code: the child's own (or 128+signal), or a CLIENT-SPEC §7 code for a
-// resolve failure encountered before the child ever started.
-func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, ropts resolveOpts, environ []string, stdin io.Reader, stdout, stderr io.Writer) int {
+// child. Every lease the sweep created — referenced by this run or not
+// (I1) — is revoked as soon as the sweep succeeds (deferred immediately,
+// so an unresolved reference or a cmd.Start failure below still revokes —
+// I2), best-effort: failures go to stderr without changing the exit code.
+// The return value is the process exit code: the child's own (or
+// 128+signal), or a CLIENT-SPEC §7 code for a resolve failure encountered
+// before the child ever started.
+func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, buildOpts func() (resolveOpts, error), environ []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	overrides, err := loadEnvFiles(opts.EnvFiles)
 	if err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
@@ -164,17 +167,33 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, ropts resolveOp
 
 	var secrets map[string]vaultx.SweptSecret
 	if hasRef {
+		ropts, berr := buildOpts()
+		if berr != nil {
+			fmt.Fprintln(stderr, "ib:", berr)
+			return exitCode(berr)
+		}
+
+		var leaseIDs []string
 		var rerr error
-		secrets, _, rerr = resolve(ctx, ropts)
+		secrets, leaseIDs, rerr = resolve(ctx, ropts)
 		if rerr != nil {
 			fmt.Fprintln(stderr, "ib:", rerr)
 			return exitCode(rerr)
+		}
+		if len(leaseIDs) > 0 {
+			// I2: armed immediately on a successful sweep, so it still
+			// runs on every exit path below — an unresolved reference, a
+			// cmd.Start failure, or the child actually running.
+			defer func() {
+				for _, revokeErr := range ropts.Vault.RevokeLeases(ctx, ropts.Token, leaseIDs) {
+					fmt.Fprintf(stderr, "ib: revoke lease failed: %v\n", revokeErr)
+				}
+			}()
 		}
 	}
 
 	envMap := environMap(environ)
 	var usedValues []string
-	usedLeaseIDs := make(map[string]bool)
 	for _, o := range overrides {
 		val := o.value
 		if name, ok := envfile.Ref(o.value); ok {
@@ -185,9 +204,6 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, ropts resolveOp
 			}
 			val = s.Value
 			usedValues = append(usedValues, val)
-			if s.LeaseID != "" {
-				usedLeaseIDs[s.LeaseID] = true
-			}
 		}
 		envMap[o.key] = val
 	}
@@ -208,14 +224,16 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, ropts resolveOp
 		flushers = []func() error{mwOut.Flush, mwErr.Flush}
 	}
 
+	// I3: armed before Start, not after — a signal arriving in the window
+	// right around the child spawning must still reach it.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return 1
 	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sigCh)
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -235,16 +253,6 @@ waitLoop:
 
 	for _, flush := range flushers {
 		_ = flush()
-	}
-
-	if len(usedLeaseIDs) > 0 {
-		ids := make([]string, 0, len(usedLeaseIDs))
-		for id := range usedLeaseIDs {
-			ids = append(ids, id)
-		}
-		for _, revokeErr := range ropts.Vault.RevokeLeases(ctx, ropts.Token, ids) {
-			fmt.Fprintf(stderr, "ib: revoke lease failed: %v\n", revokeErr)
-		}
 	}
 
 	return childExitCode(waitErr)

@@ -101,7 +101,9 @@ child.
 lease after the child exits by its `lease_id` (`PUT sys/leases/revoke`),
 authenticated with the caller's own token — never
 `auth/token/revoke-self`, which would revoke the caller's actual Vault
-session, not a lease. This needs the caller's policy to grant `update` on
+session, not a lease. This is every lease the sweep created, referenced
+or not — not only the leases behind values actually substituted into the
+child's environment. This needs the caller's policy to grant `update` on
 `sys/leases/revoke` (or the lease's own prefix); a revoke failure is
 logged to stderr and does not change `ib run`'s exit status (best-effort,
 matching SPEC §3.4's revoke philosophy — the lease's TTL is the backstop).

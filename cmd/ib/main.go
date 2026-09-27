@@ -154,11 +154,11 @@ func dispatchRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitCode(err)
 	}
 
-	opts, err := buildResolveOpts(branch, stderr)
-	if err != nil {
-		fmt.Fprintln(stderr, "ib:", err)
-		return exitCode(err)
-	}
+	// M2: building resolveOpts loads CLIENT-SPEC §5 Vault configuration,
+	// which a run with no ironbark:// reference at all doesn't need — so
+	// it's deferred to cmdRun, which only calls this when a reference is
+	// actually present.
+	buildOpts := func() (resolveOpts, error) { return buildResolveOpts(branch, stderr) }
 
-	return cmdRun(context.Background(), runOpts, cmdArgs, opts, os.Environ(), stdin, stdout, stderr)
+	return cmdRun(context.Background(), runOpts, cmdArgs, buildOpts, os.Environ(), stdin, stdout, stderr)
 }

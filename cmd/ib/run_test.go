@@ -64,6 +64,13 @@ func TestParseRunArgs(t *testing.T) {
 	})
 }
 
+// buildOptsFunc wraps an already-built resolveOpts as the lazy builder
+// cmdRun now takes (M2): tests that don't care about deferred config
+// loading just want their fixed opts back every time.
+func buildOptsFunc(o resolveOpts) func() (resolveOpts, error) {
+	return func() (resolveOpts, error) { return o, nil }
+}
+
 func writeEnvFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -90,7 +97,7 @@ func TestCmdRun_RefResolvedAndLiteralPassedThrough(t *testing.T) {
 
 	cmdArgs := helperArgs("printenv", "SECRET_VAL")
 	var stdout, stderr bytes.Buffer
-	code := cmdRun(context.Background(), opts, cmdArgs, ropts, os.Environ(), nil, &stdout, &stderr)
+	code := cmdRun(context.Background(), opts, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdRun exit = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
@@ -100,7 +107,7 @@ func TestCmdRun_RefResolvedAndLiteralPassedThrough(t *testing.T) {
 
 	stdout.Reset()
 	cmdArgs = helperArgs("printenv", "LITERAL_VAL")
-	code = cmdRun(context.Background(), opts, cmdArgs, ropts, os.Environ(), nil, &stdout, &stderr)
+	code = cmdRun(context.Background(), opts, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdRun exit = %d, want 0", code)
 	}
@@ -122,7 +129,7 @@ func TestCmdRun_UnresolvedRef(t *testing.T) {
 
 	cmdArgs := helperArgs("marker", marker)
 	var stdout, stderr bytes.Buffer
-	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, ropts, os.Environ(), nil, &stdout, &stderr)
+	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
 	if code != 3 {
 		t.Errorf("cmdRun exit = %d, want 3 (stderr: %s)", code, stderr.String())
 	}
@@ -144,7 +151,7 @@ func TestCmdRun_Masking(t *testing.T) {
 	cmdArgs := helperArgs("splitwrite", "shared-value")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, ropts, os.Environ(), nil, &stdout, &stderr)
+	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdRun exit = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
@@ -156,12 +163,126 @@ func TestCmdRun_Masking(t *testing.T) {
 	}
 
 	stdout.Reset()
-	code = cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}, NoMasking: true}, cmdArgs, ropts, os.Environ(), nil, &stdout, &stderr)
+	code = cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}, NoMasking: true}, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdRun exit = %d, want 0", code)
 	}
 	if stdout.String() != "shared-value" {
 		t.Errorf("stdout = %q, want the unmasked value %q", stdout.String(), "shared-value")
+	}
+}
+
+// TestCmdRun_RevokesAllSweptLeases proves ib run revokes every lease the
+// sweep created, not only the ones behind values actually substituted
+// into the child's environment (I1): setupGetEnvFixture's "dbref" secret
+// is lease-bearing but never referenced by this test's env file.
+func TestCmdRun_RevokesAllSweptLeases(t *testing.T) {
+	fx, fv := setupGetEnvFixture(t)
+	vc := newTestVault(t, fv)
+	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+
+	dir := t.TempDir()
+	envFile := writeEnvFile(t, dir, "a.env", "SECRET_VAL=ironbark://shared\n")
+	cmdArgs := helperArgs("printenv", "SECRET_VAL")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdRun exit = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+
+	revoked := fv.revokedIDs()
+	if len(revoked) != 1 || revoked[0] != "database/creds/readonly/abc" {
+		t.Errorf("revoked leases = %v, want [database/creds/readonly/abc] (the sweep's dbref lease, though never referenced)", revoked)
+	}
+}
+
+// TestCmdRun_UnresolvedRefStillRevokesLeases proves an unresolved
+// reference (exit 3, before the child starts) still revokes every lease
+// the sweep created (I2): the deferred revoke is armed as soon as resolve
+// succeeds, not only once the child has started and exited.
+func TestCmdRun_UnresolvedRefStillRevokesLeases(t *testing.T) {
+	fx, fv := setupGetEnvFixture(t)
+	vc := newTestVault(t, fv)
+	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran.marker")
+	envFile := writeEnvFile(t, dir, "a.env", "A=ironbark://shared\nB=ironbark://does_not_exist\n")
+
+	cmdArgs := helperArgs("marker", marker)
+	var stdout, stderr bytes.Buffer
+	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
+	if code != 3 {
+		t.Errorf("cmdRun exit = %d, want 3 (stderr: %s)", code, stderr.String())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("child ran (marker file exists), want it never started")
+	}
+
+	revoked := fv.revokedIDs()
+	if len(revoked) != 1 || revoked[0] != "database/creds/readonly/abc" {
+		t.Errorf("revoked leases = %v, want [database/creds/readonly/abc] even though resolution failed after the sweep", revoked)
+	}
+}
+
+// TestCmdRun_StartFailureStillRevokesLeases proves a cmd.Start failure
+// (exit 1, before the child ever runs) still revokes every lease the
+// sweep created (I2).
+func TestCmdRun_StartFailureStillRevokesLeases(t *testing.T) {
+	fx, fv := setupGetEnvFixture(t)
+	vc := newTestVault(t, fv)
+	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+
+	dir := t.TempDir()
+	envFile := writeEnvFile(t, dir, "a.env", "SECRET_VAL=ironbark://shared\n")
+	cmdArgs := []string{filepath.Join(t.TempDir(), "does-not-exist-binary")}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("cmdRun exit = %d, want 1 (cmd.Start failure)", code)
+	}
+
+	revoked := fv.revokedIDs()
+	if len(revoked) != 1 || revoked[0] != "database/creds/readonly/abc" {
+		t.Errorf("revoked leases = %v, want [database/creds/readonly/abc] even though the child never started", revoked)
+	}
+}
+
+// TestCmdRun_NoRefsSkipsConfigBuild proves ib run never builds Vault
+// config (which would need BAO_ADDR/BAO_TOKEN) when no env file holds an
+// ironbark:// reference (M2): buildOpts here fails the test if called at
+// all.
+func TestCmdRun_NoRefsSkipsConfigBuild(t *testing.T) {
+	buildOpts := func() (resolveOpts, error) {
+		t.Fatal("buildOpts should not be called when no env file references a secret")
+		return resolveOpts{}, nil
+	}
+
+	cmdArgs := helperArgs("exit", "0")
+	var stdout, stderr bytes.Buffer
+	code := cmdRun(context.Background(), runOpts{}, cmdArgs, buildOpts, os.Environ(), nil, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("cmdRun exit = %d, want 0", code)
+	}
+}
+
+// TestDispatchRun_NoRefsDoesNotNeedVaultConfig proves the real
+// dispatchRun entry point (main.go) defers building Vault config until
+// it's known to be needed (M2): with no Vault env vars set at all, a
+// command with no --env-file (so certainly no ironbark:// reference)
+// still runs successfully instead of failing with a configuration error.
+func TestDispatchRun_NoRefsDoesNotNeedVaultConfig(t *testing.T) {
+	t.Setenv("BAO_ADDR", "")
+	t.Setenv("VAULT_ADDR", "")
+	t.Setenv("BAO_TOKEN", "")
+	t.Setenv("VAULT_TOKEN", "")
+
+	var stdout, stderr bytes.Buffer
+	code := dispatchRun([]string{"--", "true"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("dispatchRun(--, true) = %d, want 0 (no ironbark:// ref, so no Vault config should be required): stderr=%s", code, stderr.String())
 	}
 }
 
@@ -172,7 +293,7 @@ func TestCmdRun_ChildExitCode(t *testing.T) {
 	cmdArgs := helperArgs("exit", "7")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdRun(context.Background(), runOpts{}, cmdArgs, ropts, os.Environ(), nil, &stdout, &stderr)
+	code := cmdRun(context.Background(), runOpts{}, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
 	if code != 7 {
 		t.Errorf("cmdRun exit = %d, want 7", code)
 	}

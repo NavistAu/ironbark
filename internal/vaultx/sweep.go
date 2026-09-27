@@ -43,20 +43,32 @@ var ErrMalformedDirective = errors.New("vaultx: malformed directive")
 // SweptSecret is one secret produced by Sweep (SPEC §4.2). Events empty
 // means no per-secret event pin was set via custom_metadata (SPEC §4.6);
 // the broker applies the request's own event as the default pin in that
-// case — Sweep never invents a default here.
+// case — Sweep never invents a default here. LeaseID is set (SPEC §4.3,
+// CLIENT-SPEC §1.4) when this secret was flattened from a pointer
+// dereference whose response carried a non-empty lease_id; empty for
+// secrets read directly (no deref) or from a deref with no lease_id.
 type SweptSecret struct {
-	Name   string
-	Value  string
-	Images []string
-	Events []string
+	Name    string
+	Value   string
+	Images  []string
+	Events  []string
+	LeaseID string
 }
 
 // SweepResult is Sweep's result: the flattened, deduplicated secrets
-// (SPEC §4.2) and whether any pointer dereference (SPEC §4.3) created a
-// lease (a non-empty lease_id on a 200 deref response).
+// (SPEC §4.2), the distinct lease IDs (in creation order) any pointer
+// dereference minted (SPEC §4.3, CLIENT-SPEC §1.4 — ib run revokes these
+// after its child exits), and whether any lease was created at all.
+// LeasesCreated is true iff len(LeaseIDs) > 0. On a Sweep error, the
+// returned SweepResult still carries whatever secrets/LeaseIDs were
+// accumulated before the failure (CLIENT-SPEC §8) — the broker ignores
+// this result on error (it revokes the minted token, cascading the
+// leases instead); ib run has no such token to cascade from and revokes
+// these lease IDs itself.
 type SweepResult struct {
 	Secrets       []SweptSecret
 	LeasesCreated bool
+	LeaseIDs      []string
 }
 
 // validNameRe is the SPEC §4.2 final-name validator, applied AFTER
@@ -69,11 +81,15 @@ var validNameRe = regexp.MustCompile(`^[a-z0-9_]+$`)
 // visits tiers most-specific-first (branch, event, base) and keys
 // lexicographically within a tier, "first writer wins" is exactly
 // "insert into seen if absent, otherwise discard" applied in that visit
-// order — no separate precedence logic needed.
+// order — no separate precedence logic needed. leaseIDSeen implements the
+// "distinct" half of LeaseIDs, keyed on lease_id (a single deref's
+// lease_id fans out onto every field it flattens, so a naive per-secret
+// append would duplicate it).
 type sweepAccumulator struct {
-	seen          map[string]bool
-	secrets       []SweptSecret
-	leasesCreated bool
+	seen        map[string]bool
+	secrets     []SweptSecret
+	leaseIDs    []string
+	leaseIDSeen map[string]bool
 }
 
 // add implements SPEC §4.2's name validation and first-writer-wins
@@ -82,8 +98,10 @@ type sweepAccumulator struct {
 // here, but this package has no logging infrastructure yet (canary.go's
 // runCanary made the same call for revoke-failure logging) — the discard
 // IS the "logged and skipped" outcome until a later task wires §8
-// observability.
-func (sw *sweepAccumulator) add(name, value string, images, events []string) {
+// observability. leaseID is the deref response's lease_id (CLIENT-SPEC
+// §1.4), empty for entries read directly (no deref) or a lease-less
+// deref.
+func (sw *sweepAccumulator) add(name, value string, images, events []string, leaseID string) {
 	if !validNameRe.MatchString(name) {
 		return
 	}
@@ -91,7 +109,20 @@ func (sw *sweepAccumulator) add(name, value string, images, events []string) {
 		return
 	}
 	sw.seen[name] = true
-	sw.secrets = append(sw.secrets, SweptSecret{Name: name, Value: value, Images: images, Events: events})
+	sw.secrets = append(sw.secrets, SweptSecret{Name: name, Value: value, Images: images, Events: events, LeaseID: leaseID})
+}
+
+// addLeaseID records id in sw.leaseIDs, distinct and in first-seen
+// (creation) order. A blank id (no lease minted) is a no-op.
+func (sw *sweepAccumulator) addLeaseID(id string) {
+	if id == "" || sw.leaseIDSeen[id] {
+		return
+	}
+	if sw.leaseIDSeen == nil {
+		sw.leaseIDSeen = make(map[string]bool)
+	}
+	sw.leaseIDSeen[id] = true
+	sw.leaseIDs = append(sw.leaseIDs, id)
 }
 
 // normalizeName applies SPEC §4.2's name normalization: lowercase, then
@@ -266,6 +297,52 @@ func (c *Client) Base(id identity.Identity) string {
 	return c.cfg.KVPrefix + "/" + id.Org + "/" + id.Repo
 }
 
+// ListBranchTiers LISTs <mount>/metadata/<Base(id)>/<id.Event>,
+// authenticated as token, and returns the directory keys it finds
+// (trailing "/" stripped) — still SPEC §2.2-escaped, never unescaped —
+// sorted, excluding dot-prefixed entries (CLIENT-SPEC §3: these are the
+// branch tiers a caller's token can see under the event tier, used to
+// pick which branch's secrets ib reads). Plain (non-directory) keys at
+// this level are ignored; they are ordinary event-tier secrets, not
+// branch directories. A 403/404 on the LIST yields (nil, nil) — SPEC
+// §4.1's partial-visibility rule applies here too, since "no branch tiers
+// visible" is itself a normal, expected outcome (CLIENT-SPEC §3's "no
+// branch tiers at all" path). Any other status is a plain error.
+func (c *Client) ListBranchTiers(ctx context.Context, token string, id identity.Identity) ([]string, error) {
+	path := c.cfg.KVMount + "/metadata/" + c.Base(id) + "/" + id.Event
+	resp, found, err := c.vaultGet(ctx, token, path, true)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	defer resp.Body.Close()
+
+	var parsed struct {
+		Data struct {
+			Keys []string `json:"keys"`
+		} `json:"data"`
+	}
+	if err := resp.DecodeJSON(&parsed); err != nil {
+		return nil, fmt.Errorf("vaultx: list branch tiers: LIST %s: decode response: %w", path, err)
+	}
+
+	var dirs []string
+	for _, k := range parsed.Data.Keys {
+		if !strings.HasSuffix(k, "/") {
+			continue
+		}
+		dir := strings.TrimSuffix(k, "/")
+		if strings.HasPrefix(dir, ".") {
+			continue
+		}
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
 // Sweep performs the SPEC §4.1–§4.3, §4.6 sweep: it LISTs each applicable
 // KV v2 prefix independently, most specific first (branch, then event,
 // then base — branchful is true only when the caller's event is
@@ -289,13 +366,23 @@ func (c *Client) Sweep(ctx context.Context, token string, id identity.Identity, 
 	tiers = append(tiers, base+"/"+id.Event, base)
 
 	sw := &sweepAccumulator{seen: make(map[string]bool)}
+	var sweepErr error
 	for _, tierPath := range tiers {
 		if err := c.sweepTier(ctx, token, tierPath, sw); err != nil {
-			return SweepResult{}, err
+			sweepErr = err
+			break
 		}
 	}
 
-	return SweepResult{Secrets: sw.secrets, LeasesCreated: sw.leasesCreated}, nil
+	// Partial result on error (CLIENT-SPEC §8): whatever secrets/leaseIDs
+	// were accumulated before sweepErr survive in the returned SweepResult
+	// even though sweepErr is also non-nil — ib run needs the lease IDs to
+	// revoke; the broker (unchanged) ignores this result on error.
+	return SweepResult{
+		Secrets:       sw.secrets,
+		LeaseIDs:      sw.leaseIDs,
+		LeasesCreated: len(sw.leaseIDs) > 0,
+	}, sweepErr
 }
 
 // sweepTier LISTs one SPEC §4.1 prefix and reads its plain keys in
@@ -403,7 +490,7 @@ func (c *Client) sweepEntry(ctx context.Context, token, tierPath, key string, sw
 		if !ok {
 			return nil // non-string shorthand value: skip with warning
 		}
-		sw.add(normalizeName(key), v, images, events)
+		sw.add(normalizeName(key), v, images, events, "")
 		return nil
 
 	default:
@@ -413,7 +500,7 @@ func (c *Client) sweepEntry(ctx context.Context, token, tierPath, key string, sw
 			if !ok {
 				continue // non-string field: skip with warning, siblings survive
 			}
-			sw.add(normalizeName(key)+"_"+normalizeName(f), v, images, events)
+			sw.add(normalizeName(key)+"_"+normalizeName(f), v, images, events, "")
 		}
 		return nil
 	}
@@ -521,9 +608,7 @@ func (c *Client) sweepDeref(ctx context.Context, token, key, refPath string, ima
 		return fmt.Errorf("vaultx: sweep: deref %s: decode response: %w", refPath, err)
 	}
 
-	if parsed.LeaseID != "" {
-		sw.leasesCreated = true
-	}
+	sw.addLeaseID(parsed.LeaseID)
 
 	fields := parsed.Data
 	if inner, ok := isKV2Shaped(fields); ok {
@@ -539,7 +624,7 @@ func (c *Client) sweepDeref(ctx context.Context, token, key, refPath string, ima
 		// KV v2 target without a "value" field still flattens
 		// general-form below, unchanged.
 		if v, ok := stringField(inner["value"]); ok {
-			sw.add(normalizeName(key), v, images, events)
+			sw.add(normalizeName(key), v, images, events, parsed.LeaseID)
 			return nil
 		}
 		fields = inner
@@ -550,7 +635,7 @@ func (c *Client) sweepDeref(ctx context.Context, token, key, refPath string, ima
 		if !ok {
 			continue // non-string deref field: skip with warning, siblings survive
 		}
-		sw.add(normalizeName(key)+"_"+normalizeName(f), v, images, events)
+		sw.add(normalizeName(key)+"_"+normalizeName(f), v, images, events, parsed.LeaseID)
 	}
 	return nil
 }

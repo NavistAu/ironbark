@@ -1,0 +1,142 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"testing"
+)
+
+// TestDispatch_UnknownCommand and TestDispatch_NoArgs cover main's own
+// usage-error paths (CLIENT-SPEC §7 exit 1); the get/env/run/auth
+// commands themselves are covered in their own _test.go files.
+
+func TestDispatch_NoArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := dispatch(nil, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("dispatch(nil) = %d, want 1", code)
+	}
+}
+
+func TestDispatch_UnknownCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := dispatch([]string{"bogus"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("dispatch(bogus) = %d, want 1", code)
+	}
+}
+
+// TestDispatchGet_UsageErrors covers ib get's own flag/arg validation
+// (missing name, too many names) without needing real Vault/git config.
+func TestDispatchGet_UsageErrors(t *testing.T) {
+	cases := [][]string{
+		{},
+		{"a", "b"},
+	}
+	for _, args := range cases {
+		var stdout, stderr bytes.Buffer
+		code := dispatchGet(args, &stdout, &stderr)
+		if code != 1 {
+			t.Errorf("dispatchGet(%v) = %d, want 1", args, code)
+		}
+	}
+}
+
+// TestDispatchGet_BranchFlagAfterPositionalArg reproduces M8: `ib get NAME
+// --branch x` must work the same as `ib get --branch x NAME` — Go's flag
+// package alone stops parsing at the first non-flag argument, so putting
+// --branch after NAME used to leave both as unrecognized positional args
+// and fail with a usage error. Chdir'd into an empty (non-git) temp dir so
+// the deterministic failure mode is exit 2 ("not a git checkout"), proving
+// the flag WAS recognized and argument parsing proceeded — a usage error
+// (exit 1) is exactly the old, wrong outcome.
+func TestDispatchGet_BranchFlagAfterPositionalArg(t *testing.T) {
+	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
+	t.Setenv("BAO_TOKEN", "test-token")
+	chdirTemp(t)
+
+	var stdout, stderr bytes.Buffer
+	code := dispatchGet([]string{"myname", "--branch", "develop"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("dispatchGet(myname, --branch, develop) = %d, want 2 (not a git checkout) — the flag after the positional name must still be recognized, not treated as a usage error", code)
+	}
+}
+
+// TestDispatchEnv_BranchFlagAfterOtherArgs mirrors
+// TestDispatchGet_BranchFlagAfterPositionalArg for `ib env`, which takes
+// no positional args of its own but must still accept --branch wherever
+// it appears among its (otherwise empty) argument list.
+func TestDispatchEnv_BranchFlagAfterOtherArgs(t *testing.T) {
+	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
+	t.Setenv("BAO_TOKEN", "test-token")
+	chdirTemp(t)
+
+	var stdout, stderr bytes.Buffer
+	code := dispatchEnv([]string{"--branch", "develop"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("dispatchEnv(--branch, develop) = %d, want 2 (not a git checkout)", code)
+	}
+}
+
+// chdirTemp changes the process's working directory to a fresh empty temp
+// dir (never a git checkout) for the duration of the calling test,
+// restoring it on cleanup. get/env build their Runner from the process's
+// cwd (gitenv.ExecRunner{}, no Dir override), so this gives a
+// deterministic, fast Checkout failure (exit 2) without needing a real
+// git fixture.
+func chdirTemp(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+}
+
+// TestBuildResolveOpts_BranchPrecedence proves --branch (passed as
+// branchFlag) wins over IB_BRANCH, and that IB_BRANCH is used as the
+// fallback when no flag is given (CLIENT-SPEC §1).
+func TestBuildResolveOpts_BranchPrecedence(t *testing.T) {
+	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
+	t.Setenv("BAO_TOKEN", "test-token")
+	t.Setenv("IB_BRANCH", "from-env")
+
+	var stderr bytes.Buffer
+	opts, err := buildResolveOpts("from-flag", &stderr)
+	if err != nil {
+		t.Fatalf("buildResolveOpts: %v", err)
+	}
+	if opts.Branch != "from-flag" {
+		t.Errorf("Branch = %q, want from-flag (flag wins)", opts.Branch)
+	}
+
+	opts, err = buildResolveOpts("", &stderr)
+	if err != nil {
+		t.Fatalf("buildResolveOpts: %v", err)
+	}
+	if opts.Branch != "from-env" {
+		t.Errorf("Branch = %q, want from-env (IB_BRANCH fallback)", opts.Branch)
+	}
+}
+
+// TestBuildResolveOpts_MissingConfig proves a missing Vault address maps
+// to exit 2 via exitCode.
+func TestBuildResolveOpts_MissingConfig(t *testing.T) {
+	t.Setenv("BAO_ADDR", "")
+	t.Setenv("VAULT_ADDR", "")
+	t.Setenv("BAO_TOKEN", "")
+	t.Setenv("VAULT_TOKEN", "")
+
+	var stderr bytes.Buffer
+	_, err := buildResolveOpts("", &stderr)
+	if err == nil {
+		t.Fatal("buildResolveOpts: expected an error, got nil")
+	}
+	if exitCode(err) != 2 {
+		t.Errorf("exitCode(err) = %d, want 2", exitCode(err))
+	}
+}

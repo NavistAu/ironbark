@@ -30,6 +30,13 @@ type Config struct {
 	TokenRole string
 	KVMount   string
 	KVPrefix  string
+	// TLS configures the underlying api.Client's TLS settings (CA cert,
+	// client cert/key, SNI server name, insecure skip-verify) via
+	// api.Config.ConfigureTLS, applied in New before api.NewClient builds
+	// the client. Nil (the broker, today) leaves the api.Config's own
+	// default TLS behavior unchanged; ib (CLIENT-SPEC §5.1) is the first
+	// caller to set this.
+	TLS *api.TLSConfig
 }
 
 // Metrics is the optional observability seam vaultx's sweep/deref reads
@@ -129,7 +136,13 @@ type Client struct {
 // counters seam); callers that pass none get the prior nil-metrics
 // behavior unchanged.
 func New(cfg Config, opts ...Option) (*Client, error) {
-	apiClient, err := api.NewClient(&api.Config{Address: cfg.Addr})
+	apiConfig := &api.Config{Address: cfg.Addr}
+	if cfg.TLS != nil {
+		if err := apiConfig.ConfigureTLS(cfg.TLS); err != nil {
+			return nil, fmt.Errorf("vaultx: configure TLS: %w", err)
+		}
+	}
+	apiClient, err := api.NewClient(apiConfig)
 	if err != nil {
 		return nil, fmt.Errorf("vaultx: new client: %w", err)
 	}

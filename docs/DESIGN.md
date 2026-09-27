@@ -378,8 +378,11 @@ Terraform/OpenTofu module (policies, KV skeleton, pointer entries,
 `.identity` binding) shipping in this repo; `ironbark doctor` read-only
 convention lint (separate admin-ish credential at invocation).
 
-**M3 — the local client (`ib`)** ([CLIENT-SPEC.md](CLIENT-SPEC.md)). A separate binary that gives an operator's
-or agent's local run the same secrets a CI run on the same branch gets. It
+**M3 — the local client (`ib`)** ([CLIENT-SPEC.md](CLIENT-SPEC.md)). **Status:
+implemented** — `cmd/ib`, unit-tested and integration-tested against both
+Vault and OpenBao (`test/integration`). A separate binary that gives an
+operator's or agent's local run the same secrets a CI run on the same branch
+gets. It
 shares the broker's sweep, deref and naming code (`internal/vaultx`) — one
 implementation, never a second copy.
 

@@ -1,0 +1,323 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/navistau/ironbark/internal/gitenv"
+	"github.com/navistau/ironbark/internal/vaultx"
+)
+
+const (
+	rtBase  = "ci/acme/widgets"
+	rtEvent = "ci/acme/widgets/push"
+	rtMain  = "ci/acme/widgets/push/main"
+	rtToken = "caller-token"
+)
+
+func newTestVault(t *testing.T, fv *fakeVault) *vaultx.Client {
+	t.Helper()
+	srv := httptest.NewServer(fv.handler())
+	t.Cleanup(srv.Close)
+
+	c, err := vaultx.New(vaultx.Config{Addr: srv.URL, KVMount: "kv", KVPrefix: "ci"})
+	if err != nil {
+		t.Fatalf("vaultx.New: %v", err)
+	}
+	return c
+}
+
+// TestResolve_ChosenTierAndPinFiltering exercises the happy path: a
+// checkout on a tracked branch ("main"), secrets swept from all three
+// tiers, and a per-secret ironbark_events pin (SPEC §4.6) applied with
+// event "push" (CLIENT-SPEC §4) — a secret pinned away from push is
+// dropped, one pinned to include push survives alongside its unpinned
+// siblings.
+func TestResolve_ChosenTierAndPinFiltering(t *testing.T) {
+	fx := newIBFixture(t, nil) // clone stays on "main" after clone
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"shared_push", "main/"}))
+	fv.set("/v1/kv/data/"+rtEvent+"/shared_push", 200, entryBody(map[string]interface{}{"value": "shared-push-value"}, nil))
+	fv.set("/v1/kv/metadata/"+rtBase, 200, listBody([]string{"shared"}))
+	fv.set("/v1/kv/data/"+rtBase+"/shared", 200, entryBody(map[string]interface{}{"value": "shared-value"}, nil))
+	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"prod_only", "pinned_cron", "pinned_push"}))
+	fv.set("/v1/kv/data/"+rtMain+"/prod_only", 200, entryBody(map[string]interface{}{"value": "prod-only-value"}, nil))
+	fv.set("/v1/kv/data/"+rtMain+"/pinned_cron", 200, entryBody(map[string]interface{}{"value": "pinned-cron-value"}, map[string]string{"ironbark_events": "cron"}))
+	fv.set("/v1/kv/data/"+rtMain+"/pinned_push", 200, entryBody(map[string]interface{}{"value": "pinned-push-value"}, map[string]string{"ironbark_events": "push,cron"}))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	secrets, leaseIDs, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if len(leaseIDs) != 0 {
+		t.Errorf("leaseIDs = %v, want none", leaseIDs)
+	}
+
+	want := map[string]string{
+		"shared":      "shared-value",
+		"shared_push": "shared-push-value",
+		"prod_only":   "prod-only-value",
+		"pinned_push": "pinned-push-value",
+	}
+	if len(secrets) != len(want) {
+		t.Fatalf("secrets = %v, want keys %v", secretNames(secrets), want)
+	}
+	for name, value := range want {
+		s, ok := secrets[name]
+		if !ok {
+			t.Errorf("missing secret %q", name)
+			continue
+		}
+		if s.Value != value {
+			t.Errorf("secret %q value = %q, want %q", name, s.Value, value)
+		}
+	}
+	if _, ok := secrets["pinned_cron"]; ok {
+		t.Errorf("pinned_cron should have been dropped (pinned away from push)")
+	}
+
+	if !strings.Contains(stderr.String(), "ib: env main (direct match)") {
+		t.Errorf("stderr = %q, want it to contain the direct-match visibility line", stderr.String())
+	}
+}
+
+func secretNames(m map[string]vaultx.SweptSecret) []string {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	return names
+}
+
+// TestResolve_DirectMatchSkipsStaleCheck reproduces CLIENT-SPEC §3's
+// "before rule 3" ordering (M1): rules 1-2 (override, direct match) must
+// decide the branch WITHOUT paying for the ls-remote staleness check.
+// Proven here by pointing origin at an address nothing listens on (which
+// would fail ls-remote and print the "freshness unknown" warning if the
+// check ran) while the checkout sits on "main", a direct match — resolve
+// must still succeed, silently.
+func TestResolve_DirectMatchSkipsStaleCheck(t *testing.T) {
+	fx := newIBFixture(t, nil) // clone stays on "main"
+	gitRaw(t, fx.clone, "remote", "set-url", "origin", "https://127.0.0.1:1/acme/widgets.git")
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "freshness unknown") {
+		t.Errorf("stderr = %q, a direct match (rule 2) should skip the stale check entirely", stderr.String())
+	}
+}
+
+// TestResolve_NoBranchTiers exercises CLIENT-SPEC §3's "no branch tiers at
+// all" path: ListBranchTiers sees nothing (404), so resolve sweeps only
+// the event and base tiers and says so on stderr.
+func TestResolve_NoBranchTiers(t *testing.T) {
+	fx := newIBFixture(t, nil)
+
+	fv := newFakeVault()
+	// No entry set for rtEvent's metadata path -> 404 -> ListBranchTiers
+	// returns (nil, nil) and sweepTier's own LIST of the same path also
+	// sees the 404 (no event-tier secrets in this test).
+	fv.set("/v1/kv/metadata/"+rtBase, 200, listBody([]string{"shared"}))
+	fv.set("/v1/kv/data/"+rtBase+"/shared", 200, entryBody(map[string]interface{}{"value": "shared-value"}, nil))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	secrets, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if len(secrets) != 1 || secrets["shared"].Value != "shared-value" {
+		t.Errorf("secrets = %v, want just shared=shared-value", secrets)
+	}
+	if !strings.Contains(stderr.String(), "ib: no branch tiers; event and base tiers only") {
+		t.Errorf("stderr = %q, want the no-branch-tiers line", stderr.String())
+	}
+}
+
+// TestResolve_NearestAncestorVisibilityLine reproduces CLIENT-SPEC §3's
+// own worked example verbatim ("ib: env develop (nearest ancestor, 3
+// commits)"): a checkout on a feature branch cut from develop, with
+// develop 10 commits ahead of main, three more commits added locally —
+// the same distances (develop 3, main 13) as gitenv's own
+// TestFacts_NearestAncestorDistances.
+func TestResolve_NearestAncestorVisibilityLine(t *testing.T) {
+	fx := newIBFixture(t, func(seedDir string) {
+		pushBranch(t, seedDir, "develop", "main", 10)
+	})
+	gitRaw(t, fx.clone, "checkout", "-q", "-b", "feature", "origin/develop")
+	for i := 1; i <= 3; i++ {
+		commitFixture(t, fx.clone, "feature-"+string(rune('0'+i)), "feature-commit")
+	}
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"develop/", "main/"}))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ib: env develop (nearest ancestor, 3 commits)") {
+		t.Errorf("stderr = %q, want the CLIENT-SPEC §3 worked-example visibility line", stderr.String())
+	}
+}
+
+// TestResolve_SlashBranchDirectMatch is T2's "branch with /" case,
+// exercised end to end through resolve(): a tracked branch named
+// "release/2.0" (identity.Esc("release/2.0") == "release%2f2.0" — the
+// tier name a Vault LIST would report) must be correctly recognized and
+// selected via the Esc-match path all the way through the resolve
+// pipeline (identity, tier discovery, selection). The dedicated
+// regression test for the refname:short collision gotcha itself (M5)
+// lives at the gitenv package level
+// (TestFacts_LocalBranchNameCollisionWithRemoteShortName), where it can
+// assert on TrackedBranches directly without an unrelated ambiguous-ref
+// side effect on distance computation.
+func TestResolve_SlashBranchDirectMatch(t *testing.T) {
+	fx := newIBFixture(t, func(seedDir string) {
+		pushBranch(t, seedDir, "release/2.0", "main", 1)
+	})
+	gitRaw(t, fx.clone, "checkout", "-q", "-b", "release/2.0", "origin/release/2.0")
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"release%2f2.0/"}))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ib: env release/2.0 (direct match)") {
+		t.Errorf("stderr = %q, want release/2.0 selected via the Esc-matched direct match", stderr.String())
+	}
+}
+
+// TestResolve_Ambiguous exercises CLIENT-SPEC §3 rule 6: a tie that
+// survives both the reflog and cascade tie-breaks fails with the
+// candidates (and their distances) named on stderr, asking for --branch.
+func TestResolve_Ambiguous(t *testing.T) {
+	fx := newIBFixture(t, func(seedDir string) {
+		pushBranch(t, seedDir, "alpha", "main", 1)
+		gitRaw(t, seedDir, "checkout", "-q", "main")
+		pushBranch(t, seedDir, "beta", "main", 1)
+		gitRaw(t, seedDir, "checkout", "-q", "main")
+	})
+	// "work" is cut from main (not alpha/beta), so its reflog names
+	// "main" — neither tied candidate — and alpha/beta (lowercase,
+	// unadorned names) aren't in the built-in Cascade list either: both
+	// tie-breaks fall through to rule 6, ambiguous.
+	gitRaw(t, fx.clone, "checkout", "-q", "-b", "work", "main")
+	commitFixture(t, fx.clone, "work-1", "work-commit")
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"alpha/", "beta/"}))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err == nil {
+		t.Fatal("resolve: expected an error, got nil")
+	}
+	selErr, ok := err.(*gitenv.SelectError)
+	if !ok {
+		t.Fatalf("resolve error type = %T, want *gitenv.SelectError", err)
+	}
+	if selErr.Kind != "ambiguous" {
+		t.Errorf("SelectError.Kind = %q, want ambiguous", selErr.Kind)
+	}
+	if _, ok := selErr.Candidates["alpha"]; !ok {
+		t.Errorf("candidates = %v, want alpha present", selErr.Candidates)
+	}
+	if _, ok := selErr.Candidates["beta"]; !ok {
+		t.Errorf("candidates = %v, want beta present", selErr.Candidates)
+	}
+	if exitCode(err) != 4 {
+		t.Errorf("exitCode(err) = %d, want 4", exitCode(err))
+	}
+}
+
+// TestResolve_SweepFailureRevokesPartialLeases exercises CLIENT-SPEC §4:
+// a lease minted by the branch tier's deref, followed by a non-403/404
+// failure listing the event tier, must revoke that lease before resolve
+// returns its (exit 5) error — "leases created so far revoked".
+func TestResolve_SweepFailureRevokesPartialLeases(t *testing.T) {
+	fx := newIBFixture(t, nil) // clone stays on "main"
+
+	fv := newFakeVault()
+	// rtEvent's LIST serves both ListBranchTiers (branch-tier discovery,
+	// which must succeed so Select can pick "main") and Sweep's own
+	// event-tier listing (which sees no plain keys here — "main/" is a
+	// directory entry — so it's a no-op, not a failure). The failure this
+	// test needs must live at the base tier instead, which only Sweep
+	// ever LISTs.
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
+	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"dbref"}))
+	fv.set("/v1/kv/data/"+rtMain+"/dbref", 200, entryBody(map[string]interface{}{"$ref": "database/creds/readonly"}, nil))
+	fv.set("/v1/database/creds/readonly", 200, derefBody(map[string]interface{}{"username": "u"}, "database/creds/readonly/lease-1"))
+	fv.set("/v1/kv/metadata/"+rtBase, 500, `{"errors":["boom"]}`)
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err == nil {
+		t.Fatal("resolve: expected an error, got nil")
+	}
+	if exitCode(err) != 5 {
+		t.Errorf("exitCode(err) = %d, want 5", exitCode(err))
+	}
+
+	revoked := fv.revokedIDs()
+	if len(revoked) != 1 || revoked[0] != "database/creds/readonly/lease-1" {
+		t.Errorf("revoked leases = %v, want [database/creds/readonly/lease-1]", revoked)
+	}
+}

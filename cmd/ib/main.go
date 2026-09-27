@@ -95,42 +95,69 @@ func stdoutIsTerminal(w io.Writer) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-// splitBranchFlag pulls a --branch <name> (or --branch=<name>, or the
+// splitFlag pulls a --<name> <value> (or --<name>=<value>, or the
 // single-dash form) pair out of args wherever it appears, returning the
-// branch value ("" if not given) and the remaining args in their original
+// value ("" if not given) and the remaining args in their original
 // relative order (M8). Go's flag package alone stops parsing at the first
 // non-flag argument, so `ib get NAME --branch x` would otherwise leave
 // both NAME and --branch/x as unrecognized positional args — get/env's
-// --branch (CLIENT-SPEC §1) needs to work regardless of where it appears.
-// ib run does NOT use this: its own "--" already marks where ib's flags
-// end and the child command begins, so flags-after-positionals has no
-// meaning there.
-func splitBranchFlag(args []string) (branch string, rest []string, err error) {
+// --branch (CLIENT-SPEC §1) and --output (CLIENT-SPEC §1.2/§1.3) need to
+// work regardless of where they appear. ib run does NOT use this: its own
+// "--" already marks where ib's flags end and the child command begins,
+// so flags-after-positionals has no meaning there.
+func splitFlag(args []string, name string) (value string, rest []string, err error) {
+	long, short := "--"+name, "-"+name
 	rest = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
-		case a == "--branch" || a == "-branch":
+		case a == long || a == short:
 			if i+1 >= len(args) {
 				return "", nil, fmt.Errorf("%w: %s needs a value", errUsage, a)
 			}
 			i++
-			branch = args[i]
-		case strings.HasPrefix(a, "--branch="):
-			branch = strings.TrimPrefix(a, "--branch=")
-		case strings.HasPrefix(a, "-branch="):
-			branch = strings.TrimPrefix(a, "-branch=")
+			value = args[i]
+		case strings.HasPrefix(a, long+"="):
+			value = strings.TrimPrefix(a, long+"=")
+		case strings.HasPrefix(a, short+"="):
+			value = strings.TrimPrefix(a, short+"=")
 		default:
 			rest = append(rest, a)
 		}
 	}
-	return branch, rest, nil
+	return value, rest, nil
 }
 
+// splitBranchFlag pulls --branch (CLIENT-SPEC §1) out of args; see
+// splitFlag.
+func splitBranchFlag(args []string) (branch string, rest []string, err error) {
+	return splitFlag(args, "branch")
+}
+
+// splitOutputFlag pulls --output (CLIENT-SPEC §1.2/§1.3) out of args; see
+// splitFlag.
+func splitOutputFlag(args []string) (output string, rest []string, err error) {
+	return splitFlag(args, "output")
+}
+
+// outputJSON is the --output value shared by `ib get` and `ib env` that
+// switches both from their default (human/shell-oriented) format to a
+// single JSON object on stdout (CLIENT-SPEC §1.2/§1.3). get's default is
+// "raw", env's is "env" — both accept "" (flag omitted) to mean their own
+// default, so only the json case needs a named constant here.
+const outputJSON = "json"
+
 func dispatchGet(args []string, stdout, stderr io.Writer) int {
+	const usage = "ib: usage: ib get [--branch <name>] [--output raw|json] <name>"
+
 	branch, rest, err := splitBranchFlag(args)
-	if err != nil || len(rest) != 1 {
-		fmt.Fprintln(stderr, "ib: usage: ib get [--branch <name>] <name>")
+	if err != nil {
+		fmt.Fprintln(stderr, usage)
+		return 1
+	}
+	output, rest, err := splitOutputFlag(rest)
+	if err != nil || len(rest) != 1 || (output != "" && output != "raw" && output != outputJSON) {
+		fmt.Fprintln(stderr, usage)
 		return 1
 	}
 
@@ -140,7 +167,7 @@ func dispatchGet(args []string, stdout, stderr io.Writer) int {
 		return exitCode(err)
 	}
 
-	if err := cmdGet(context.Background(), rest[0], opts, stdout, stdoutIsTerminal(stdout)); err != nil {
+	if err := cmdGet(context.Background(), rest[0], opts, stdout, stdoutIsTerminal(stdout), output); err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return exitCode(err)
 	}
@@ -148,9 +175,16 @@ func dispatchGet(args []string, stdout, stderr io.Writer) int {
 }
 
 func dispatchEnv(args []string, stdout, stderr io.Writer) int {
+	const usage = "ib: usage: ib env [--branch <name>] [--output env|json]"
+
 	branch, rest, err := splitBranchFlag(args)
-	if err != nil || len(rest) != 0 {
-		fmt.Fprintln(stderr, "ib: usage: ib env [--branch <name>]")
+	if err != nil {
+		fmt.Fprintln(stderr, usage)
+		return 1
+	}
+	output, rest, err := splitOutputFlag(rest)
+	if err != nil || len(rest) != 0 || (output != "" && output != "env" && output != outputJSON) {
+		fmt.Fprintln(stderr, usage)
 		return 1
 	}
 
@@ -160,7 +194,7 @@ func dispatchEnv(args []string, stdout, stderr io.Writer) int {
 		return exitCode(err)
 	}
 
-	if err := cmdEnv(context.Background(), opts, stdout); err != nil {
+	if err := cmdEnv(context.Background(), opts, stdout, output); err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return exitCode(err)
 	}

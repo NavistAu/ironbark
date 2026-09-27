@@ -37,28 +37,57 @@ it, but `ib` itself only reads it back from the default location,
 elsewhere breaks the `ib auth` → `ib get` handoff. `ib auth` adds nothing
 else — no token storage of its own.
 
-### 1.2 `ib get <name>`
+### 1.2 `ib get [--output raw|json] <name>`
 
 Resolves the checkout's environment (§3), sweeps it (§4) and writes the
 value of secret `<name>` to stdout. `<name>` is the final secret name as
 the sweep produces it (SPEC §4.2 naming: lowercase, `[a-z0-9_]+`, general
-entries as `E_f`). A trailing newline is written only when stdout is a
-terminal. Unknown name → exit 3 (§7).
+entries as `E_f`). Unknown name → exit 3 (§7).
 
-### 1.3 `ib env`
+`--output` (default `raw`) selects the stdout shape:
 
-Resolves and sweeps as `get`, then writes every secret to stdout as one
-line per secret:
+- `raw` (default): the value alone. A trailing newline is written only
+  when stdout is a terminal.
+- `json`: one line, `{"name": "<name>", "value": "<value>"}`.
 
-```
-SECRET_<NAME>=<quoted value>
-```
+`--output`, like `--branch`, is recognized wherever it appears among the
+command's arguments (§3 rule 1's splitting). An unrecognized `--output`
+value is a usage error (exit 1). In every mode, stdout carries only the
+value (or the JSON object) — every status/diagnostic line (selection,
+stale refs, skipped entries, lease notes) stays on stderr, unchanged by
+`--output`; an error prints its message to stderr and nothing to stdout.
 
-`<NAME>` is the secret name upper-cased. `<quoted value>` is
-single-quoted; an embedded `'` is written as `'\''`; newlines are kept
-literally inside the quotes. The output is valid for POSIX `sh` `.`/
-`source` and for `ib run --env-file`. Values are on disk if redirected to
-a file — `ib env` is the break-glass path; `ib run` is the normal one.
+### 1.3 `ib env [--output env|json]`
+
+Resolves and sweeps as `get`, then writes every secret to stdout.
+`--output` (default `env`) selects the shape:
+
+- `env` (default): one line per secret,
+  ```
+  SECRET_<NAME>=<quoted value>
+  ```
+  `<NAME>` is the secret name upper-cased. `<quoted value>` is
+  single-quoted; an embedded `'` is written as `'\''`; newlines are kept
+  literally inside the quotes. The output is valid for POSIX `sh` `.`/
+  `source` and for `ib run --env-file`. Values are on disk if redirected
+  to a file — `ib env` is the break-glass path; `ib run` is the normal
+  one.
+- `json`: one JSON object,
+  ```
+  {"branch": "<chosen or empty>", "rule": "<selection rule>", "secrets": {"<name>": "<value>", …}}
+  ```
+  `branch`/`rule` are the §3 selection outcome (`rule` is one of that
+  section's rule names — `override`, `direct`, `nearest`, `reflog`,
+  `cascade`, `no-branch-tiers`; `branch` is `""` for `no-branch-tiers`).
+  `secrets` is keyed by the sweep's own lowercase names (not the
+  `SECRET_<NAME>` form `env` output uses), with keys sorted.
+
+`--output`, like `--branch`, is recognized wherever it appears among the
+command's (otherwise empty) argument list. An unrecognized `--output`
+value is a usage error (exit 1). In every mode, stdout carries only the
+env lines or the JSON object — every status/diagnostic line (selection,
+stale refs, skipped entries, lease notes) stays on stderr, unchanged by
+`--output`; an error prints its message to stderr and nothing to stdout.
 
 ### 1.4 `ib run [--env-file <file>]… [--no-masking] -- <cmd> [args…]`
 

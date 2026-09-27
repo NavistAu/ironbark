@@ -80,6 +80,77 @@ func TestDispatchEnv_BranchFlagAfterOtherArgs(t *testing.T) {
 	}
 }
 
+// TestDispatchGet_UnknownOutputValue proves an unrecognized --output value
+// is a usage error (exit 1), not silently accepted or forwarded.
+func TestDispatchGet_UnknownOutputValue(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := dispatchGet([]string{"myname", "--output", "bogus"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("dispatchGet(myname, --output, bogus) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty on a usage error", stdout.String())
+	}
+}
+
+// TestDispatchEnv_UnknownOutputValue mirrors
+// TestDispatchGet_UnknownOutputValue for `ib env`.
+func TestDispatchEnv_UnknownOutputValue(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := dispatchEnv([]string{"--output", "bogus"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("dispatchEnv(--output, bogus) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty on a usage error", stdout.String())
+	}
+}
+
+// TestDispatchGet_OutputFlagAfterPositionalArg proves --output, like
+// --branch (M8), is recognized regardless of where it appears relative to
+// the positional name — it reuses splitFlag/splitBranchFlag's own
+// splitting.
+func TestDispatchGet_OutputFlagAfterPositionalArg(t *testing.T) {
+	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
+	t.Setenv("BAO_TOKEN", "test-token")
+	chdirTemp(t)
+
+	var stdout, stderr bytes.Buffer
+	code := dispatchGet([]string{"myname", "--output", "json"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("dispatchGet(myname, --output, json) = %d, want 2 (not a git checkout) — --output after the positional name must still be recognized", code)
+	}
+}
+
+// TestDispatchGet_BranchAndOutputFlagsCombined proves --branch and
+// --output can both appear, in either order, alongside the positional
+// name.
+func TestDispatchGet_BranchAndOutputFlagsCombined(t *testing.T) {
+	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
+	t.Setenv("BAO_TOKEN", "test-token")
+	chdirTemp(t)
+
+	var stdout, stderr bytes.Buffer
+	code := dispatchGet([]string{"myname", "--output", "json", "--branch", "develop"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("dispatchGet(myname, --output, json, --branch, develop) = %d, want 2 (not a git checkout)", code)
+	}
+}
+
+// TestDispatchEnv_OutputFlagAfterOtherArgs mirrors
+// TestDispatchGet_OutputFlagAfterPositionalArg for `ib env`.
+func TestDispatchEnv_OutputFlagAfterOtherArgs(t *testing.T) {
+	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
+	t.Setenv("BAO_TOKEN", "test-token")
+	chdirTemp(t)
+
+	var stdout, stderr bytes.Buffer
+	code := dispatchEnv([]string{"--branch", "develop", "--output", "json"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("dispatchEnv(--branch, develop, --output, json) = %d, want 2 (not a git checkout)", code)
+	}
+}
+
 // chdirTemp changes the process's working directory to a fresh empty temp
 // dir (never a git checkout) for the duration of the calling test,
 // restoring it on cleanup. get/env build their Runner from the process's

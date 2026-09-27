@@ -132,6 +132,40 @@ func TestResolve_NoBranchTiers(t *testing.T) {
 	}
 }
 
+// TestResolve_NearestAncestorVisibilityLine reproduces CLIENT-SPEC §3's
+// own worked example verbatim ("ib: env develop (nearest ancestor, 3
+// commits)"): a checkout on a feature branch cut from develop, with
+// develop 10 commits ahead of main, three more commits added locally —
+// the same distances (develop 3, main 13) as gitenv's own
+// TestFacts_NearestAncestorDistances.
+func TestResolve_NearestAncestorVisibilityLine(t *testing.T) {
+	fx := newIBFixture(t, func(seedDir string) {
+		pushBranch(t, seedDir, "develop", "main", 10)
+	})
+	gitRaw(t, fx.clone, "checkout", "-q", "-b", "feature", "origin/develop")
+	for i := 1; i <= 3; i++ {
+		commitFixture(t, fx.clone, "feature-"+string(rune('0'+i)), "feature-commit")
+	}
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"develop/", "main/"}))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ib: env develop (nearest ancestor, 3 commits)") {
+		t.Errorf("stderr = %q, want the CLIENT-SPEC §3 worked-example visibility line", stderr.String())
+	}
+}
+
 // TestResolve_Ambiguous exercises CLIENT-SPEC §3 rule 6: a tie that
 // survives both the reflog and cascade tie-breaks fails with the
 // candidates (and their distances) named on stderr, asking for --branch.

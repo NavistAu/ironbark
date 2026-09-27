@@ -378,6 +378,29 @@ Terraform/OpenTofu module (policies, KV skeleton, pointer entries,
 `.identity` binding) shipping in this repo; `ironbark doctor` read-only
 convention lint (separate admin-ish credential at invocation).
 
+**M3 — the local client (`ib`).** A separate binary that gives an operator's
+or agent's local run the same secrets a CI run on the same branch gets. It
+shares the broker's sweep, deref and naming code (`internal/vaultx`) — one
+implementation, never a second copy.
+
+- `ib auth` — sugar over `bao login`, falling back to `vault login` when `bao`
+  is absent; the token lands in the CLI's own token helper, shared with it.
+- `ib get <name>` — one secret, resolved across tiers as the sweep does.
+- `ib env` — every secret as `SECRET_<NAME>=<value>` lines (break-glass;
+  values on disk).
+- `ib run --env-file <file> -- <cmd>` — resolves `ironbark://<name>` refs in
+  the file and runs `<cmd>` with them set, like `op run`. The file holds refs,
+  not values.
+
+Identity comes from the checkout, not flags: `<org>/<repo>` from the `origin`
+remote, branch from `HEAD`, event fixed as `push` (a local run reads the tiers
+a push to that branch reads). The caller's own token does every read — no
+mint, no signature verification — so the caller's policy bounds the result.
+
+Later, when needed: an in-repo config file (remote disambiguation, naming);
+nested map entries — the sweep descends subdirectories and joins the path into
+the secret name — landing in the shared code so broker and client move together.
+
 ## 11. Decisions
 
 Current decisions live in [`docs/decisionlog/`](decisionlog/) (MADR):

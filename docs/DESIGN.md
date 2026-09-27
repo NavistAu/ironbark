@@ -403,16 +403,21 @@ Tracked branches are the `push/<branch>/` tiers the caller can LIST.
 1. Direct match: the checked-out branch is tracked → use it.
 2. Otherwise walk: for each tracked B, count commits in `HEAD` not in
    `origin/B` (from `git merge-base`); the lowest count wins.
-3. Tie → the default branch (`origin/HEAD`) if it is among the tied.
-4. Otherwise fail, listing the tied branches. Never guess.
+3. Tie → the branch's reflog: if its creation entry (`branch: Created from
+   <B>`) names one of the tied branches, use it. Local and editable — fine for
+   an environment choice, never for access.
+4. Tie still → the cascade: an ordered branch list (config, later; until then
+   just the default branch, `origin/HEAD`); the first tied branch in it wins.
+5. Otherwise fail, listing the tied branches and asking for `--branch`.
+   Never guess.
 
 No common ancestor with any tracked branch → fail. `--branch` / `IB_BRANCH`
 overrides the choice. The choice is always printed to stderr. Before the walk,
 `git ls-remote origin` is compared with each `origin/B`; a difference warns
 (stale refs) but does not stop the run.
 
-Later: a config cascade (e.g. `develop` before `stage` before `main`) applied
-at step 3, before the default branch, for ties the walk cannot break.
+Later: the cascade becomes configurable (e.g. `develop` before `stage` before
+`main`) — the last tie-break before failing.
 
 Later, when needed: an in-repo config file (remote disambiguation, naming);
 nested map entries — the sweep descends subdirectories and joins the path into

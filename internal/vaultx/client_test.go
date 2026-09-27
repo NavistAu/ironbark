@@ -3,17 +3,22 @@ package vaultx
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/vault/api"
 )
 
 // fakeVault fakes just enough of Vault's HTTP API for the AppRole session
@@ -361,6 +366,69 @@ func TestLogin_FailureError(t *testing.T) {
 	}
 	if c.sessionOK {
 		t.Errorf("sessionOK = true after failed login, want false")
+	}
+}
+
+// writeCACertPEM PEM-encodes cert into a temp file and returns its path,
+// for use as an api.TLSConfig.CACert value in the TLS tests below.
+func writeCACertPEM(t *testing.T, cert *x509.Certificate) string {
+	t.Helper()
+	if cert == nil {
+		t.Fatalf("httptest server exposed no certificate")
+	}
+	f, err := os.CreateTemp(t.TempDir(), "ca-*.pem")
+	if err != nil {
+		t.Fatalf("create temp CA file: %v", err)
+	}
+	defer f.Close()
+	if err := pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}); err != nil {
+		t.Fatalf("encode CA cert: %v", err)
+	}
+	return f.Name()
+}
+
+// TestNew_TLSConfig_TrustsProvidedCA proves New wires a non-nil
+// Config.TLS onto the api.Config via ConfigureTLS before api.NewClient:
+// a client configured with the test server's own CA cert can complete a
+// TLS handshake and log in successfully.
+func TestNew_TLSConfig_TrustsProvidedCA(t *testing.T) {
+	fv := newFakeVault()
+	srv := httptest.NewTLSServer(fv.handler())
+	defer srv.Close()
+
+	certPath := writeCACertPEM(t, srv.Certificate())
+
+	cfg := testConfig(srv.URL)
+	cfg.TLS = &api.TLSConfig{CACert: certPath}
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := c.Login(context.Background()); err != nil {
+		t.Fatalf("Login with configured CA cert: %v", err)
+	}
+}
+
+// TestNew_NoTLSConfig_FailsCertificateVerification proves the nil-TLS
+// case (the broker, today's behavior) is unchanged: without a CA cert,
+// the client cannot verify the test server's self-signed certificate.
+func TestNew_NoTLSConfig_FailsCertificateVerification(t *testing.T) {
+	fv := newFakeVault()
+	srv := httptest.NewTLSServer(fv.handler())
+	defer srv.Close()
+
+	c, err := New(testConfig(srv.URL)) // TLS left nil
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = c.Login(context.Background())
+	if err == nil {
+		t.Fatalf("Login: expected a certificate verification error, got nil")
+	}
+	if !strings.Contains(err.Error(), "certificate") {
+		t.Errorf("Login error = %v, want a certificate-related error", err)
 	}
 }
 

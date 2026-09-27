@@ -214,3 +214,44 @@ func TestResolve_Ambiguous(t *testing.T) {
 		t.Errorf("exitCode(err) = %d, want 4", exitCode(err))
 	}
 }
+
+// TestResolve_SweepFailureRevokesPartialLeases exercises CLIENT-SPEC §4:
+// a lease minted by the branch tier's deref, followed by a non-403/404
+// failure listing the event tier, must revoke that lease before resolve
+// returns its (exit 5) error — "leases created so far revoked".
+func TestResolve_SweepFailureRevokesPartialLeases(t *testing.T) {
+	fx := newIBFixture(t, nil) // clone stays on "main"
+
+	fv := newFakeVault()
+	// rtEvent's LIST serves both ListBranchTiers (branch-tier discovery,
+	// which must succeed so Select can pick "main") and Sweep's own
+	// event-tier listing (which sees no plain keys here — "main/" is a
+	// directory entry — so it's a no-op, not a failure). The failure this
+	// test needs must live at the base tier instead, which only Sweep
+	// ever LISTs.
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
+	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"dbref"}))
+	fv.set("/v1/kv/data/"+rtMain+"/dbref", 200, entryBody(map[string]interface{}{"$ref": "database/creds/readonly"}, nil))
+	fv.set("/v1/database/creds/readonly", 200, derefBody(map[string]interface{}{"username": "u"}, "database/creds/readonly/lease-1"))
+	fv.set("/v1/kv/metadata/"+rtBase, 500, `{"errors":["boom"]}`)
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err == nil {
+		t.Fatal("resolve: expected an error, got nil")
+	}
+	if exitCode(err) != 5 {
+		t.Errorf("exitCode(err) = %d, want 5", exitCode(err))
+	}
+
+	revoked := fv.revokedIDs()
+	if len(revoked) != 1 || revoked[0] != "database/creds/readonly/lease-1" {
+		t.Errorf("revoked leases = %v, want [database/creds/readonly/lease-1]", revoked)
+	}
+}

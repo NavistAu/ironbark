@@ -387,6 +387,33 @@ func TestSweep_Deref_LeaseIDOnSecrets(t *testing.T) {
 	}
 }
 
+// TestSweep_PartialResultOnError_LeaseIDsSurviveFailure proves a Sweep
+// failure after one or more derefs already created leases still returns
+// a SweepResult carrying those lease IDs alongside the error: tier 1
+// (branch)'s deref creates a lease, then tier 2 (event)'s LIST 500s and
+// aborts the sweep. ib run has no minted-token cascade to fall back on
+// (CLIENT-SPEC §8), so it needs this partial result to revoke the lease
+// itself.
+func TestSweep_PartialResultOnError_LeaseIDsSurviveFailure(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepBranch), http.StatusOK, listBody([]string{"ptr"}))
+	fv.set(dataEntryPath(sweepBranch, "ptr"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/creds/x"}, nil))
+	fv.set("/v1/aws/creds/x", http.StatusOK, derefBody(map[string]interface{}{"user": "u"}, "aws/creds/x/abc"))
+	fv.set(metaPath(sweepEvent), http.StatusInternalServerError, `{"errors":["boom"]}`)
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), true)
+	if err == nil {
+		t.Fatalf("Sweep: expected error, got nil")
+	}
+	if errors.Is(err, ErrMalformedDirective) {
+		t.Errorf("Sweep error wraps ErrMalformedDirective, want a plain read-error class")
+	}
+	if len(res.LeaseIDs) != 1 || res.LeaseIDs[0] != "aws/creds/x/abc" {
+		t.Errorf("LeaseIDs = %v, want [aws/creds/x/abc] (tier 1's lease must survive tier 2's failure)", res.LeaseIDs)
+	}
+}
+
 // TestSweep_Deref_403SkipsEntry proves a deref 403 skips the entry
 // without error and without setting LeasesCreated.
 func TestSweep_Deref_403SkipsEntry(t *testing.T) {

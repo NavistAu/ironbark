@@ -361,6 +361,59 @@ func TestSweep_Deref_Success(t *testing.T) {
 	}
 }
 
+// TestSweep_Deref_LeaseIDOnSecrets proves a deref response's lease_id is
+// recorded on every secret it produces (SweptSecret.LeaseID) and surfaces
+// once, distinctly, on SweepResult.LeaseIDs.
+func TestSweep_Deref_LeaseIDOnSecrets(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"ptr"}))
+	fv.set(dataEntryPath(sweepBase, "ptr"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/creds/x"}, nil))
+	fv.set("/v1/aws/creds/x", http.StatusOK, derefBody(map[string]interface{}{"user": "u", "pass": "p"}, "aws/creds/x/abc"))
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.LeaseIDs) != 1 || res.LeaseIDs[0] != "aws/creds/x/abc" {
+		t.Fatalf("LeaseIDs = %v, want [aws/creds/x/abc]", res.LeaseIDs)
+	}
+	for _, name := range []string{"ptr_user", "ptr_pass"} {
+		got := findSecret(t, res.Secrets, name)
+		if got.LeaseID != "aws/creds/x/abc" {
+			t.Errorf("%s.LeaseID = %q, want %q", name, got.LeaseID, "aws/creds/x/abc")
+		}
+	}
+}
+
+// TestSweep_PartialResultOnError_LeaseIDsSurviveFailure proves a Sweep
+// failure after one or more derefs already created leases still returns
+// a SweepResult carrying those lease IDs alongside the error: tier 1
+// (branch)'s deref creates a lease, then tier 2 (event)'s LIST 500s and
+// aborts the sweep. ib run has no minted-token cascade to fall back on
+// (CLIENT-SPEC §8), so it needs this partial result to revoke the lease
+// itself.
+func TestSweep_PartialResultOnError_LeaseIDsSurviveFailure(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepBranch), http.StatusOK, listBody([]string{"ptr"}))
+	fv.set(dataEntryPath(sweepBranch, "ptr"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/creds/x"}, nil))
+	fv.set("/v1/aws/creds/x", http.StatusOK, derefBody(map[string]interface{}{"user": "u"}, "aws/creds/x/abc"))
+	fv.set(metaPath(sweepEvent), http.StatusInternalServerError, `{"errors":["boom"]}`)
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), true)
+	if err == nil {
+		t.Fatalf("Sweep: expected error, got nil")
+	}
+	if errors.Is(err, ErrMalformedDirective) {
+		t.Errorf("Sweep error wraps ErrMalformedDirective, want a plain read-error class")
+	}
+	if len(res.LeaseIDs) != 1 || res.LeaseIDs[0] != "aws/creds/x/abc" {
+		t.Errorf("LeaseIDs = %v, want [aws/creds/x/abc] (tier 1's lease must survive tier 2's failure)", res.LeaseIDs)
+	}
+}
+
 // TestSweep_Deref_403SkipsEntry proves a deref 403 skips the entry
 // without error and without setting LeasesCreated.
 func TestSweep_Deref_403SkipsEntry(t *testing.T) {
@@ -748,6 +801,73 @@ func TestSweep_BranchfulTrueEmptyBranchExcludesBranchTier(t *testing.T) {
 	}
 	if len(res.Secrets) != 1 || res.Secrets[0].Name != "foo" {
 		t.Fatalf("Secrets = %v, want exactly [foo] (from the event/base tiers only)", secretNames(res.Secrets))
+	}
+}
+
+// --- ListBranchTiers (CLIENT-SPEC §3) ---
+
+// TestListBranchTiers_MixedPlainAndDirKeys proves ListBranchTiers returns
+// only directory keys (trailing "/" stripped), sorted, excluding
+// dot-prefixed entries and plain (non-directory) keys.
+func TestListBranchTiers_MixedPlainAndDirKeys(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusOK, listBody([]string{"main/", "develop/", "shared", ".hidden/"}))
+
+	c := newSweepClient(t, fv)
+	got, err := c.ListBranchTiers(context.Background(), "minted-token", sweepTestIdentity())
+	if err != nil {
+		t.Fatalf("ListBranchTiers: %v", err)
+	}
+	want := []string{"develop", "main"}
+	if len(got) != len(want) {
+		t.Fatalf("ListBranchTiers = %v, want %v", got, want)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("ListBranchTiers[%d] = %q, want %q", i, got[i], name)
+		}
+	}
+}
+
+// TestListBranchTiers_403ReturnsNilNil proves SPEC §4.1's partial-
+// visibility rule applies here too: a 403 on the LIST yields (nil, nil),
+// not an error.
+func TestListBranchTiers_403ReturnsNilNil(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusForbidden, `{"errors":["denied"]}`)
+
+	c := newSweepClient(t, fv)
+	got, err := c.ListBranchTiers(context.Background(), "minted-token", sweepTestIdentity())
+	if got != nil || err != nil {
+		t.Errorf("ListBranchTiers = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestListBranchTiers_404ReturnsNilNil mirrors the 403 case for 404 (no
+// branch tiers at all, CLIENT-SPEC §3's "no branch tiers" path).
+func TestListBranchTiers_404ReturnsNilNil(t *testing.T) {
+	fv := newFakeKV() // path left unregistered -> 404
+
+	c := newSweepClient(t, fv)
+	got, err := c.ListBranchTiers(context.Background(), "minted-token", sweepTestIdentity())
+	if got != nil || err != nil {
+		t.Errorf("ListBranchTiers = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestListBranchTiers_500ReturnsError proves any other status is a plain
+// error (SPEC §4.1's "any other status" rule).
+func TestListBranchTiers_500ReturnsError(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusInternalServerError, `{"errors":["boom"]}`)
+
+	c := newSweepClient(t, fv)
+	got, err := c.ListBranchTiers(context.Background(), "minted-token", sweepTestIdentity())
+	if got != nil {
+		t.Errorf("ListBranchTiers = %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatalf("ListBranchTiers: expected error, got nil")
 	}
 }
 

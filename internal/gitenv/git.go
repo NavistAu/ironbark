@@ -148,15 +148,15 @@ func Checkout(r Runner) (CheckoutInfo, error) {
 	return info, nil
 }
 
-// Facts gathers everything Select needs beyond Override/Detached: which of
-// the given (escaped) tiers are tracked branches, their ancestor distance
-// from HEAD, what branch the checked-out branch's reflog says it was
-// created from, and which tracked branches are stale against the forge.
+// TrackedBranches returns which of tiers (the branch directory names
+// visible under <B>/push/, already escaped in identity.Esc form) are
+// tracked branches: a remote-tracking ref origin/T whose escaped name
+// matches a tier, or the checked-out branch itself (current) if its
+// escaped name matches a tier even with no remote-tracking ref. Only
+// local git calls (for-each-ref) — no network.
 //
 // current is the checked-out branch's short name ("" when detached).
-// tiers is the set of branch directory names visible under <B>/push/,
-// already escaped (identity.Esc form).
-func Facts(r Runner, current string, tiers []string) (tracked []string, dist map[string]int, reflogFrom string, stale []string, lsRemoteErr error) {
+func TrackedBranches(r Runner, current string, tiers []string) []string {
 	tierSet := make(map[string]bool, len(tiers))
 	for _, t := range tiers {
 		tierSet[t] = true
@@ -185,12 +185,23 @@ func Facts(r Runner, current string, tiers []string) (tracked []string, dist map
 		trackedSet[current] = true
 	}
 
-	tracked = make([]string, 0, len(trackedSet))
+	tracked := make([]string, 0, len(trackedSet))
 	for name := range trackedSet {
 		tracked = append(tracked, name)
 	}
 	sort.Strings(tracked)
+	return tracked
+}
 
+// Ancestry gathers CLIENT-SPEC §3 rule 3+ facts for the tracked branches:
+// each one's ancestor distance from HEAD, the checked-out branch's reflog
+// creation entry, and (the "Stale refs" check) which tracked branches'
+// origin/T disagrees with the forge — the one network call this package
+// makes (`git ls-remote`). Callers only need this when rules 1-2
+// (override, direct match) did not already decide (NeedsAncestry):
+// CLIENT-SPEC §3 explicitly runs the staleness check "before rule 3", not
+// before rules 1-2.
+func Ancestry(r Runner, current string, tracked []string) (dist map[string]int, reflogFrom string, stale []string, lsRemoteErr error) {
 	dist = make(map[string]int)
 	for _, t := range tracked {
 		ref := "origin/" + t
@@ -239,7 +250,7 @@ func Facts(r Runner, current string, tiers []string) (tracked []string, dist map
 
 	out, err := r.Git("ls-remote", "--heads", "origin")
 	if err != nil {
-		return tracked, dist, reflogFrom, nil, err
+		return dist, reflogFrom, nil, err
 	}
 
 	forgeSHA := make(map[string]string)
@@ -268,7 +279,18 @@ func Facts(r Runner, current string, tiers []string) (tracked []string, dist map
 	}
 	sort.Strings(staleList)
 
-	return tracked, dist, reflogFrom, staleList, nil
+	return dist, reflogFrom, staleList, nil
+}
+
+// Facts is TrackedBranches followed unconditionally by Ancestry — kept for
+// callers (and tests) that want every fact in one call. cmd/ib's resolve
+// pipeline calls the two separately instead, per M1: Ancestry's ls-remote
+// network call must not run before rules 1-2 have had a chance to decide
+// (NeedsAncestry).
+func Facts(r Runner, current string, tiers []string) (tracked []string, dist map[string]int, reflogFrom string, stale []string, lsRemoteErr error) {
+	tracked = TrackedBranches(r, current, tiers)
+	dist, reflogFrom, stale, lsRemoteErr = Ancestry(r, current, tracked)
+	return tracked, dist, reflogFrom, stale, lsRemoteErr
 }
 
 // branchRefExists reports whether name is a real branch — a local

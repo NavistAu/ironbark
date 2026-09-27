@@ -100,6 +100,36 @@ func secretNames(m map[string]vaultx.SweptSecret) []string {
 	return names
 }
 
+// TestResolve_DirectMatchSkipsStaleCheck reproduces CLIENT-SPEC §3's
+// "before rule 3" ordering (M1): rules 1-2 (override, direct match) must
+// decide the branch WITHOUT paying for the ls-remote staleness check.
+// Proven here by pointing origin at an address nothing listens on (which
+// would fail ls-remote and print the "freshness unknown" warning if the
+// check ran) while the checkout sits on "main", a direct match — resolve
+// must still succeed, silently.
+func TestResolve_DirectMatchSkipsStaleCheck(t *testing.T) {
+	fx := newIBFixture(t, nil) // clone stays on "main"
+	gitRaw(t, fx.clone, "remote", "set-url", "origin", "https://127.0.0.1:1/acme/widgets.git")
+
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "freshness unknown") {
+		t.Errorf("stderr = %q, a direct match (rule 2) should skip the stale check entirely", stderr.String())
+	}
+}
+
 // TestResolve_NoBranchTiers exercises CLIENT-SPEC §3's "no branch tiers at
 // all" path: ListBranchTiers sees nothing (404), so resolve sweeps only
 // the event and base tiers and says so on stderr.

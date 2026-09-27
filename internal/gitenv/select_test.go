@@ -150,6 +150,34 @@ func TestSelect(t *testing.T) {
 	}
 }
 
+// TestNeedsAncestry proves rule 1 (override) and rule 2 (direct match) —
+// and the no-branch-tiers case — never need ancestry facts, while
+// anything that would fall through to rule 3 does (M1: this is what lets
+// resolve() skip the ls-remote staleness check when it isn't needed).
+func TestNeedsAncestry(t *testing.T) {
+	cases := []struct {
+		name              string
+		override, current string
+		tracked           []string
+		want              bool
+	}{
+		{"no branch tiers at all", "", "", nil, false},
+		{"no branch tiers even with override", "stage", "", nil, false},
+		{"override present", "develop", "main", defaultTracked, false},
+		{"override absent (still no ancestry needed: rule 1 fails fast)", "nope", "main", defaultTracked, false},
+		{"direct match", "", "main", defaultTracked, false},
+		{"no override, no direct match: needs rule 3+", "", "feature/x", defaultTracked, true},
+		{"detached, no override: needs rule 3+", "", "", defaultTracked, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := NeedsAncestry(c.override, c.current, c.tracked); got != c.want {
+				t.Errorf("NeedsAncestry(%q, %q, %v) = %v, want %v", c.override, c.current, c.tracked, got, c.want)
+			}
+		})
+	}
+}
+
 // TestSelectErrorImplementsError just documents/asserts SelectError
 // satisfies the error interface with a non-empty message for every Kind.
 func TestSelectErrorImplementsError(t *testing.T) {

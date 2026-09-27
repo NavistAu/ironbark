@@ -74,12 +74,23 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 		return nil, nil, fmt.Errorf("%w: list branch tiers: %v", errVault, err)
 	}
 
-	tracked, dist, reflogFrom, stale, lsErr := gitenv.Facts(opts.Runner, info.Branch, tiers)
-	for _, b := range stale {
-		fmt.Fprintf(opts.Stderr, "ib: origin/%s differs from the forge; git fetch\n", b)
-	}
-	if lsErr != nil {
-		fmt.Fprintln(opts.Stderr, "ib: freshness unknown (git ls-remote failed)")
+	tracked := gitenv.TrackedBranches(opts.Runner, info.Branch, tiers)
+
+	// M1 / CLIENT-SPEC §3: the staleness check (ls-remote) runs "before
+	// rule 3" — only when rules 1-2 (override, direct match) don't already
+	// decide the branch, sparing the network round trip when they do.
+	var dist map[string]int
+	var reflogFrom string
+	if gitenv.NeedsAncestry(opts.Branch, info.Branch, tracked) {
+		var stale []string
+		var lsErr error
+		dist, reflogFrom, stale, lsErr = gitenv.Ancestry(opts.Runner, info.Branch, tracked)
+		for _, b := range stale {
+			fmt.Fprintf(opts.Stderr, "ib: origin/%s differs from the forge; git fetch\n", b)
+		}
+		if lsErr != nil {
+			fmt.Fprintln(opts.Stderr, "ib: freshness unknown (git ls-remote failed)")
+		}
 	}
 
 	sel, err := gitenv.Select(gitenv.SelectInput{

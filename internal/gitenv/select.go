@@ -93,6 +93,26 @@ func (e *SelectError) Error() string {
 	}
 }
 
+// NeedsAncestry reports whether Select would need rule 3+ facts (ancestor
+// distance, reflog, cascade) to decide: false when rule 1 (override) or
+// rule 2 (direct match) already settles it, or when there are no branch
+// tiers at all (Select's own "no branch tiers" short-circuit, which also
+// needs no ancestry). CLIENT-SPEC §3's staleness check ("before rule 3")
+// only runs when this is true — an override or direct match makes the
+// network round trip moot (M1).
+func NeedsAncestry(override, current string, tracked []string) bool {
+	if len(tracked) == 0 {
+		return false
+	}
+	if override != "" {
+		return false
+	}
+	if current != "" && contains(tracked, current) {
+		return false
+	}
+	return true
+}
+
 // Select chooses an environment branch per CLIENT-SPEC §3, given facts
 // already gathered from the checkout and its remote. Select makes no git
 // calls itself and is deterministic in its input.

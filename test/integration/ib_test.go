@@ -18,6 +18,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,6 +143,110 @@ func splitDbref(names []string) (dbref, other []string) {
 	return dbref, other
 }
 
+// ibWoodpeckerPayload mirrors e2e_test.go's woodpeckerPayload but for the
+// ib fixture's own org/repo and a caller-chosen branch — needed so the
+// agreement comparison (T1) can be repeated for "develop", not just
+// woodpeckerPayload's hardcoded Branch constant.
+func ibWoodpeckerPayload(t *testing.T, branch string) []byte {
+	t.Helper()
+	body := map[string]interface{}{
+		"repo": map[string]interface{}{
+			"full_name":       ibOrg + "/" + ibRepo,
+			"forge_remote_id": "",
+		},
+		"pipeline": map[string]interface{}{
+			"event":  "push",
+			"branch": branch,
+			"number": 42,
+			"commit": "deadbeefcafebabe",
+		},
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return b
+}
+
+func containsEvent(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// checkAgreementWithBroker asserts ib env's (name, value) set for branch
+// matches the broker's own signed-request response (CLIENT-SPEC §0) — T1:
+// the broker's response includes every swept secret regardless of its own
+// ironbark_events pin (SPEC §2.1: pins are echoed in the response's
+// "events" field for Woodpecker itself to filter client-side, not
+// filtered server-side), so the push filter ib's own resolve() applies
+// internally must be applied to the broker side too before comparing.
+func checkAgreementWithBroker(t *testing.T, ctx context.Context, addr string, fx Fixture, branch string, ibSecrets map[string]string) {
+	t.Helper()
+
+	priv, pub := loadE2EKeys(t)
+	stack := newE2EStack(t, ctx, addr, fx, pub)
+
+	body := ibWoodpeckerPayload(t, branch)
+	req := signedRequest(t, stack.server.URL, body, priv)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("signed request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("broker response status = %d, want 200", resp.StatusCode)
+	}
+
+	var rb e2eResponseBody
+	if err := json.NewDecoder(resp.Body).Decode(&rb); err != nil {
+		t.Fatalf("decode broker response: %v", err)
+	}
+
+	brokerSecrets := make(map[string]string, len(rb.Secrets))
+	for _, s := range rb.Secrets {
+		if s.Name == "vault_addr" || s.Name == "vault_token" {
+			continue
+		}
+		// T1: apply the same push filter ib's resolve() applies
+		// internally — the broker itself returns every swept secret
+		// regardless of its own event pin.
+		if len(s.Events) > 0 && !containsEvent(s.Events, "push") {
+			continue
+		}
+		brokerSecrets[s.Name] = s.Value
+	}
+	brokerNames := make([]string, 0, len(brokerSecrets))
+	for n := range brokerSecrets {
+		brokerNames = append(brokerNames, n)
+	}
+	sort.Strings(brokerNames)
+
+	if !equalStrings(ibEnvNames(ibSecrets), brokerNames) {
+		t.Fatalf("secret name sets diverge:\n  ib:     %v\n  broker: %v", ibEnvNames(ibSecrets), brokerNames)
+	}
+
+	// Every deterministic (non-dbref_*) secret must match byte-for-byte —
+	// CLIENT-SPEC §0's "one resolution algorithm, two callers" premise.
+	// dbref_* values are excluded: the database engine mints a fresh
+	// dynamic credential on every independent read, so ib's own sweep and
+	// the broker's own sweep legitimately get DIFFERENT values for the
+	// SAME $ref entry on each call — the one place value equality does
+	// not apply, by the nature of a lease-bearing deref, not a weakening
+	// of this test.
+	for name, want := range ibSecrets {
+		if strings.HasPrefix(name, "dbref_") {
+			continue
+		}
+		if got := brokerSecrets[name]; got != want {
+			t.Errorf("secret %q: ib=%q broker=%q, want equal", name, want, got)
+		}
+	}
+}
+
 func TestIBClient(t *testing.T) {
 	for _, p := range products {
 		p := p
@@ -155,7 +260,7 @@ func TestIBClient(t *testing.T) {
 			fullToken := mintIBToken(t, ctx, root, []string{ibPolicyBase, ibPolicyMain, ibPolicyDevelop})
 			noBranchToken := mintIBToken(t, ctx, root, []string{ibPolicyBase})
 
-			var mainSecrets map[string]string
+			var mainSecrets, developSecrets map[string]string
 
 			// ---- on main: base + event + main-branch tiers, both $refs ----
 			t.Run("main_branch", func(t *testing.T) {
@@ -167,7 +272,7 @@ func TestIBClient(t *testing.T) {
 				mainSecrets = parseIBEnv(t, stdout)
 
 				dbrefNames, otherNames := splitDbref(ibEnvNames(mainSecrets))
-				wantFixed := []string{"kvref", "prod_only", "shared", "shared_push"}
+				wantFixed := []string{"kvref", "prod_only", "push_and_cron", "shared", "shared_push"}
 				if !equalStrings(otherNames, wantFixed) {
 					t.Errorf("ib env (main) non-dbref names = %v, want %v", otherNames, wantFixed)
 				}
@@ -186,6 +291,15 @@ func TestIBClient(t *testing.T) {
 				if mainSecrets["kvref"] != "kv-target-value" {
 					t.Errorf("kvref = %q, want %q (KV v2-shaped $ref deref)", mainSecrets["kvref"], "kv-target-value")
 				}
+				// T1: a secret pinned to "push,cron" must still be returned
+				// (push is in its pin list); one pinned to "cron" only must
+				// never appear (CLIENT-SPEC §4).
+				if mainSecrets["push_and_cron"] != "push-and-cron-value" {
+					t.Errorf("push_and_cron = %q, want %q", mainSecrets["push_and_cron"], "push-and-cron-value")
+				}
+				if _, ok := mainSecrets["cron_only"]; ok {
+					t.Errorf("cron_only present despite being pinned away from push: %v", ibEnvNames(mainSecrets))
+				}
 				if !strings.Contains(stderr, "ib: env main (direct match)") {
 					t.Errorf("stderr = %q, want the direct-match visibility line", stderr)
 				}
@@ -199,9 +313,10 @@ func TestIBClient(t *testing.T) {
 					t.Fatalf("ib env exit %d, stderr: %s", code, stderr)
 				}
 				secrets := parseIBEnv(t, stdout)
+				developSecrets = secrets
 
 				dbrefNames, otherNames := splitDbref(ibEnvNames(secrets))
-				wantFixed := []string{"dev_only", "kvref", "shared", "shared_push"}
+				wantFixed := []string{"dev_only", "kvref", "push_and_cron", "shared", "shared_push"}
 				if !equalStrings(otherNames, wantFixed) {
 					t.Errorf("ib env (feature/develop) non-dbref names = %v, want %v", otherNames, wantFixed)
 				}
@@ -238,70 +353,43 @@ func TestIBClient(t *testing.T) {
 				}
 			})
 
+			// ---- T3: --branch overriding to a DIFFERENT branch than the
+			// one checked out, naming a visible tier of that other branch
+			// (CLIENT-SPEC §3 rule 1) ----
+			t.Run("branch_override_to_different_visible_branch", func(t *testing.T) {
+				env := ibEnviron(p.addr, fullToken)
+				stdout, stderr, code := runIB(t, git.mainClone, env, "env", "--branch", "develop")
+				if code != 0 {
+					t.Fatalf("ib env --branch develop (from a main checkout) exit %d, stderr: %s", code, stderr)
+				}
+				secrets := parseIBEnv(t, stdout)
+				if secrets["dev_only"] != "dev-only-value" {
+					t.Errorf("dev_only = %q, want %q (override should read develop's own branch tier)", secrets["dev_only"], "dev-only-value")
+				}
+				if _, ok := secrets["prod_only"]; ok {
+					t.Errorf("prod_only present after --branch develop from a main checkout: %v", ibEnvNames(secrets))
+				}
+				if !strings.Contains(stderr, "ib: env develop (override)") {
+					t.Errorf("stderr = %q, want the override visibility line naming develop", stderr)
+				}
+			})
+
 			// ---- agreement: ib env and the broker's own signed-request
 			// response must produce the same secrets for the same layout
-			// and branch (CLIENT-SPEC §0) ----
+			// and branch (CLIENT-SPEC §0), repeated on main and on the
+			// develop-cut branch (T1) ----
 			t.Run("agreement_with_broker", func(t *testing.T) {
 				if mainSecrets == nil {
 					t.Fatal("main_branch subtest must run first and populate its secrets")
 				}
+				checkAgreementWithBroker(t, ctx, p.addr, fx, "main", mainSecrets)
+			})
 
-				priv, pub := loadE2EKeys(t)
-				stack := newE2EStack(t, ctx, p.addr, fx, pub)
-
-				// No .identity entry exists for acme/widgets: absent, so
-				// the broker does not enforce it (SPEC §4.4) — any
-				// forge_remote_id, including empty, is accepted.
-				body := woodpeckerPayload(t, ibOrg+"/"+ibRepo, "")
-				req := signedRequest(t, stack.server.URL, body, priv)
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					t.Fatalf("signed request: %v", err)
+			t.Run("agreement_with_broker_develop", func(t *testing.T) {
+				if developSecrets == nil {
+					t.Fatal("branch_cut_from_develop subtest must run first and populate its secrets")
 				}
-				defer resp.Body.Close()
-				if resp.StatusCode != http.StatusOK {
-					t.Fatalf("broker response status = %d, want 200", resp.StatusCode)
-				}
-
-				var rb e2eResponseBody
-				if err := json.NewDecoder(resp.Body).Decode(&rb); err != nil {
-					t.Fatalf("decode broker response: %v", err)
-				}
-
-				brokerSecrets := make(map[string]string, len(rb.Secrets))
-				for _, s := range rb.Secrets {
-					if s.Name == "vault_addr" || s.Name == "vault_token" {
-						continue
-					}
-					brokerSecrets[s.Name] = s.Value
-				}
-				brokerNames := make([]string, 0, len(brokerSecrets))
-				for n := range brokerSecrets {
-					brokerNames = append(brokerNames, n)
-				}
-				sort.Strings(brokerNames)
-
-				if !equalStrings(ibEnvNames(mainSecrets), brokerNames) {
-					t.Fatalf("secret name sets diverge:\n  ib:     %v\n  broker: %v", ibEnvNames(mainSecrets), brokerNames)
-				}
-
-				// Every deterministic (non-dbref_*) secret must match
-				// byte-for-byte — CLIENT-SPEC §0's "one resolution
-				// algorithm, two callers" premise. dbref_* values are
-				// excluded: the database engine mints a fresh dynamic
-				// credential on every independent read, so ib's own sweep
-				// and the broker's own sweep legitimately get DIFFERENT
-				// values for the SAME $ref entry on each call — the one
-				// place value equality does not apply, by the nature of a
-				// lease-bearing deref, not a weakening of this test.
-				for name, want := range mainSecrets {
-					if strings.HasPrefix(name, "dbref_") {
-						continue
-					}
-					if got := brokerSecrets[name]; got != want {
-						t.Errorf("secret %q: ib=%q broker=%q, want equal", name, want, got)
-					}
-				}
+				checkAgreementWithBroker(t, ctx, p.addr, fx, "develop", developSecrets)
 			})
 
 			// ---- ib run revokes a lease-bearing secret's lease after the

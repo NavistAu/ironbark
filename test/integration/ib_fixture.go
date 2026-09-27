@@ -95,6 +95,8 @@ func setupIBFixture(t *testing.T, ctx context.Context, root *api.Client) {
 		{"kv/data/" + base + "/kvref", []string{"read"}},
 		{"kv/data/" + ibKVRefTargetPath, []string{"read"}},
 		{"kv/data/" + base + "/dbref", []string{"read"}},
+		{"kv/data/" + base + "/cron_only", []string{"read"}},
+		{"kv/data/" + base + "/push_and_cron", []string{"read"}},
 		{DerefRefPath, []string{"read"}},
 		// CLIENT-SPEC §1.4: ib run revokes a lease it used via the
 		// caller's own token, which needs update on sys/leases/revoke.
@@ -123,6 +125,25 @@ func setupIBFixture(t *testing.T, ctx context.Context, root *api.Client) {
 	put(ibKVRefTargetPath, map[string]interface{}{"value": "kv-target-value"})
 	put(base+"/kvref", map[string]interface{}{"$ref": "kv/data/" + ibKVRefTargetPath})
 	put(base+"/dbref", map[string]interface{}{"$ref": DerefRefPath})
+
+	// T1: a secret pinned away from push (cron only) must never be
+	// returned by ib (CLIENT-SPEC §4: ironbark_events applied with event
+	// "push"), and one pinned to include push (alongside another event)
+	// must still be returned — exercised by the agreement_with_broker
+	// subtest (ib_test.go), which also proves the broker's own response
+	// agrees once the same push filter is applied there.
+	put(base+"/cron_only", map[string]interface{}{"value": "cron-only-value"})
+	if err := kv.PutMetadata(ctx, base+"/cron_only", api.KVMetadataPutInput{
+		CustomMetadata: map[string]interface{}{"ironbark_events": "cron"},
+	}); err != nil {
+		t.Fatalf("integration: kv metadata cron_only: %v", err)
+	}
+	put(base+"/push_and_cron", map[string]interface{}{"value": "push-and-cron-value"})
+	if err := kv.PutMetadata(ctx, base+"/push_and_cron", api.KVMetadataPutInput{
+		CustomMetadata: map[string]interface{}{"ironbark_events": "push,cron"},
+	}); err != nil {
+		t.Fatalf("integration: kv metadata push_and_cron: %v", err)
+	}
 }
 
 // mintIBToken creates a plain Vault token directly as root with exactly

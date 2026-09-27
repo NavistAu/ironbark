@@ -415,7 +415,10 @@ func TestSweep_PartialResultOnError_LeaseIDsSurviveFailure(t *testing.T) {
 }
 
 // TestSweep_Deref_403SkipsEntry proves a deref 403 skips the entry
-// without error and without setting LeasesCreated.
+// without error and without setting LeasesCreated, but records the
+// entry's own name in SkippedDerefs (CLIENT-SPEC §4) so a caller with
+// list/read on the map entry but not its $ref target can be told why the
+// secret it expected is missing.
 func TestSweep_Deref_403SkipsEntry(t *testing.T) {
 	fv := newFakeKV()
 	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
@@ -433,6 +436,47 @@ func TestSweep_Deref_403SkipsEntry(t *testing.T) {
 	}
 	if res.LeasesCreated {
 		t.Errorf("LeasesCreated = true, want false")
+	}
+	if len(res.SkippedDerefs) != 1 || res.SkippedDerefs[0] != "ptr" {
+		t.Errorf("SkippedDerefs = %v, want [ptr]", res.SkippedDerefs)
+	}
+}
+
+// TestSweep_Deref_404SkipsEntryRecordsSkippedDeref mirrors the 403 case
+// for a 404 on the $ref target.
+func TestSweep_Deref_404SkipsEntryRecordsSkippedDeref(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"ptr"}))
+	fv.set(dataEntryPath(sweepBase, "ptr"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/creds/deploy"}, nil))
+	fv.set("/v1/aws/creds/deploy", http.StatusNotFound, `{"errors":[]}`)
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.SkippedDerefs) != 1 || res.SkippedDerefs[0] != "ptr" {
+		t.Errorf("SkippedDerefs = %v, want [ptr]", res.SkippedDerefs)
+	}
+}
+
+// TestSweep_Deref_SuccessLeavesSkippedDerefsEmpty proves a successful
+// deref never appears in SkippedDerefs.
+func TestSweep_Deref_SuccessLeavesSkippedDerefsEmpty(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusNotFound, `{"errors":[]}`)
+	fv.set(metaPath(sweepBase), http.StatusOK, listBody([]string{"ptr"}))
+	fv.set(dataEntryPath(sweepBase, "ptr"), http.StatusOK, entryBody(map[string]interface{}{"$ref": "aws/creds/deploy"}, nil))
+	fv.set("/v1/aws/creds/deploy", http.StatusOK, derefBody(map[string]interface{}{"user": "u"}, ""))
+
+	c := newSweepClient(t, fv)
+	res, err := c.Sweep(context.Background(), "minted-token", sweepTestIdentity(), false)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.SkippedDerefs) != 0 {
+		t.Errorf("SkippedDerefs = %v, want none (deref succeeded)", res.SkippedDerefs)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/navistau/ironbark/internal/gitenv"
 	"github.com/navistau/ironbark/internal/identity"
@@ -56,10 +57,12 @@ type resolveOpts struct {
 
 // resolve runs the CLIENT-SPEC §2–4 pipeline: checkout -> identity ->
 // branch-tier discovery -> environment selection -> sweep. It writes every
-// CLIENT-SPEC §3 visibility/staleness line to opts.Stderr as it goes. On a
-// sweep failure it revokes any leases the partial sweep created
-// (CLIENT-SPEC §4) before returning the error. Images (CLIENT-SPEC §4,
-// ironbark_images) are never applied — ib has no step image locally.
+// CLIENT-SPEC §3 visibility/staleness line to opts.Stderr as it goes, plus
+// (CLIENT-SPEC §4) one line naming any pointer entries the sweep skipped
+// because their $ref target 403/404'd. On a sweep failure it revokes any
+// leases the partial sweep created (CLIENT-SPEC §4) before returning the
+// error. Images (CLIENT-SPEC §4, ironbark_images) are never applied — ib
+// has no step image locally.
 func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecret, []string, error) {
 	info, err := gitenv.Checkout(opts.Runner)
 	if err != nil {
@@ -120,6 +123,10 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 			}
 		}
 		return nil, nil, fmt.Errorf("%w: sweep: %v", errVault, err)
+	}
+
+	if len(sweep.SkippedDerefs) > 0 {
+		fmt.Fprintf(opts.Stderr, "ib: skipped %d entries: no read on their targets (%s)\n", len(sweep.SkippedDerefs), strings.Join(sweep.SkippedDerefs, ", "))
 	}
 
 	secrets := make(map[string]vaultx.SweptSecret, len(sweep.Secrets))

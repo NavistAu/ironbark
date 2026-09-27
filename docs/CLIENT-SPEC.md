@@ -201,7 +201,12 @@ caller's token, via the **same code** the broker uses (§8) — except the
 - Entry forms, naming, string-only values, most-specific-wins collisions:
   SPEC §4.2.
 - Pointers dereferenced one level with the caller's token: SPEC §4.3,
-  including KV v2-shaped targets.
+  including KV v2-shaped targets. A pointer entry the caller can list/read
+  but whose `$ref` target 403/404s is still skipped silently in the sweep
+  result (SPEC §4.3's partial-visibility rule, unchanged) — but named
+  afterwards on stderr: `ib: skipped N entries: no read on their targets
+  (name1, name2, …)`, so a shorter-than-expected `ib env` has a hint
+  instead of a silent gap.
 - Per-secret pins (SPEC §4.6): `ironbark_events` is applied with event
   `push` (a secret pinned away from `push` is not returned).
   `ironbark_images` is ignored — there is no step image locally; this is

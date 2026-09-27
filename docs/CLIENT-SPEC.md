@@ -252,7 +252,7 @@ until needed.
   the full sweep to whoever holds a token scoped to that tier. Operators
   relying on `.identity` for that protection should treat `ib` access as
   bypassing it — the caller's Vault policy remains the only bound, the
-  same model as the `ironbark_images` divergence (§1.3).
+  same model as the `ironbark_images` divergence (§4).
 - Likewise, a malformed `.config` entry (§4.5) makes the broker fail
   closed for every CI run against that repo (502, no secrets, until
   fixed); `ib` never reads `.config`, so it is unaffected and keeps
@@ -302,8 +302,9 @@ until needed.
 ## 9. Delivery
 
 Dogfood from source (`go install ./cmd/ib`) before any release. Adding a
-published `ib` artifact changes the release-artifact set (DEC-260723134043
-lists exactly two) and needs its own decision record at that point.
+published `ib` artifact changes the release-artifact set (DEC-260723140246,
+the current accepted decision, lists exactly two) and needs its own
+decision record at that point.
 
 ## 10. Roadmap (not M3)
 

@@ -36,13 +36,20 @@ func Ref(value string) (name string, ok bool) {
 	return rest, true
 }
 
+// Key returns the `SECRET_<UPPER(name)>` env-var name Format's lines use,
+// and `ib run`'s no-`--env-file` injection mode (CLIENT-SPEC §1.4) uses
+// for the same secret, so both stay byte-for-byte the same naming.
+func Key(name string) string {
+	return "SECRET_" + strings.ToUpper(name)
+}
+
 // Format renders one env-file line for secret name/value (CLIENT-SPEC
 // §1.3): `SECRET_<UPPER(name)>='<value>'`, single-quoted, with every
 // embedded `'` escaped as `'\''` and a literal newline kept as is inside
 // the quotes. The result is newline-terminated and is valid Parse input.
 func Format(name, value string) string {
 	escaped := strings.ReplaceAll(value, "'", `'\''`)
-	return fmt.Sprintf("SECRET_%s='%s'\n", strings.ToUpper(name), escaped)
+	return fmt.Sprintf("%s='%s'\n", Key(name), escaped)
 }
 
 func isKeyStart(c byte) bool {

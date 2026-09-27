@@ -135,27 +135,41 @@ func childExitCode(waitErr error) int {
 }
 
 // cmdRun implements `ib run` (CLIENT-SPEC §1.4): builds the child's
-// environment from environ plus each env file in opts.EnvFiles (in
-// order, later wins), resolving any exact `ironbark://<name>` value via a
-// single resolve() call — performed, and buildOpts (which loads Vault
-// configuration — CLIENT-SPEC §5, M2) called, only if at least one such
-// reference exists. An unresolved reference exits 3 before the child
-// starts. Masking (default on) pipes the child's stdout/stderr through a
-// mask.Writer for every resolved reference's value; --no-masking passes
-// stdio straight through. Signals in the forwarded set are relayed to the
-// child. Every lease the sweep created — referenced by this run or not
-// (I1) — is revoked as soon as the sweep succeeds (deferred immediately,
-// so an unresolved reference or a cmd.Start failure below still revokes —
-// I2), best-effort: failures go to stderr without changing the exit code.
-// The return value is the process exit code: the child's own (or
-// 128+signal), or a CLIENT-SPEC §7 code for a resolve failure encountered
-// before the child ever started.
+// environment from environ plus either (a), with no --env-file at all,
+// every swept secret injected as `SECRET_<NAME>` (envfile.Key — the same
+// upper-cased naming `ib env` uses), overwriting any caller env var of the
+// same name, or (b), with one or more --env-file, each file in
+// opts.EnvFiles in order (later wins), where a value of the exact form
+// `ironbark://<name>` is replaced by that secret from the sweep and any
+// other value passes through unchanged. The sweep (and buildOpts, which
+// loads Vault configuration — CLIENT-SPEC §5, M2) runs when no --env-file
+// was given at all, or when at least one given file holds a reference;
+// an --env-file whose entries are all literal never sweeps, unchanged
+// from before mode (a) existed. An unresolved reference in mode (b) exits
+// 3 before the child starts. Masking (default on) pipes the child's
+// stdout/stderr through a mask.Writer for every injected/resolved value —
+// every swept secret in mode (a), every reference resolved in mode (b);
+// --no-masking passes stdio straight through. Signals in the forwarded
+// set are relayed to the child. Every lease the sweep created —
+// referenced by this run or not (I1) — is revoked as soon as the sweep
+// succeeds (deferred immediately, so an unresolved reference or a
+// cmd.Start failure below still revokes — I2), best-effort: failures go
+// to stderr without changing the exit code. The return value is the
+// process exit code: the child's own (or 128+signal), or a CLIENT-SPEC
+// §7 code for a resolve failure encountered before the child ever
+// started.
 func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, buildOpts func() (resolveOpts, error), environ []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	overrides, err := loadEnvFiles(opts.EnvFiles)
 	if err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return 1
 	}
+
+	// noEnvFiles is CLIENT-SPEC §1.4 mode (a): no --env-file at all means
+	// there is no file to check for a reference, so the sweep always
+	// runs — unlike mode (b) below, which only sweeps when a given file
+	// actually holds one.
+	noEnvFiles := len(opts.EnvFiles) == 0
 
 	hasRef := false
 	for _, o := range overrides {
@@ -166,7 +180,7 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, buildOpts func(
 	}
 
 	var secrets map[string]vaultx.SweptSecret
-	if hasRef {
+	if noEnvFiles || hasRef {
 		ropts, berr := buildOpts()
 		if berr != nil {
 			fmt.Fprintln(stderr, "ib:", berr)
@@ -194,6 +208,14 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, buildOpts func(
 
 	envMap := environMap(environ)
 	var usedValues []string
+
+	if noEnvFiles {
+		for name, s := range secrets {
+			envMap[envfile.Key(name)] = s.Value
+			usedValues = append(usedValues, s.Value)
+		}
+	}
+
 	for _, o := range overrides {
 		val := o.value
 		if name, ok := envfile.Ref(o.value); ok {

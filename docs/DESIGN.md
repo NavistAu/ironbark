@@ -406,8 +406,13 @@ Tracked branches are the `push/<branch>/` tiers the caller can LIST.
 3. Tie → the branch's reflog: if its creation entry (`branch: Created from
    <B>`) names one of the tied branches, use it. Local and editable — fine for
    an environment choice, never for access.
-4. Tie still → the cascade: an ordered branch list (config, later; until then
-   just the default branch, `origin/HEAD`); the first tied branch in it wins.
+4. Tie still → the cascade: an ordered branch list; the first tied branch in
+   it wins. Built-in list, least to most production-like, so a wrong guess
+   lands on a lower environment: `dev`, `develop`, `development`, `test`,
+   `testing`, `qa`, `uat`, `stage`, `staging`, `preprod`, `trunk`, `main`,
+   `master`, `prod`, `production`, `live`. Exact names only, no patterns.
+   `release*` is deliberately absent — release branches are temporary
+   curation branches, not environments.
 5. Otherwise fail, listing the tied branches and asking for `--branch`.
    Never guess.
 
@@ -416,8 +421,8 @@ overrides the choice. The choice is always printed to stderr. Before the walk,
 `git ls-remote origin` is compared with each `origin/B`; a difference warns
 (stale refs) but does not stop the run.
 
-Later: the cascade becomes configurable (e.g. `develop` before `stage` before
-`main`) — the last tie-break before failing.
+Later: the cascade becomes configurable, replacing the built-in list — still
+the last tie-break before failing.
 
 Later, when needed: an in-repo config file (remote disambiguation, naming);
 nested map entries — the sweep descends subdirectories and joins the path into

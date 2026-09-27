@@ -297,6 +297,52 @@ func (c *Client) Base(id identity.Identity) string {
 	return c.cfg.KVPrefix + "/" + id.Org + "/" + id.Repo
 }
 
+// ListBranchTiers LISTs <mount>/metadata/<Base(id)>/<id.Event>,
+// authenticated as token, and returns the directory keys it finds
+// (trailing "/" stripped) — still SPEC §2.2-escaped, never unescaped —
+// sorted, excluding dot-prefixed entries (CLIENT-SPEC §3: these are the
+// branch tiers a caller's token can see under the event tier, used to
+// pick which branch's secrets ib reads). Plain (non-directory) keys at
+// this level are ignored; they are ordinary event-tier secrets, not
+// branch directories. A 403/404 on the LIST yields (nil, nil) — SPEC
+// §4.1's partial-visibility rule applies here too, since "no branch tiers
+// visible" is itself a normal, expected outcome (CLIENT-SPEC §3's "no
+// branch tiers at all" path). Any other status is a plain error.
+func (c *Client) ListBranchTiers(ctx context.Context, token string, id identity.Identity) ([]string, error) {
+	path := c.cfg.KVMount + "/metadata/" + c.Base(id) + "/" + id.Event
+	resp, found, err := c.vaultGet(ctx, token, path, true)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	defer resp.Body.Close()
+
+	var parsed struct {
+		Data struct {
+			Keys []string `json:"keys"`
+		} `json:"data"`
+	}
+	if err := resp.DecodeJSON(&parsed); err != nil {
+		return nil, fmt.Errorf("vaultx: list branch tiers: LIST %s: decode response: %w", path, err)
+	}
+
+	var dirs []string
+	for _, k := range parsed.Data.Keys {
+		if !strings.HasSuffix(k, "/") {
+			continue
+		}
+		dir := strings.TrimSuffix(k, "/")
+		if strings.HasPrefix(dir, ".") {
+			continue
+		}
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
 // Sweep performs the SPEC §4.1–§4.3, §4.6 sweep: it LISTs each applicable
 // KV v2 prefix independently, most specific first (branch, then event,
 // then base — branchful is true only when the caller's event is

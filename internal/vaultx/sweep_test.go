@@ -804,6 +804,73 @@ func TestSweep_BranchfulTrueEmptyBranchExcludesBranchTier(t *testing.T) {
 	}
 }
 
+// --- ListBranchTiers (CLIENT-SPEC §3) ---
+
+// TestListBranchTiers_MixedPlainAndDirKeys proves ListBranchTiers returns
+// only directory keys (trailing "/" stripped), sorted, excluding
+// dot-prefixed entries and plain (non-directory) keys.
+func TestListBranchTiers_MixedPlainAndDirKeys(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusOK, listBody([]string{"main/", "develop/", "shared", ".hidden/"}))
+
+	c := newSweepClient(t, fv)
+	got, err := c.ListBranchTiers(context.Background(), "minted-token", sweepTestIdentity())
+	if err != nil {
+		t.Fatalf("ListBranchTiers: %v", err)
+	}
+	want := []string{"develop", "main"}
+	if len(got) != len(want) {
+		t.Fatalf("ListBranchTiers = %v, want %v", got, want)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("ListBranchTiers[%d] = %q, want %q", i, got[i], name)
+		}
+	}
+}
+
+// TestListBranchTiers_403ReturnsNilNil proves SPEC §4.1's partial-
+// visibility rule applies here too: a 403 on the LIST yields (nil, nil),
+// not an error.
+func TestListBranchTiers_403ReturnsNilNil(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusForbidden, `{"errors":["denied"]}`)
+
+	c := newSweepClient(t, fv)
+	got, err := c.ListBranchTiers(context.Background(), "minted-token", sweepTestIdentity())
+	if got != nil || err != nil {
+		t.Errorf("ListBranchTiers = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestListBranchTiers_404ReturnsNilNil mirrors the 403 case for 404 (no
+// branch tiers at all, CLIENT-SPEC §3's "no branch tiers" path).
+func TestListBranchTiers_404ReturnsNilNil(t *testing.T) {
+	fv := newFakeKV() // path left unregistered -> 404
+
+	c := newSweepClient(t, fv)
+	got, err := c.ListBranchTiers(context.Background(), "minted-token", sweepTestIdentity())
+	if got != nil || err != nil {
+		t.Errorf("ListBranchTiers = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestListBranchTiers_500ReturnsError proves any other status is a plain
+// error (SPEC §4.1's "any other status" rule).
+func TestListBranchTiers_500ReturnsError(t *testing.T) {
+	fv := newFakeKV()
+	fv.set(metaPath(sweepEvent), http.StatusInternalServerError, `{"errors":["boom"]}`)
+
+	c := newSweepClient(t, fv)
+	got, err := c.ListBranchTiers(context.Background(), "minted-token", sweepTestIdentity())
+	if got != nil {
+		t.Errorf("ListBranchTiers = %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatalf("ListBranchTiers: expected error, got nil")
+	}
+}
+
 // --- ReadIdentity (SPEC §4.4) ---
 
 func TestReadIdentity_Valid(t *testing.T) {

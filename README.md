@@ -264,25 +264,19 @@ Policy names follow `ci/<org>/<repo>/<event>[/<branch>]`. A plan tier
 (read-only, e.g. for `pull_request`):
 
 ```hcl
-# ci/acme/widgets/pull_request
-path "kv/data/ci/acme/widgets/*" {
-  capabilities = ["read"]
-}
-path "kv/metadata/ci/acme/widgets/*" {
-  capabilities = ["list"]
-}
+# ci/acme/widgets/pull_request   (repo-wide base tier + pull_request event tier)
+path "kv/data/ci/acme/widgets/+"                 { capabilities = ["read"] }
+path "kv/metadata/ci/acme/widgets/"              { capabilities = ["list"] }
+path "kv/data/ci/acme/widgets/pull_request/+"    { capabilities = ["read"] }
+path "kv/metadata/ci/acme/widgets/pull_request/" { capabilities = ["list"] }
 ```
 
 A deploy tier (e.g. for `push` on `main`):
 
 ```hcl
-# ci/acme/widgets/push/main
-path "kv/data/ci/acme/widgets/push/main/*" {
-  capabilities = ["read"]
-}
-path "kv/metadata/ci/acme/widgets/push/main/*" {
-  capabilities = ["list"]
-}
+# ci/acme/widgets/push/main      (branch tier only)
+path "kv/data/ci/acme/widgets/push/main/+"       { capabilities = ["read"] }
+path "kv/metadata/ci/acme/widgets/push/main/"    { capabilities = ["list"] }
 ```
 
 **Use exact paths under the tier, not a single trailing `*` at the repo
@@ -291,6 +285,9 @@ root shared across tiers.** In Vault's ACL glob, `*` crosses `/`
 attached only to the *branch*-tier policy would also match the *event*-tier
 and base-tier paths, leaking secrets meant for a broader (less trusted)
 scope into a narrower one. Scope each policy's paths to its own tier prefix.
+`+` matches exactly one path segment while `*` crosses `/`, so a tier
+policy uses `+` for the key segment and grants `list` on the tier's exact
+metadata path.
 
 ### ironbark's own AppRole
 

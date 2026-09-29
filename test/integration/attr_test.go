@@ -216,6 +216,43 @@ func TestAttributes(t *testing.T) {
 				}
 			})
 
+			for _, c := range []struct {
+				name   string
+				delay  time.Duration
+				status int
+			}{
+				{"team_timeout_fails_closed", 2 * time.Second, 0},
+				{"team_500_fails_closed", 0, http.StatusInternalServerError},
+			} {
+				t.Run(c.name, func(t *testing.T) {
+					ff.set(c.delay, c.status)
+					defer ff.set(0, 0)
+					brk := broker.New(vc, "ci", "", broker.WithTeamResolver(forge.NewGitea(ff.URL, "forge-token", 200*time.Millisecond, nil)))
+					start := time.Now()
+					res := brk.Handle(ctx, attrIdentity("a", "alice"))
+					if d := time.Since(start); d >= 1500*time.Millisecond {
+						t.Errorf("Handle took %v, want < 1.5s", d)
+					}
+					if res.Status != 200 {
+						t.Fatalf("Status = %d, want 200", res.Status)
+					}
+					if res.Audit.TeamsError == "" {
+						t.Error("Audit.TeamsError empty")
+					}
+					got := secretMap(res)
+					for _, k := range []string{"k_tt_a_ops", "k_team"} {
+						if _, ok := got[k]; ok {
+							t.Errorf("%s granted after a failed team lookup", k)
+						}
+					}
+					for _, k := range []string{"k_target_a", "k_actor"} {
+						if _, ok := got[k]; !ok {
+							t.Errorf("%s missing from %v", k, sortedKeys(got))
+						}
+					}
+				})
+			}
+
 			t.Run("e2e_manual_payload", func(t *testing.T) {
 				stack := newE2EStackWith(t, ctx, p.addr, fx, pub, AttrMount, identity.Options{TargetVar: "DEPLOY_TO"})
 				body, err := json.Marshal(map[string]interface{}{

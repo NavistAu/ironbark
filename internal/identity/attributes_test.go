@@ -1,9 +1,23 @@
 package identity
 
-// Payload fixtures in testdata/payloads/ are constructed from source
-// (Woodpecker v3.18.0 server/model/pipeline.go JSON tags, generic values);
-// plan Task 23 replaces the rows verified on real pipelines with redacted
-// captures.
+// Payload fixtures in testdata/payloads/:
+//
+// Captured on Woodpecker v3.18.0 with a Forgejo forge (plan Task 23):
+// gitea-push, gitea-manual, gitea-promotion (a promotion of that manual
+// run, carrying its variables) and gitea-approved (a push held for
+// approval). Each is the Woodpecker API's JSON of the same model.Repo and
+// model.Pipeline the extension request serialises, taken right after the
+// run, with identifying strings redacted to generic values. Every field the
+// attributes read (sender, author, deploy_to, deploy_task, variable names,
+// reviewed_by) matched ironbark's debug "payload attributes" line logged at
+// call time. Two differences from the call-time body: the post-run
+// "workflows" list is dropped, and gitea-approved's reviewed_by/reviewed
+// hold their call-time values (empty/0; Woodpecker sets them only after the
+// extension call).
+//
+// Still constructed from source (server/model/pipeline.go JSON tags):
+// gitea-tag, gitea-pull-request, gitea-manual-no-target, github-deployment,
+// gitlab-release, gitlab-push, cron, unknown-event.
 
 import (
 	"os"
@@ -55,6 +69,13 @@ func TestParseAttributes(t *testing.T) {
 			a := attrs{CodeAuthor: "bob"}
 			if f != "none" {
 				a.Actor = "bob"
+			}
+			return a
+		}},
+		{"gitea-approved", func(f string) attrs {
+			a := attrs{CodeAuthor: "alice"}
+			if f != "none" {
+				a.Actor = "alice"
 			}
 			return a
 		}},
@@ -119,13 +140,15 @@ func TestParsePayloadFacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
+	// A promotion carries its parent's sender, author and variables: the
+	// parent here is a manual run, so sender is empty.
 	want := PayloadFacts{
-		Sender:        "alice",
-		Author:        "alice",
+		Sender:        "",
+		Author:        "carol",
 		DeployTo:      "prod",
 		DeployTask:    "migrate",
 		ReviewedBy:    "",
-		VariableNames: []string{"BUILD_MODE", "DEPLOY_TO"},
+		VariableNames: []string{"DEPLOY_TO", "OTHER"},
 	}
 	if !reflect.DeepEqual(id.Payload, want) {
 		t.Errorf("Payload = %+v, want %+v", id.Payload, want)

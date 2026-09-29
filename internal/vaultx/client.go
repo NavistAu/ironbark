@@ -30,6 +30,10 @@ type Config struct {
 	TokenRole string
 	KVMount   string
 	KVPrefix  string
+	// AttrMount is the ironbark-owned KV v2 mount holding pipeline
+	// attribute data (design 2026-09-30-pipeline-attributes §4). Only
+	// SweepWithAttributes reads it; ib never sets it.
+	AttrMount string
 	// TLS configures the underlying api.Client's TLS settings (CA cert,
 	// client cert/key, SNI server name, insecure skip-verify) via
 	// api.Config.ConfigureTLS, applied in New before api.NewClient builds

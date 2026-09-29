@@ -379,20 +379,38 @@ func (c *Client) ListBranchTiers(ctx context.Context, token string, id identity.
 // A LIST/GET/deref 403/404 skips that level/entry (SPEC §4.1 partial
 // visibility). Any other failure aborts the whole sweep and returns a
 // plain (non-ErrMalformedDirective) error — the broker maps this to
-// revoke+502.
+// revoke+502. Sweep never reads the attribute mount.
 func (c *Client) Sweep(ctx context.Context, token string, id identity.Identity, branchful bool) (SweepResult, error) {
-	base := c.Base(id)
+	return c.SweepWithAttributes(ctx, token, id, branchful, nil)
+}
 
-	var tiers []string
-	if branchful && id.Branch != "" {
-		tiers = append(tiers, base+"/"+id.Event+"/"+identity.Esc(id.Branch))
+// SweepWithAttributes is Sweep preceded by the pipeline-attribute
+// prefixes: each of attrPaths (relative to AttrMount, already in sweep
+// order, policy.AttrKVPath) is swept first, in the given order, with the
+// same rules as a tier; then today's tiers in KVMount. One accumulator
+// spans both mounts, so first-writer-wins makes the earliest prefix win.
+// Non-empty attrPaths with no AttrMount configured is a wiring error.
+func (c *Client) SweepWithAttributes(ctx context.Context, token string, id identity.Identity, branchful bool, attrPaths []string) (SweepResult, error) {
+	if len(attrPaths) > 0 && c.cfg.AttrMount == "" {
+		return SweepResult{}, errors.New("vaultx: sweep: attribute paths given but no attribute mount configured")
 	}
-	tiers = append(tiers, base+"/"+id.Event, base)
+
+	type prefix struct{ mount, path string }
+	var prefixes []prefix
+	for _, p := range attrPaths {
+		prefixes = append(prefixes, prefix{c.cfg.AttrMount, p})
+	}
+
+	base := c.Base(id)
+	if branchful && id.Branch != "" {
+		prefixes = append(prefixes, prefix{c.cfg.KVMount, base + "/" + id.Event + "/" + identity.Esc(id.Branch)})
+	}
+	prefixes = append(prefixes, prefix{c.cfg.KVMount, base + "/" + id.Event}, prefix{c.cfg.KVMount, base})
 
 	sw := &sweepAccumulator{seen: make(map[string]bool)}
 	var sweepErr error
-	for _, tierPath := range tiers {
-		if err := c.sweepTier(ctx, token, tierPath, sw); err != nil {
+	for _, p := range prefixes {
+		if err := c.sweepTier(ctx, token, p.mount, p.path, sw); err != nil {
 			sweepErr = err
 			break
 		}
@@ -414,15 +432,15 @@ func (c *Client) Sweep(ctx context.Context, token string, id identity.Identity, 
 // lexicographic order (SPEC §4.2's "lexicographic within a level", the
 // half of first-writer-wins determinism this file owns — most-specific-
 // first across tiers is Sweep's tiers slice order).
-func (c *Client) sweepTier(ctx context.Context, token, tierPath string, sw *sweepAccumulator) error {
-	keys, err := c.listTierKeys(ctx, token, tierPath)
+func (c *Client) sweepTier(ctx context.Context, token, mount, tierPath string, sw *sweepAccumulator) error {
+	keys, err := c.listTierKeys(ctx, token, mount, tierPath)
 	if err != nil {
 		return err
 	}
 	sort.Strings(keys)
 
 	for _, key := range keys {
-		if err := c.sweepEntry(ctx, token, tierPath, key, sw); err != nil {
+		if err := c.sweepEntry(ctx, token, mount, tierPath, key, sw); err != nil {
 			return err
 		}
 	}
@@ -434,8 +452,8 @@ func (c *Client) sweepTier(ctx context.Context, token, tierPath string, sw *swee
 // never descended — deeper nesting is not swept, a documented v1
 // constraint) and dot-prefixed entries (never secrets at any level, SPEC
 // §4.1) are filtered out here, before the caller ever sees them.
-func (c *Client) listTierKeys(ctx context.Context, token, tierPath string) ([]string, error) {
-	path := c.cfg.KVMount + "/metadata/" + tierPath
+func (c *Client) listTierKeys(ctx context.Context, token, mount, tierPath string) ([]string, error) {
+	path := mount + "/metadata/" + tierPath
 	resp, found, err := c.vaultGet(ctx, token, path, true)
 	if err != nil {
 		return nil, err
@@ -468,8 +486,8 @@ func (c *Client) listTierKeys(ctx context.Context, token, tierPath string) ([]st
 // and dispatches it through the SPEC §4.2 pointer/shorthand/general
 // classification, adding whatever secrets it yields to sw. A 403/404 on
 // the entry's own GET skips it entirely (no secrets, no error).
-func (c *Client) sweepEntry(ctx context.Context, token, tierPath, key string, sw *sweepAccumulator) error {
-	dataPath := c.cfg.KVMount + "/data/" + tierPath + "/" + key
+func (c *Client) sweepEntry(ctx context.Context, token, mount, tierPath, key string, sw *sweepAccumulator) error {
+	dataPath := mount + "/data/" + tierPath + "/" + key
 	resp, found, err := c.vaultGet(ctx, token, dataPath, false)
 	if err != nil {
 		return err

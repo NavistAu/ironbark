@@ -113,6 +113,30 @@ would collapse a branch literally named `Main` onto the protected
 `main`'s tier — a privilege escalation. Case is preserved injectively
 through `esc()` instead.
 
+**Pipeline attributes** (design
+[`plans/2026-09-30-pipeline-attributes-design.md`](plans/2026-09-30-pipeline-attributes-design.md),
+"the attributes design"; `D1`–`D8` below cite the decisions recorded in
+[`plans/2026-09-30-pipeline-attributes-plan.md`](plans/2026-09-30-pipeline-attributes-plan.md)).
+Three more fields, filled per event; the push
+family is `push`, `tag`, `pull_request`, `pull_request_closed`, `release`:
+
+| Event | `actor` | `target` from | `code_author` |
+|---|---|---|---|
+| push family | `pipeline.sender` iff `IRONBARK_ACTOR_FORGE` ≠ `none`, else empty | — | `pipeline.sender` |
+| `manual` | `pipeline.author` | `pipeline.variables[IRONBARK_TARGET_VAR]` (exact key; none when the var is empty) | empty |
+| `deployment` | empty | `pipeline.deploy_to` | empty |
+| `cron`, unknown events | empty | — | empty |
+
+`actor` and `code_author` are verbatim (never case-folded); `author` is
+never used outside `manual`. A deployment has no actor: a Woodpecker
+promotion carries the parent pipeline's `sender`, a GitHub deployment
+webhook its creator's, and the payload cannot tell which. `code_author` is
+recorded for audit only and is never a policy input. `target` grammar:
+split on `/`; every segment non-empty (no leading, trailing or doubled
+`/`); at most 8 segments and 256 bytes; case, `.` and `..` kept (§2.2
+makes every value a safe segment). A value violating the grammar is no
+target, and the audit line records `target_invalid`.
+
 Known events (Woodpecker v3.15.0): `push`, `pull_request`,
 `pull_request_closed`, `tag`, `release`, `deployment`, `cron`, `manual`.
 Event values outside this set are accepted (forward compatibility): they
@@ -151,6 +175,68 @@ only. `tag` has no branch [WP§6]; P1 only.
 requested explicitly on every mint (never an empty list) [R§7.6];
 nonexistent ones warn and grant nothing [R§7.1].
 
+**Attribute policies.** With `E = P1`, ironbark additionally requests, for
+each prefix `T` of the target (`a/b/c` → `a`, `a/b`, `a/b/c`), the actor
+and each resolved team (§2.5):
+
+| Shape (`<rel>`) | Segments | Requested when |
+|---|---|---|
+| `.target-actor/<esc(T)>/<esc(actor)>` | 3 | target and actor |
+| `.target-team/<esc(T)>/<esc(team)>` | 3 | target and a team |
+| `.target/<esc(T)>` | 2 | target |
+| `.actor/<esc(actor)>` | 2 | actor |
+| `.team/<esc(team)>` | 2 | a team |
+
+Each name is `E/<rel>`. `esc` is applied to the **whole** prefix string, so
+`a/b` becomes the single segment `a%2fb`. The dot-prefixed segments
+`.target`, `.actor`, `.team`, `.target-actor`, `.target-team` are reserved:
+`esc` output is never dot-prefixed (§2.2), so no escaped branch, target,
+actor or team can equal one (a target `.target` escapes to `%2etarget`).
+Every shape has a fixed segment count, so no attribute name is a
+path-prefix of another attribute name or of P2. Teams are escaped, empty
+names and duplicates dropped, and ordered by `esc(team)` byte order.
+
+Request order (D1): P1, P2 (if any), then the attribute names in sweep
+order (§4.1). `IRONBARK_MAX_POLICIES` (default 64, ≥ 3) bounds the whole
+list. When exceeded, attribute names are dropped until it fits, in this
+order: target-team conjunctions, then target-actor conjunctions, then team
+policies, then target prefixes; within a class deepest target first, and
+among equal depth reverse `esc(team)` byte order (D2). P1, P2 and the
+actor policy are never dropped. Dropped names are audited (§8.1).
+
+**Attribute policies are grant-only as a security boundary.** Every
+attribute can be absent (target omitted or invalid, actor empty, team
+lookup failed, name dropped by the cap), so a `deny` placed in an
+attribute policy is lifted by exactly the pipelines it was meant to stop.
+Narrowing is done by placing a secret *only* under the attribute or
+conjunction prefix that should reach it. Target and actor are
+caller-influenced (anyone who can trigger a manual run or promote names
+any target), so a target-only policy scopes a secret away from other
+pipelines of the event but does not restrict *who* gets it; a secret that
+must be limited to people uses a conjunction.
+
+### 2.5 Teams
+
+When `actor` is non-empty and `IRONBARK_FORGE_PROVIDER` is not `none`,
+ironbark resolves the actor's teams for the repo on the forge (Gitea
+family: `GET /api/v1/repos/{org}/{repo}/teams`, then
+`GET /api/v1/teams/{id}/members/{login}` per team; 200 member, 404 not a
+member). The whole lookup is bounded by `IRONBARK_FORGE_TIMEOUT`; there is
+no caching. Any failure — timeout, transport error, a repo-teams status
+other than 200 (including 404 for a user-owned repo, D6), a membership
+status other than 200/404 — **fails closed**: no team policies, the
+request continues with its other policies, and the audit line records
+`teams_error`. A team lookup never fails a request. The lookup runs after
+the canary gate (§3.5), so a failed canary never calls the forge (D7).
+
+Trust: Vault stays the sole authority over *what* a team grants; the forge
+becomes the authority over *who* is in a team. Anyone who can edit forge
+team membership (forge admins, org owners, a leaked
+`IRONBARK_FORGE_TOKEN` with write scope) can widen a pipeline's grant
+through team policies. The token needs read scope only. Actor logins and
+team membership must come from the same forge: ironbark assumes a
+single-forge Woodpecker server.
+
 ### 2.4 KV layout
 
 Mount `KV_MOUNT` (default `kv`, KV v2), prefix `KV_PREFIX` (default
@@ -166,6 +252,30 @@ B/.config                    # reserved: repo directives (§4.5)
 
 Entries whose name begins with `.` are directives, never returned as
 secrets, and only recognized at the base level.
+
+**Attribute data** lives in its own ironbark-owned KV v2 mount,
+`IRONBARK_ATTR_MOUNT` (default `ironbark`), never under `KV_MOUNT`. ACL
+paths begin with the mount, so no policy written on `KV_MOUNT` — whatever
+glob it uses — can match attribute data. The two mounts must neither be
+equal nor nest (§7). Each attribute policy `E/<rel>` has exactly one KV
+prefix, `<org>/<repo>/<event>/<rel>`, holding plain keys:
+
+```
+<org>/<repo>/<event>/.target/<esc(T)>/<key>
+<org>/<repo>/<event>/.actor/<esc(actor)>/<key>
+<org>/<repo>/<event>/.team/<esc(team)>/<key>
+<org>/<repo>/<event>/.target-actor/<esc(T)>/<esc(actor)>/<key>
+<org>/<repo>/<event>/.target-team/<esc(T)>/<esc(team)>/<key>
+```
+
+The documented attribute policy grants `read` on
+`<ATTR_MOUNT>/data/<org>/<repo>/<event>/<rel>/+` and `list` on
+`<ATTR_MOUNT>/metadata/<org>/<repo>/<event>/<rel>/` (`+` is one segment,
+`*` crosses `/`). Because no attribute prefix is a path-prefix of another,
+even a trailing-`*` form reaches no other attribute prefix; it additionally
+reaches only unswept keys nested below `<rel>/`. The attribute mount has
+no directives. Writers using raw HTTP must send the `%` of an escaped
+segment as `%25`.
 
 ## 3. Minting
 
@@ -305,6 +415,23 @@ skipping that level/entry — partial visibility IS the tiering mechanism
 (DESIGN §5). Any other status: revoke + `502` (§1.2 step 8). Plain keys
 are read via `GET <mount>/data/...`.
 
+**Attribute prefixes come first.** Before the three tiers above, each
+requested-and-kept attribute prefix is LISTed in `ATTR_MOUNT`
+(`LIST <ATTR_MOUNT>/metadata/<org>/<repo>/<event>/<rel>`), with the same
+rules (plain keys, no descent, dot-keys skipped, 403/404 skipped —
+including a missing attribute mount — any other status revoke + `502`), in
+this order:
+
+1. For each target prefix `T`, deepest first: `.target-actor/<esc(T)>/<esc(actor)>`,
+   then `.target-team/<esc(T)>/<esc(team)>` per team.
+2. `.target/<esc(T)>`, deepest first.
+3. `.actor/<esc(actor)>`.
+4. `.team/<esc(team)>` per team.
+
+Names dropped by `IRONBARK_MAX_POLICIES` are not swept (D3): the minted
+token cannot read them. One first-writer-wins set spans both mounts, so an
+attribute secret beats a same-named tier secret (§4.2).
+
 ### 4.2 Entry forms and secret naming
 
 For a KV entry named `E` with data map `D`:
@@ -338,7 +465,11 @@ response): revoke + `502` — per §3.4 a failed request always revokes, and
 the service-token cascade cleans up any leases earlier derefs created
 (C3). Leases only survive when the response is a `200`. Pointers are
 followed exactly one level — a deref result is never re-examined for
-`$ref` (no chains, no cycles).
+`$ref` (no chains, no cycles). A pointer found in any tier or attribute
+prefix is dereferenced with the minted token, so it reaches attribute
+data only if that pipeline's token already holds the attribute policy — a
+pointer in an ordinary tier cannot lift attribute-gated data into a
+pipeline without it.
 
 **KV v2-shaped deref targets.** A `$ref` may point at a target whose
 response is itself KV v2 wire-shaped — KV v2 read directly, or a
@@ -477,6 +608,19 @@ ESO/k8s mounts):
 | `IRONBARK_FRESHNESS_WINDOW` | `10s` | §5 |
 | `IRONBARK_ADVERTISE_VAULT_ADDR` | unset | §6 |
 | `IRONBARK_LOG_LEVEL` | `info` | |
+| `IRONBARK_ATTR_MOUNT` | `ironbark` | KV v2 mount holding attribute data (§2.4); leading/trailing `/` trimmed; equal to, containing or contained in `IRONBARK_KV_MOUNT` is a startup error |
+| `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | manual-run variable naming the target (§2.1) |
+| `IRONBARK_MAX_POLICIES` | `64` | integer ≥ 3 (§2.3) |
+| `IRONBARK_ACTOR_FORGE` | `none` | `none` \| `gitea` \| `github` \| `bitbucket` (Bitbucket Cloud): the forge whose push-family `sender` is a login (§2.1); GitLab and Bitbucket Data Center are not declarable. With `IRONBARK_FORGE_PROVIDER=gitea` only `gitea` or `none` |
+| `IRONBARK_FORGE_PROVIDER` | `none` | `none` \| `gitea` (Gitea, Forgejo): team resolution (§2.5) |
+| `IRONBARK_FORGE_URL` | — | required when provider ≠ `none`; absolute `http(s)` URL |
+| `IRONBARK_FORGE_TOKEN` / `_FILE` | — | required when provider ≠ `none`; read scope on org teams |
+| `IRONBARK_FORGE_TIMEOUT` | `3s` | Go duration > 0; bounds a whole team lookup |
+
+Any other value for an enumerated var is a startup error. None of the
+attribute vars is required: a repo with no attribute policies behaves as
+before, and until the attribute mount exists its LISTs return 403/404 and
+are skipped.
 
 No config file, no rule tables, no path maps (DEC-260711061323). TLS termination
 is the deployment's concern (in-cluster service mesh / ingress); ironbark
@@ -494,8 +638,16 @@ never appear in the refused-signature line):
   outcome=refused_signature` — nothing derived from the payload.
 - **Verified request**: `ts, org, repo, event, branch, pipeline_number,
   policies_requested, policy_warnings (names), secrets_returned (names
-  only), token_accessor, token_ttl,
+  only), token_accessor, token_ttl, actor, target, target_invalid,
+  code_author, teams, teams_error, policies_dropped,
+  policies_requested_count, policy_warnings_count (D5),
   outcome (ok|unonboarded|identity_mismatch|error)`.
+
+At debug level only (off by default), a second line `payload attributes`
+follows a successful parse (D8): `event, sender, author, deploy_to,
+deploy_task, variable_names, reviewed_by, actor, target, target_invalid,
+code_author`. It carries manual-run variable *names* only, never their
+values.
 
 NEVER log: secret values, the token itself, netrc. The token *accessor*
 is safe and correlates with Vault's own audit log (DESIGN §13 audit
@@ -535,6 +687,18 @@ Built with `httpsign` acting as Woodpecker [WP§8]:
   beats base), non-string value skip (all entry forms + deref).
 - Payload parsing: netrc present-and-ignored; missing fields → 400;
   unknown event → P1-only processing.
+- Pipeline attributes: extraction per event × `IRONBARK_ACTOR_FORGE` from
+  payload fixtures (`TestParseAttributes`); target grammar
+  (`TestParseTarget`); reserved segments never equal `esc` output
+  (`TestAttrSegmentsNeverEscOutput`, `FuzzEscNeverAttrSegment`); config
+  validation incl. the actor-forge/provider rule and mount overlap
+  (`TestLoadAttributeVars`, `TestLoadForgeVars`); attribute names, order,
+  hostile-value escaping and no prefix nesting (`TestAttributes_*`); the
+  cap's drop order (`TestCap`); team resolution incl. fail-closed errors
+  and timeout (`TestGiteaTeams_*`); attribute sweep order, cross-mount
+  first-writer-wins and wire encoding (`TestSweepWithAttributes_*`);
+  broker request list, lookup gating and audit (`TestHandleAttr_*`); audit
+  and debug lines (`TestAttr_*`).
 
 ### 9.3 Integration (containerized Vault AND OpenBao, both must pass)
 
@@ -581,6 +745,18 @@ per §3.1, AppRole for ironbark.
   none, but the test documents actual behavior on both products) [R§7.4].
 - LIST behavior parity on both products (List-op precedence divergence,
   R§7.3): the sweep's 403-tolerant LISTs behave identically.
+- Pipeline attributes (`TestAttributes`): dot-prefixed and `%2f` policy
+  names accepted verbatim; a target-only policy grants any manual run
+  naming the target while a conjunction does not; teams via a fake forge;
+  team lookup timeout/500 fail closed; overflow drops only attribute
+  names; a signed manual payload end to end.
+- Attribute isolation (`TestAttributeIsolation`, `TestAttrMountStartup`):
+  ordinary tier policies — the README examples verbatim, repo-root,
+  `ci/*`, `kv/*` and `+` variants — get 403 on every attribute LIST/GET
+  and the sweep returns no attribute secret; one attribute policy, `+` and
+  trailing-`*` forms, reads exactly its own prefix; the README tiers
+  (`TestReadmeTierPolicies`) are isolated per tier; overlapping mounts fail
+  startup; a missing attribute mount leaves the sweep as before.
 (An earlier draft said ironbark "does not preflight the role" — superseded
 by the §3.5 canary, which preflights it via a mint, not a role read.)
 
@@ -599,13 +775,16 @@ to read KV directly → values match. Run in CI for both products.
 - Packages:
   - `cmd/ironbark` — main, config loading, wiring.
   - `internal/wpsign` — §5. `Verify(r *http.Request, key ed25519.PublicKey, window time.Duration) (err error)` + failure-reason typed errors.
-  - `internal/identity` — §2.1–2.2. `Parse(body []byte) (Identity, error)`, `Esc(string) string`. (`Identity` also carries `Commit`/`PipelineNumber` for the §3.2 mint metadata and §8.1 audit line.)
-  - `internal/policy` — §2.3. `Derive(Identity, Prefix) []string`.
+  - `internal/identity` — §2.1–2.2. `Parse(body []byte, opts Options) (Identity, error)`, `ParseTarget`, `Esc(string) string`. (`Identity` also carries `Commit`/`PipelineNumber` for the §3.2 mint metadata and §8.1 audit line.)
+  - `internal/policy` — §2.3. `Derive(Identity, Prefix) []string`;
+    `Attributes`, `Cap`, `AttrKVPath` for attribute names.
   - `internal/broker` — orchestrates §1.2 steps 5–10; owns interfaces:
     `Minter`, `Sweeper`, `Dereferencer` (implemented in `internal/vaultx`).
   - `internal/vaultx` — Vault API client wrapper: AppRole session (§1.3),
     `Mint`, `Sweep`, `Deref`, `RevokeSelf`.
   - `internal/httpapi` — routes (§1.1), handler, metrics.
+  - `internal/forge` — §2.5. `TeamResolver` interface and the Gitea-family
+    implementation.
 - The fork-reference: `woodpecker-ci/example-extensions` (Apache-2.0) is
   reference material for the transport half; ironbark's verification is
   written against `httpsign` directly with the §9.1 matrix.

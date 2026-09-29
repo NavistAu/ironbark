@@ -189,7 +189,7 @@ func TestCap(t *testing.T) {
 	}
 	for _, c := range cases {
 		kept, dropped := Cap(base, attrs, c.max)
-		if !reflect.DeepEqual(rels(dropped), cat(c.wantDropped)) && !(len(dropped) == 0 && len(c.wantDropped) == 0) {
+		if len(dropped)+len(c.wantDropped) > 0 && !reflect.DeepEqual(rels(dropped), c.wantDropped) {
 			t.Errorf("max=%d dropped = %v, want %v", c.max, rels(dropped), c.wantDropped)
 		}
 		if len(base)+len(kept) > c.max {

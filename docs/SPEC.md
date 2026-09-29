@@ -237,6 +237,18 @@ through team policies. The token needs read scope only. Actor logins and
 team membership must come from the same forge: ironbark assumes a
 single-forge Woodpecker server.
 
+**Token owner matters, not just scope.** Gitea-family forges answer the
+membership endpoint only for a site admin, an owner of the team's org, or a
+member of that team; for anyone else they return 404 — the same status as
+"not a member". A token owned by an ordinary user therefore makes every
+lookup silently report *no teams*: team policies never match, and nothing
+errors. The token must belong to a site admin or to an owner of every org
+whose teams ironbark should see. Its scopes can still be read-only
+(`read:organization`, plus `read:repository` for the repo-teams endpoint),
+but on a site-admin account those scopes read every org and every
+repository — size that exposure deliberately. Verify after setup with a
+known team member's manual run (the audit line lists the resolved teams).
+
 ### 2.4 KV layout
 
 Mount `KV_MOUNT` (default `kv`, KV v2), prefix `KV_PREFIX` (default

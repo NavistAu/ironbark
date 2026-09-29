@@ -332,6 +332,11 @@ path "ironbark/metadata/acme/widgets/manual/.target/api/" { capabilities = ["lis
   `.target-team`).
 - Team membership is owned by the forge: whoever can edit a team there can
   widen what team policies grant. The forge token needs read scope only.
+- The forge token must belong to a site admin or an org owner: Gitea-family
+  forges hide team membership from anyone else (404, indistinguishable from
+  "not a member"), so an ordinary user's token silently resolves no teams.
+  Read-only scopes on an admin account still read every org and repo
+  (SPEC §2.5).
 - Writing attribute keys over raw HTTP: encode the `%` of an escaped
   segment as `%25` in the KV path (the `vault`/`bao` CLIs and API clients
   do this for you).

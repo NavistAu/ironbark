@@ -20,6 +20,7 @@ import (
 	"github.com/navistau/ironbark/internal/broker"
 	"github.com/navistau/ironbark/internal/config"
 	"github.com/navistau/ironbark/internal/httpapi"
+	"github.com/navistau/ironbark/internal/identity"
 	"github.com/navistau/ironbark/internal/vaultx"
 )
 
@@ -63,7 +64,7 @@ func main() {
 
 	brk := broker.New(vc, cfg.PolicyPrefix, cfg.AdvertiseVaultAddr)
 
-	srv := httpapi.New(brk, vc.Healthy, cfg.WoodpeckerPublicKey, cfg.FreshnessWindow, requestTimeout, time.Now, logger)
+	srv := httpapi.New(brk, vc.Healthy, cfg.WoodpeckerPublicKey, cfg.FreshnessWindow, requestTimeout, time.Now, logger, identity.Options{})
 
 	// The metrics/vaultx-Client construction cycle (httpapi's registry
 	// wants the broker, which wants the Client; the Client wants the

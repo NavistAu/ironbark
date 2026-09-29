@@ -167,7 +167,7 @@ func newTestServer(t *testing.T, h Handler, ready Ready, pub ed25519.PublicKey, 
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
-	s := New(h, ready, pub, testWindow, timeout, time.Now, logger)
+	s := New(h, ready, pub, testWindow, timeout, time.Now, logger, identity.Options{})
 	return s, buf
 }
 

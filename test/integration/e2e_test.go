@@ -38,6 +38,7 @@ import (
 
 	"github.com/navistau/ironbark/internal/broker"
 	"github.com/navistau/ironbark/internal/httpapi"
+	"github.com/navistau/ironbark/internal/identity"
 	"github.com/navistau/ironbark/internal/vaultx"
 	"github.com/navistau/ironbark/internal/wpsign/wpsigntest"
 )
@@ -132,7 +133,7 @@ func newE2EStack(t *testing.T, ctx context.Context, addr string, fx Fixture, pub
 	brk := broker.New(vc, "ci", addr)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httpapi.New(brk, vc.Healthy, pub, e2eFreshnessWindow, e2eRequestTimeout, time.Now, logger)
+	srv := httpapi.New(brk, vc.Healthy, pub, e2eFreshnessWindow, e2eRequestTimeout, time.Now, logger, identity.Options{})
 	vc.SetMetrics(srv.VaultMetrics())
 
 	ts := httptest.NewServer(srv)

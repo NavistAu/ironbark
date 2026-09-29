@@ -53,14 +53,16 @@ type Server struct {
 	timeout         time.Duration
 	now             func() time.Time
 	logger          *slog.Logger
+	parseOpts       identity.Options
 	metrics         *metrics
 	mux             *http.ServeMux
 }
 
 // New builds a Server. timeout is the SPEC §1.2 hard request timeout
 // (production: 30s); now is the clock wpsign.Verify checks freshness
-// against (production: time.Now), both injectable for tests.
-func New(handler Handler, ready Ready, pubKey ed25519.PublicKey, freshnessWindow, timeout time.Duration, now func() time.Time, logger *slog.Logger) *Server {
+// against (production: time.Now), both injectable for tests. parseOpts
+// configures pipeline-attribute extraction (identity.Parse).
+func New(handler Handler, ready Ready, pubKey ed25519.PublicKey, freshnessWindow, timeout time.Duration, now func() time.Time, logger *slog.Logger, parseOpts identity.Options) *Server {
 	s := &Server{
 		handler:         handler,
 		ready:           ready,
@@ -69,6 +71,7 @@ func New(handler Handler, ready Ready, pubKey ed25519.PublicKey, freshnessWindow
 		timeout:         timeout,
 		now:             now,
 		logger:          logger,
+		parseOpts:       parseOpts,
 		metrics:         newMetrics(),
 	}
 
@@ -138,13 +141,14 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
 	// valid signature is a client bug, not an attack — logged minimally,
 	// not the full verified-audit shape (there is no identity to attach
 	// it to).
-	id, err := identity.Parse(body, identity.Options{})
+	id, err := identity.Parse(body, s.parseOpts)
 	if err != nil {
 		s.metrics.requestsTotal.WithLabelValues("error").Inc()
 		s.logger.Info("identity parse failed", "remote_addr", r.RemoteAddr, "outcome", "error")
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	s.logPayloadAttributes(r.Context(), id)
 
 	// SPEC §1.2 hard request timeout: wraps the broker call so a stuck
 	// broker cannot hold the connection past `timeout`, regardless of
@@ -155,6 +159,30 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
 
 	s.renderResult(w, result)
 	s.auditVerified(id, result)
+}
+
+// logPayloadAttributes emits the debug-level "payload attributes" line
+// (D8): the raw payload fields behind the pipeline attributes, for
+// verifying the payload facts on real pipelines. Variable names only,
+// never variable values.
+func (s *Server) logPayloadAttributes(ctx context.Context, id identity.Identity) {
+	if !s.logger.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	p := id.Payload
+	s.logger.Debug("payload attributes",
+		"event", id.Event,
+		"sender", p.Sender,
+		"author", p.Author,
+		"deploy_to", p.DeployTo,
+		"deploy_task", p.DeployTask,
+		"variable_names", p.VariableNames,
+		"reviewed_by", p.ReviewedBy,
+		"actor", id.Actor,
+		"target", id.Target,
+		"target_invalid", id.TargetInvalid,
+		"code_author", id.CodeAuthor,
+	)
 }
 
 // callHandler runs handler.Handle in a goroutine and races it against
@@ -221,6 +249,15 @@ func (s *Server) auditVerified(id identity.Identity, result broker.Result) {
 		"secrets_returned", result.Audit.SecretNames,
 		"token_accessor", result.Audit.TokenAccessor,
 		"token_ttl", result.Audit.TokenTTL,
+		"actor", id.Actor,
+		"target", id.Target,
+		"target_invalid", id.TargetInvalid,
+		"code_author", id.CodeAuthor,
+		"teams", result.Audit.Teams,
+		"teams_error", result.Audit.TeamsError,
+		"policies_dropped", result.Audit.PoliciesDropped,
+		"policies_requested_count", len(result.Audit.PoliciesRequested),
+		"policy_warnings_count", len(result.Audit.PolicyWarnings),
 		"outcome", string(result.Outcome),
 	)
 

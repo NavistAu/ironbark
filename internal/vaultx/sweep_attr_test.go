@@ -68,7 +68,7 @@ func TestSweepWithAttributes_OrderAndPrecedence(t *testing.T) {
 		t.Errorf("dup = %q, want from-ab (first given attribute prefix wins)", got)
 	}
 	iAB, iA, iBranch := fv.indexOf(attrMetaPath(attrAB)), fv.indexOf(attrMetaPath(attrA)), fv.indexOf(metaPath(sweepBranch))
-	if !(iAB >= 0 && iAB < iA && iA < iBranch) {
+	if iAB < 0 || iAB >= iA || iA >= iBranch {
 		t.Errorf("LIST order indexes ab=%d a=%d branch=%d, want ab < a < branch", iAB, iA, iBranch)
 	}
 	for _, tier := range []string{sweepEvent, sweepBase} {

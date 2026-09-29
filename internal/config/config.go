@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,6 +34,11 @@ type Config struct {
 	VaultSecretID string
 
 	FreshnessWindow time.Duration
+
+	// Pipeline attributes (docs/plans/2026-09-30-pipeline-attributes-design.md).
+	AttrMount   string // KV v2 mount holding attribute data; never inside KVMount
+	TargetVar   string // manual-run variable naming the target
+	MaxPolicies int    // cap on requested policy names (P1, P2, actor never dropped)
 }
 
 // Load builds a Config from the environment (via getenv) and, for any
@@ -82,7 +88,34 @@ func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Co
 		return Config{}, fmt.Errorf("IRONBARK_FRESHNESS_WINDOW: %w", err)
 	}
 
+	cfg.AttrMount, err = attrMount(getenv, cfg.KVMount)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TargetVar = withDefault(getenv, "IRONBARK_TARGET_VAR", "DEPLOY_TO")
+	maxPolicies := withDefault(getenv, "IRONBARK_MAX_POLICIES", "64")
+	cfg.MaxPolicies, err = strconv.Atoi(maxPolicies)
+	if err != nil || cfg.MaxPolicies < 3 {
+		return Config{}, fmt.Errorf("IRONBARK_MAX_POLICIES: %q is not an integer >= 3", maxPolicies)
+	}
+
 	return cfg, nil
+}
+
+// attrMount resolves IRONBARK_ATTR_MOUNT, trimmed of leading and trailing
+// "/". Attribute data is isolated from tier policies only because ACL paths
+// begin with the mount, so the attribute mount must neither equal nor nest
+// with the KV mount (design §4).
+func attrMount(getenv func(string) string, kvMount string) (string, error) {
+	a := strings.Trim(withDefault(getenv, "IRONBARK_ATTR_MOUNT", "ironbark"), "/")
+	if a == "" {
+		return "", fmt.Errorf("IRONBARK_ATTR_MOUNT: empty mount path")
+	}
+	k := strings.Trim(kvMount, "/")
+	if a == k || strings.HasPrefix(a, k+"/") || strings.HasPrefix(k, a+"/") {
+		return "", fmt.Errorf("IRONBARK_ATTR_MOUNT %q must not equal, contain or be contained in IRONBARK_KV_MOUNT %q", a, k)
+	}
+	return a, nil
 }
 
 // withDefault returns getenv(name) if set, else def.

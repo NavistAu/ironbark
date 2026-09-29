@@ -343,3 +343,81 @@ func TestLoad(t *testing.T) {
 		}
 	})
 }
+
+// loadCase is one table row for the pipeline-attribute config vars: env
+// overrides on top of baseEnv, and either an error naming wantErrVar or a
+// check on the loaded Config.
+type loadCase struct {
+	name       string
+	env        map[string]string
+	files      map[string][]byte
+	wantErrVar string // non-empty → Load must fail naming this var
+	check      func(t *testing.T, cfg Config)
+}
+
+func runLoadCases(t *testing.T, cases []loadCase) {
+	t.Helper()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env, _ := baseEnv(t)
+			for k, v := range c.env {
+				env[k] = v
+			}
+			cfg, err := Load(fakeGetenv(env), fakeReadFile(c.files))
+			if c.wantErrVar != "" {
+				if err == nil {
+					t.Fatalf("Load: expected error naming %s, got nil", c.wantErrVar)
+				}
+				if !strings.Contains(err.Error(), c.wantErrVar) {
+					t.Errorf("Load error = %q, want it to name %s", err.Error(), c.wantErrVar)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if c.check != nil {
+				c.check(t, cfg)
+			}
+		})
+	}
+}
+
+func wantAttrMount(want string) func(t *testing.T, cfg Config) {
+	return func(t *testing.T, cfg Config) {
+		if cfg.AttrMount != want {
+			t.Errorf("AttrMount = %q, want %q", cfg.AttrMount, want)
+		}
+	}
+}
+
+func TestLoadAttributeVars(t *testing.T) {
+	runLoadCases(t, []loadCase{
+		{name: "defaults", check: func(t *testing.T, cfg Config) {
+			if cfg.AttrMount != "ironbark" || cfg.TargetVar != "DEPLOY_TO" || cfg.MaxPolicies != 64 {
+				t.Errorf("AttrMount/TargetVar/MaxPolicies = %q/%q/%d, want ironbark/DEPLOY_TO/64",
+					cfg.AttrMount, cfg.TargetVar, cfg.MaxPolicies)
+			}
+		}},
+		{name: "attr mount equals kv mount", env: map[string]string{"IRONBARK_ATTR_MOUNT": "kv"}, wantErrVar: "IRONBARK_ATTR_MOUNT"},
+		{name: "attr mount inside kv mount", env: map[string]string{"IRONBARK_ATTR_MOUNT": "kv/attrs"}, wantErrVar: "IRONBARK_ATTR_MOUNT"},
+		{name: "kv mount inside attr mount", env: map[string]string{"IRONBARK_KV_MOUNT": "kv/ci", "IRONBARK_ATTR_MOUNT": "kv"}, wantErrVar: "IRONBARK_ATTR_MOUNT"},
+		{name: "attr mount equals kv mount after trim", env: map[string]string{"IRONBARK_ATTR_MOUNT": "/kv/"}, wantErrVar: "IRONBARK_ATTR_MOUNT"},
+		{name: "attr mount only slashes", env: map[string]string{"IRONBARK_ATTR_MOUNT": "/"}, wantErrVar: "IRONBARK_ATTR_MOUNT"},
+		{name: "attr mount sharing a name prefix is fine", env: map[string]string{"IRONBARK_ATTR_MOUNT": "kvx"}, check: wantAttrMount("kvx")},
+		{name: "attr mount trimmed", env: map[string]string{"IRONBARK_ATTR_MOUNT": "/ironbark/"}, check: wantAttrMount("ironbark")},
+		{name: "max policies 3", env: map[string]string{"IRONBARK_MAX_POLICIES": "3"}, check: func(t *testing.T, cfg Config) {
+			if cfg.MaxPolicies != 3 {
+				t.Errorf("MaxPolicies = %d, want 3", cfg.MaxPolicies)
+			}
+		}},
+		{name: "max policies 2", env: map[string]string{"IRONBARK_MAX_POLICIES": "2"}, wantErrVar: "IRONBARK_MAX_POLICIES"},
+		{name: "max policies 0", env: map[string]string{"IRONBARK_MAX_POLICIES": "0"}, wantErrVar: "IRONBARK_MAX_POLICIES"},
+		{name: "max policies not an integer", env: map[string]string{"IRONBARK_MAX_POLICIES": "abc"}, wantErrVar: "IRONBARK_MAX_POLICIES"},
+		{name: "target var", env: map[string]string{"IRONBARK_TARGET_VAR": "TARGET"}, check: func(t *testing.T, cfg Config) {
+			if cfg.TargetVar != "TARGET" {
+				t.Errorf("TargetVar = %q, want TARGET", cfg.TargetVar)
+			}
+		}},
+	})
+}

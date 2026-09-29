@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,12 @@ type Config struct {
 	AttrMount   string // KV v2 mount holding attribute data; never inside KVMount
 	TargetVar   string // manual-run variable naming the target
 	MaxPolicies int    // cap on requested policy names (P1, P2, actor never dropped)
+
+	ActorForge    string // "none" | "gitea" | "github" | "bitbucket": whose push-family sender is a login
+	ForgeProvider string // "none" | "gitea": team resolution
+	ForgeURL      string
+	ForgeToken    string
+	ForgeTimeout  time.Duration
 }
 
 // Load builds a Config from the environment (via getenv) and, for any
@@ -99,6 +106,10 @@ func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Co
 		return Config{}, fmt.Errorf("IRONBARK_MAX_POLICIES: %q is not an integer >= 3", maxPolicies)
 	}
 
+	if err := loadForge(getenv, readFile, &cfg); err != nil {
+		return Config{}, err
+	}
+
 	return cfg, nil
 }
 
@@ -116,6 +127,53 @@ func attrMount(getenv func(string) string, kvMount string) (string, error) {
 		return "", fmt.Errorf("IRONBARK_ATTR_MOUNT %q must not equal, contain or be contained in IRONBARK_KV_MOUNT %q", a, k)
 	}
 	return a, nil
+}
+
+// loadForge resolves the IRONBARK_FORGE_* team provider and
+// IRONBARK_ACTOR_FORGE (design §2, §7).
+func loadForge(getenv func(string) string, readFile func(string) ([]byte, error), cfg *Config) error {
+	cfg.ForgeProvider = withDefault(getenv, "IRONBARK_FORGE_PROVIDER", "none")
+	if cfg.ForgeProvider != "none" && cfg.ForgeProvider != "gitea" {
+		return fmt.Errorf("IRONBARK_FORGE_PROVIDER: %q is not one of none, gitea", cfg.ForgeProvider)
+	}
+
+	timeout := withDefault(getenv, "IRONBARK_FORGE_TIMEOUT", "3s")
+	d, err := time.ParseDuration(timeout)
+	if err != nil || d <= 0 {
+		return fmt.Errorf("IRONBARK_FORGE_TIMEOUT: %q is not a positive duration", timeout)
+	}
+	cfg.ForgeTimeout = d
+
+	// Defaults to none regardless of the team provider: maintainer ruling 1
+	// in docs/plans/2026-09-30-pipeline-attributes-plan.md.
+	cfg.ActorForge = withDefault(getenv, "IRONBARK_ACTOR_FORGE", "none")
+	switch cfg.ActorForge {
+	case "none", "gitea", "github", "bitbucket":
+	default:
+		return fmt.Errorf("IRONBARK_ACTOR_FORGE: %q is not one of none, gitea, github, bitbucket", cfg.ActorForge)
+	}
+
+	if cfg.ForgeProvider == "none" {
+		return nil
+	}
+	// One forge namespace: team membership and actor logins come from the
+	// same forge.
+	if cfg.ActorForge != "gitea" && cfg.ActorForge != "none" {
+		return fmt.Errorf("IRONBARK_ACTOR_FORGE %q cannot be used with IRONBARK_FORGE_PROVIDER %q (only gitea or none)",
+			cfg.ActorForge, cfg.ForgeProvider)
+	}
+
+	cfg.ForgeURL, err = required(getenv, "IRONBARK_FORGE_URL")
+	if err != nil {
+		return err
+	}
+	u, err := url.Parse(cfg.ForgeURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("IRONBARK_FORGE_URL: %q is not an absolute http(s) URL", cfg.ForgeURL)
+	}
+
+	cfg.ForgeToken, err = requiredSecret(getenv, readFile, "IRONBARK_FORGE_TOKEN")
+	return err
 }
 
 // withDefault returns getenv(name) if set, else def.

@@ -421,3 +421,76 @@ func TestLoadAttributeVars(t *testing.T) {
 		}},
 	})
 }
+
+func wantActorForge(want string) func(t *testing.T, cfg Config) {
+	return func(t *testing.T, cfg Config) {
+		if cfg.ActorForge != want {
+			t.Errorf("ActorForge = %q, want %q", cfg.ActorForge, want)
+		}
+	}
+}
+
+func TestLoadForgeVars(t *testing.T) {
+	gitea := map[string]string{
+		"IRONBARK_FORGE_PROVIDER": "gitea",
+		"IRONBARK_FORGE_URL":      "https://forge.example.test",
+		"IRONBARK_FORGE_TOKEN":    "forge-token-value",
+	}
+	with := func(base map[string]string, kv ...string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	without := func(base map[string]string, key string) map[string]string {
+		m := with(base)
+		delete(m, key)
+		return m
+	}
+
+	runLoadCases(t, []loadCase{
+		{name: "defaults", check: func(t *testing.T, cfg Config) {
+			if cfg.ForgeProvider != "none" || cfg.ActorForge != "none" || cfg.ForgeTimeout != 3*time.Second {
+				t.Errorf("ForgeProvider/ActorForge/ForgeTimeout = %q/%q/%v, want none/none/3s",
+					cfg.ForgeProvider, cfg.ActorForge, cfg.ForgeTimeout)
+			}
+			if cfg.ForgeURL != "" || cfg.ForgeToken != "" {
+				t.Errorf("ForgeURL/ForgeToken = %q/%q, want empty", cfg.ForgeURL, cfg.ForgeToken)
+			}
+		}},
+		{name: "gitea stores url and token", env: gitea, check: func(t *testing.T, cfg Config) {
+			if cfg.ForgeProvider != "gitea" || cfg.ForgeURL != "https://forge.example.test" || cfg.ForgeToken != "forge-token-value" {
+				t.Errorf("provider/url/token = %q/%q/%q", cfg.ForgeProvider, cfg.ForgeURL, cfg.ForgeToken)
+			}
+		}},
+		{name: "gitea without url", env: without(gitea, "IRONBARK_FORGE_URL"), wantErrVar: "IRONBARK_FORGE_URL"},
+		{name: "gitea without token", env: without(gitea, "IRONBARK_FORGE_TOKEN"), wantErrVar: "IRONBARK_FORGE_TOKEN"},
+		{name: "gitea token and _FILE both set", env: with(gitea, "IRONBARK_FORGE_TOKEN_FILE", "/t"),
+			files: map[string][]byte{"/t": []byte("x")}, wantErrVar: "IRONBARK_FORGE_TOKEN"},
+		{name: "gitea token _FILE trimmed", env: with(without(gitea, "IRONBARK_FORGE_TOKEN"), "IRONBARK_FORGE_TOKEN_FILE", "/t"),
+			files: map[string][]byte{"/t": []byte("from-file\n")}, check: func(t *testing.T, cfg Config) {
+				if cfg.ForgeToken != "from-file" {
+					t.Errorf("ForgeToken = %q, want from-file", cfg.ForgeToken)
+				}
+			}},
+		// Maintainer ruling 1 (plan 2026-09-30-pipeline-attributes-plan.md):
+		// the actor forge defaults to none even with a gitea team provider.
+		{name: "gitea actor forge unset defaults to none", env: gitea, check: wantActorForge("none")},
+		{name: "gitea actor forge gitea", env: with(gitea, "IRONBARK_ACTOR_FORGE", "gitea"), check: wantActorForge("gitea")},
+		{name: "gitea actor forge github", env: with(gitea, "IRONBARK_ACTOR_FORGE", "github"), wantErrVar: "IRONBARK_FORGE_PROVIDER"},
+		{name: "gitea actor forge bitbucket", env: with(gitea, "IRONBARK_ACTOR_FORGE", "bitbucket"), wantErrVar: "IRONBARK_ACTOR_FORGE"},
+		{name: "none actor forge github", env: map[string]string{"IRONBARK_ACTOR_FORGE": "github"}, check: wantActorForge("github")},
+		{name: "none actor forge bitbucket", env: map[string]string{"IRONBARK_ACTOR_FORGE": "bitbucket"}, check: wantActorForge("bitbucket")},
+		{name: "actor forge gitlab", env: map[string]string{"IRONBARK_ACTOR_FORGE": "gitlab"}, wantErrVar: "IRONBARK_ACTOR_FORGE"},
+		{name: "actor forge values are exact", env: map[string]string{"IRONBARK_ACTOR_FORGE": "GITEA"}, wantErrVar: "IRONBARK_ACTOR_FORGE"},
+		{name: "provider github", env: map[string]string{"IRONBARK_FORGE_PROVIDER": "github"}, wantErrVar: "IRONBARK_FORGE_PROVIDER"},
+		{name: "timeout 0s", env: map[string]string{"IRONBARK_FORGE_TIMEOUT": "0s"}, wantErrVar: "IRONBARK_FORGE_TIMEOUT"},
+		{name: "timeout abc", env: map[string]string{"IRONBARK_FORGE_TIMEOUT": "abc"}, wantErrVar: "IRONBARK_FORGE_TIMEOUT"},
+		{name: "forge url ftp", env: with(gitea, "IRONBARK_FORGE_URL", "ftp://x"), wantErrVar: "IRONBARK_FORGE_URL"},
+		{name: "forge url without scheme", env: with(gitea, "IRONBARK_FORGE_URL", "example.test"), wantErrVar: "IRONBARK_FORGE_URL"},
+	})
+}

@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integration-tested against both Vault and OpenBao. See
   [CLIENT-SPEC.md](docs/CLIENT-SPEC.md). Not published as a release artifact
   yet — install from source (`go install ./cmd/ib`); see DEC-260723140246.
+- Pipeline attributes: policies and secrets scoped by a pipeline's target
+  (`deploy_to`, or the manual-run variable `IRONBARK_TARGET_VAR`), its
+  actor, the actor's forge teams (Gitea/Forgejo), and target×actor /
+  target×team conjunctions (`<P1>/.target/…`, `.actor/…`, `.team/…`,
+  `.target-actor/…`, `.target-team/…`). Attribute data lives in its own
+  KV v2 mount, swept before the existing tiers; attribute policies only
+  grant, and a failed team lookup fails closed. Existing tiers are
+  unchanged. See SPEC §2.1, §2.3–§2.5, §4.1.
+- Config: `IRONBARK_ATTR_MOUNT`, `IRONBARK_TARGET_VAR`,
+  `IRONBARK_MAX_POLICIES`, `IRONBARK_ACTOR_FORGE`,
+  `IRONBARK_FORGE_PROVIDER`, `IRONBARK_FORGE_URL`,
+  `IRONBARK_FORGE_TOKEN`/`_FILE`, `IRONBARK_FORGE_TIMEOUT`. None is
+  required.
+- Audit line: `actor`, `target`, `target_invalid`, `code_author`, `teams`,
+  `teams_error`, `policies_dropped`, `policies_requested_count`,
+  `policy_warnings_count`; at debug level a `payload attributes` line
+  (variable names only, never values).
 
 ### Fixed
 

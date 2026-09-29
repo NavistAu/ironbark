@@ -100,8 +100,9 @@ go install github.com/navistau/ironbark/cmd/ironbark@latest
 
 ## `ib`: the local client
 
-`ib` gives a local run — your shell, an agent, a script — the same secrets
-a CI run on the same repo and branch would get, read from the same KV
+`ib` gives a local run — your shell, an agent, a script — the same
+repo/event/branch-tier secrets a CI run on the same repo and branch would
+get (never attribute secrets, which need a signed pipeline payload), read from the same KV
 layout the broker sweeps. It mints nothing and holds no credential of its
 own: every read is made with your own Vault/OpenBao token, the one `ib
 auth` (or `vault login`/`bao login` directly) already left at
@@ -214,6 +215,14 @@ vault secrets enable -path=kv -version=2 kv
 vault auth enable approle
 ```
 
+Only if you use attribute policies (below): a second KV **v2** mount for
+attribute data, at `IRONBARK_ATTR_MOUNT` (default `ironbark`). Until it
+exists, attribute reads are skipped and nothing else changes.
+
+```
+vault secrets enable -path=ironbark -version=2 kv
+```
+
 ### Token role
 
 Create the role ironbark mints pipeline tokens from (default name `ci`,
@@ -288,6 +297,44 @@ scope into a narrower one. Scope each policy's paths to its own tier prefix.
 `+` matches exactly one path segment while `*` crosses `/`, so a tier
 policy uses `+` for the key segment and grants `list` on the tier's exact
 metadata path.
+
+### Attribute policies (optional: target, actor, team)
+
+Beyond repo/event/branch, ironbark requests policies for the pipeline's
+**target** (a deployment's `deploy_to`, or the manual-run variable
+`IRONBARK_TARGET_VAR`, default `DEPLOY_TO`), its **actor** (who started a
+manual run; on push-family events the webhook sender, only when
+`IRONBARK_ACTOR_FORGE` declares a forge whose sender is a login), the
+actor's forge **teams** (optional, `IRONBARK_FORGE_PROVIDER`), and
+conjunctions of a target with an actor or team. Names hang off the event
+policy, e.g. `ci/acme/widgets/manual/.target/api`,
+`…/.actor/<login>`, `…/.team/<team>`, `…/.target-actor/<target>/<login>`,
+`…/.target-team/<target>/<team>`, with each value escaped as in
+[`docs/SPEC.md` §2.2–§2.4](docs/SPEC.md) (a nested target `api/eu` is the
+one segment `api%2feu`). Create only the ones you want; the rest grant
+nothing. A deploy target `api`:
+
+```hcl
+# ci/acme/widgets/manual/.target/api
+path "ironbark/data/acme/widgets/manual/.target/api/+"  { capabilities = ["read"] }
+path "ironbark/metadata/acme/widgets/manual/.target/api/" { capabilities = ["list"] }
+```
+
+- Attribute data lives in the attribute mount, never under `kv/`, so no
+  tier policy on `kv/` can reach it, whatever glob it uses.
+- Attribute policies only grant. Never rely on them to deny: any
+  attribute can be absent (no target, empty actor, a failed team lookup,
+  or a name dropped by `IRONBARK_MAX_POLICIES`), which lifts the deny for
+  exactly the pipelines it was meant to stop.
+- A target-only policy scopes a secret away from other pipelines of the
+  event, but anyone who can start a manual run or promote can name any
+  target. To restrict *who*, use a conjunction (`.target-actor`,
+  `.target-team`).
+- Team membership is owned by the forge: whoever can edit a team there can
+  widen what team policies grant. The forge token needs read scope only.
+- Writing attribute keys over raw HTTP: encode the `%` of an escaped
+  segment as `%25` in the KV path (the `vault`/`bao` CLIs and API clients
+  do this for you).
 
 ### ironbark's own AppRole
 
@@ -379,7 +426,15 @@ configuration error.
 | `IRONBARK_POLICY_PREFIX` | `ci` | no | |
 | `IRONBARK_FRESHNESS_WINDOW` | `10s` | no | signature `created` freshness window |
 | `IRONBARK_ADVERTISE_VAULT_ADDR` | unset | no | when set, echoed back as a `vault_addr` convenience secret |
-| `IRONBARK_LOG_LEVEL` | `info` | no | |
+| `IRONBARK_LOG_LEVEL` | `info` | no | `debug` adds a per-request `payload attributes` line (variable names, never values) |
+| `IRONBARK_ATTR_MOUNT` | `ironbark` | no | KV v2 mount for attribute data; must not equal, contain or sit inside `IRONBARK_KV_MOUNT` |
+| `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | no | manual-run variable naming the target |
+| `IRONBARK_MAX_POLICIES` | `64` | no | cap on requested policies (≥ 3); attribute names are dropped first, never P1/P2 or the actor |
+| `IRONBARK_ACTOR_FORGE` | `none` | no | `none`, `gitea`, `github` or `bitbucket` (Cloud): the forge whose push-family sender is a login. With `IRONBARK_FORGE_PROVIDER=gitea`, only `gitea` or `none` |
+| `IRONBARK_FORGE_PROVIDER` | `none` | no | `none` or `gitea` (Gitea, Forgejo): resolve the actor's teams |
+| `IRONBARK_FORGE_URL` | — | when provider ≠ `none` | forge base URL (`http`/`https`) |
+| `IRONBARK_FORGE_TOKEN` / `_FILE` | — | when provider ≠ `none` | read scope on org teams |
+| `IRONBARK_FORGE_TIMEOUT` | `3s` | no | bounds a whole team lookup; on failure team policies are skipped, never the request |
 
 No config file, no rule tables, no path maps — onboarding a repo is Vault
 IaC (policies + KV entries), not broker configuration. TLS termination is

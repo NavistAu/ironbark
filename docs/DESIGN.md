@@ -268,6 +268,16 @@ Instead the escape encoding percent-encodes uppercase bytes (`Main` →
   restarted pipeline — both are their own trust tiers ("anyone with
   run-pipeline access"), never branch-verified.
 
+**Pipeline attributes** — on top of the repo/event/branch tiers, a
+pipeline's target (`deploy_to`, or a manual-run variable), actor (who
+started a manual run, or a declared forge's push sender) and forge teams
+each add policies under the event policy (`.target/…`, `.actor/…`,
+`.team/…`, and target conjunctions). Their data lives in a separate,
+ironbark-owned KV mount so no `kv/` tier policy can reach it; they only
+ever grant, and a failed team lookup fails closed. Design:
+[`plans/2026-09-30-pipeline-attributes-design.md`](plans/2026-09-30-pipeline-attributes-design.md);
+normative: SPEC §2.1, §2.3–§2.5, §4.1.
+
 **Conventional policies are additive-only** — no `deny` stanzas. ACL
 precedence is most-specific-wins regardless of allow/deny (research §7.3),
 which is subtle enough that the convention simply refuses to depend on it.

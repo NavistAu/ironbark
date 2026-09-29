@@ -112,23 +112,32 @@ type TeamResolver interface {
 With `E = <prefix>/<org>/<repo>/<event>` (today's P1), ironbark additionally
 requests:
 
-- **Target prefixes** — for target `a/b/c`: `E/.target/a`, `E/.target/a/b`,
-  `E/.target/a/b/c`. The admin creates a policy at the depth that owns the
-  scope (e.g. only the top-level component); deeper names grant nothing
-  unless created.
+- **Target prefixes** — for target `a/b/c` the prefixes are `a`, `a/b` and
+  `a/b/c`; each prefix `T` is requested as `E/.target/<esc(T)>`, i.e.
+  `E/.target/a`, `E/.target/a%2fb`, `E/.target/a%2fb%2fc`. `esc` is applied
+  to the whole prefix string, so its `/` becomes `%2f` and every prefix is
+  one path segment (injective, SPEC §2.2). The admin creates a policy at
+  the depth that owns the scope (e.g. only the top-level component); deeper
+  names grant nothing unless created.
 - **Actor** — `E/.actor/<esc(actor)>`.
 - **Teams** — `E/.team/<esc(team)>` per resolved team.
 - **Conjunctions** — for each target prefix `T`:
-  `T/.actor/<esc(actor)>` and `T/.team/<esc(team)>` per team. These let a
-  secret require both "this target" and "this person/team".
+  `E/.target-actor/<esc(T)>/<esc(actor)>` and
+  `E/.target-team/<esc(T)>/<esc(team)>` per team. These let a secret
+  require both "this target" and "this person/team".
 
-The attribute segments `.target`, `.actor` and `.team` are dot-prefixed on
-purpose: `identity.Esc` output is never dot-prefixed (SPEC §2.2), so no
-escaped branch (P2), target segment, actor or team can equal one. A branch
-literally named `target` keeps its own tier `E/target`, and a caller-chosen
-target `a/actor/x` becomes `E/.target/a/actor/x`, never the conjunction
-`E/.target/a/.actor/x`. In KV the dot-prefixed names are directories under
-`B/<event>`, which the existing sweep never descends (SPEC §4.1).
+Every attribute name is `E/<rel>` where `<rel>` is one of the five shapes
+above, and each shape is a fixed number of segments. No attribute name is
+a path-prefix of another attribute name, of P2, or of a name of a
+different shape — this is what keeps a `*`-glob KV policy for one name from
+reaching another name's data (§4).
+
+The attribute segments `.target`, `.actor`, `.team`, `.target-actor` and
+`.target-team` are dot-prefixed on purpose: `identity.Esc` output is never
+dot-prefixed (SPEC §2.2), so no escaped branch (P2), target, actor or team
+can equal one. A branch literally named `target` keeps its own tier
+`E/target`, and a caller-chosen target `a/.actor/x` is escaped into the
+single segment `a%2f.actor%2fx` under `.target`, never a conjunction.
 
 Union semantics as today. Attribute policies are **grant-only as a
 security boundary**: every attribute can be absent (target omitted or
@@ -148,24 +157,66 @@ unchanged. The token role's `allowed_policies_glob` already covers
 `<prefix>/*` (SPEC §3.1: substring glob, `*` crosses `/`).
 
 ### 4. KV layout and sweep (additions to SPEC §2.4, §4.1)
-Each new policy name has a KV prefix of the same shape under `B`
-(`E` → `B/<event>`), with the same escaping as the policy name:
-`B/<event>/.target/<esc(a)>[/<esc(b)>…]/<key>`,
-`B/<event>/.actor/<esc(actor)>/<key>`, `B/<event>/.team/<esc(team)>/<key>`,
-and the conjunction prefixes. The read set is still derived a priori — each
-prefix is LISTed independently, no descent, 403/404 tolerated, in this
-total order (most specific first):
+**Attribute data lives in an ironbark-owned KV v2 mount**,
+`IRONBARK_ATTR_MOUNT` (default `ironbark`, §7), never under the shared
+`KV_MOUNT` — the way voidstar owns its `vs/` mount. Vault/OpenBao ACL paths
+begin with the mount path, so no policy written on `kv/…` — `*`, `+`,
+repo-root globs like the README's `kv/data/ci/acme/widgets/*`, or a
+careless `kv/*` — can match attribute data, whatever glob it uses. Only a
+policy that names the attribute mount reaches it, and those are exactly the
+attribute policies an admin chose to create. `IRONBARK_ATTR_MOUNT` equal to
+`IRONBARK_KV_MOUNT` is a startup error.
 
-1. For each target prefix `T`, deepest first: `T/.actor/<esc(actor)>`, then
-   `T/.team/<esc(team)>` for each team in byte order of `esc(team)`.
-2. Target prefixes, deepest first.
-3. `B/<event>/.actor/<esc(actor)>`.
-4. `B/<event>/.team/<esc(team)>`, teams in byte order of `esc(team)`.
-5. Today's tiers (SPEC §4.1): branch, event, base.
+With `A = <ATTR_MOUNT>` and the relative name `<rel>` from §3, each
+attribute policy `E/<rel>` has exactly one KV prefix:
+`<org>/<repo>/<event>/<rel>` in the attribute mount, holding plain keys:
 
-Keys within one prefix are taken in lexicographic order, as today. Name
-collisions: first writer wins (SPEC §4.2), so the earliest prefix in this
-order wins.
+```
+<org>/<repo>/<event>/.target/<esc(T)>/<key>
+<org>/<repo>/<event>/.actor/<esc(actor)>/<key>
+<org>/<repo>/<event>/.team/<esc(team)>/<key>
+<org>/<repo>/<event>/.target-actor/<esc(T)>/<esc(actor)>/<key>
+<org>/<repo>/<event>/.target-team/<esc(T)>/<esc(team)>/<key>
+```
+
+Because no attribute prefix is a path-prefix of another (§3), an attribute
+KV policy written in the README's style,
+`A/data/<org>/<repo>/<event>/<rel>/*`, grants exactly its own prefix's keys:
+a target-`a` policy does not reach `a%2fb`'s keys nor any conjunction under
+`a`, and an actor policy does not reach a conjunction naming that actor.
+(A policy that globs above a prefix, e.g. `A/data/<org>/<repo>/*`, grants
+everything below it — an admin's explicit choice, as with any KV policy.)
+
+The read set is still derived a priori — each prefix is LISTed
+independently (`A/metadata/…`), plain keys only, no descent, 403/404
+tolerated (including a missing attribute mount), in this total order (most
+specific first):
+
+1. For each target prefix `T`, deepest first:
+   `.target-actor/<esc(T)>/<esc(actor)>`, then `.target-team/<esc(T)>/<esc(team)>`
+   for each team in byte order of `esc(team)`.
+2. `.target/<esc(T)>`, deepest `T` first.
+3. `.actor/<esc(actor)>`.
+4. `.team/<esc(team)>`, teams in byte order of `esc(team)`.
+5. Today's tiers in `KV_MOUNT` (SPEC §4.1): branch, event, base.
+
+Keys within one prefix are taken in lexicographic order, as today; keys
+beginning with `.` are skipped, as in every tier. Name collisions: first
+writer wins (SPEC §4.2), so the earliest prefix in this order wins.
+`.identity` and `.config` stay at `B` in `KV_MOUNT` (SPEC §4.4, §4.5); the
+attribute mount has no directives.
+
+Pointer entries (SPEC §4.3) are unchanged: a `$ref` found in any tier is
+dereferenced with the minted token, so it reaches attribute data only if
+that pipeline's token already holds the attribute policy — a pointer in an
+ordinary tier cannot lift attribute-gated data into a pipeline without it.
+
+**Existing tiers stay where they are.** P1/P2 data remains at
+`B = <KV_PREFIX>/<org>/<repo>` in `KV_MOUNT`, unchanged and backwards
+compatible; this iteration moves nothing. Their isolation from each other
+relies on operators scoping each tier policy's paths to its own tier
+(README "Use exact paths under the tier"). Moving them into the attribute
+mount later is possible as a separate, opt-in change.
 
 ### 5. Directives
 None. (A per-repo `.config` override of the target variable is impossible:
@@ -183,6 +234,7 @@ Additions to SPEC §7 (same conventions; `_FILE` only where marked):
 | Var | Default | Values / notes |
 |---|---|---|
 | `IRONBARK_ACTOR_FORGE` | `gitea` if `IRONBARK_FORGE_PROVIDER=gitea`, else `none` | `none` \| `gitea` \| `github` \| `bitbucket` (Bitbucket Cloud); anything else is a startup error; with provider `gitea` only `gitea` or `none` (§2) |
+| `IRONBARK_ATTR_MOUNT` | `ironbark` | KV v2 mount holding all attribute data (§4); must differ from `IRONBARK_KV_MOUNT` (startup error) |
 | `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | manual-run variable naming the target (§1) |
 | `IRONBARK_MAX_POLICIES` | `64` | integer ≥ 3 (P1, P2, actor are never dropped) (§3) |
 | `IRONBARK_FORGE_PROVIDER` | `none` | `none` \| `gitea` (Gitea, Forgejo) |
@@ -192,7 +244,10 @@ Additions to SPEC §7 (same conventions; `_FILE` only where marked):
 
 A repo with no attribute policies behaves exactly as today. No new
 required config; `IRONBARK_FORGE_PROVIDER=none` disables team lookup and
-`IRONBARK_ACTOR_FORGE=none` leaves push-family actor empty.
+`IRONBARK_ACTOR_FORGE=none` leaves push-family actor empty. The attribute
+mount is an operator prerequisite only for using attribute tiers
+(`vault secrets enable -path=ironbark -version=2 kv`); until it exists its
+LISTs return 403/404 and are skipped.
 
 ### 8. Verification before release
 - Development images log the parsed attributes (debug level) for every
@@ -214,12 +269,33 @@ required config; `IRONBARK_FORGE_PROVIDER=none` disables team lookup and
   KV paths; policy list construction incl. conjunctions and the
   `IRONBARK_MAX_POLICIES` drop order; first-writer-wins across attribute
   and existing tiers.
-- Integration (Vault and OpenBao): dot-prefixed segments are accepted in
-  policy names and KV paths; a target-prefix policy grants only its
-  subtree; a target-only policy is granted to any manual run naming that
-  target, while a conjunction policy is not; team lookup timeout fails
-  closed and grants nothing from team prefixes; overflow drops only
-  attribute policies.
+- Integration (Vault and OpenBao): dot-prefixed segments and `%2f` are
+  accepted in policy names and KV paths; a target-only policy is granted to
+  any manual run naming that target, while a conjunction policy is not;
+  team lookup timeout fails closed and grants nothing from team prefixes;
+  overflow drops only attribute policies.
+- Integration, attribute isolation (Vault and OpenBao; data seeded at every
+  §4 shape, incl. nested targets `a`, `a/b` and conjunctions under `a`):
+  - a token holding only ordinary tier policies — the README's examples
+    verbatim, plus `kv/data/ci/acme/widgets/*`, `kv/data/ci/*`, `kv/*` and
+    `+`-segment variants — gets 403 on LIST and GET of every attribute
+    path, and the sweep returns no attribute secret;
+  - a token holding one attribute policy written as
+    `<ATTR_MOUNT>/data/<org>/<repo>/<event>/<rel>/*` (plus its metadata
+    list) reads exactly that prefix's keys and gets 403 on every other
+    attribute prefix — the target-`a` policy on `a%2fb` and on both
+    conjunctions under `a`; the actor policy on conjunctions naming that
+    actor; a team policy on team conjunctions;
+  - `IRONBARK_ATTR_MOUNT` equal to `IRONBARK_KV_MOUNT` fails startup, and a
+    missing attribute mount leaves the sweep as today.
+
+### 9. Documentation deltas
+- SPEC: §2.3 (§3 names), §2.4 and §4.1 (§4 mount, layout, read order),
+  §4.3 (pointer note), §7 (§7 table), §8.1 (§6), §9.2/§9.3 (§8 tests).
+- README: operator contract gains the attribute-mount prerequisite and one
+  attribute policy example on that mount (generic `acme/widgets`), and
+  states that attribute data is never under `kv/`, so tier policies on
+  `kv/` cannot reach it; configuration table gains the §7 rows.
 
 ## Out of scope
 - Recording who promoted a deployment (needs Woodpecker upstream).
@@ -228,8 +304,11 @@ required config; `IRONBARK_FORGE_PROVIDER=none` disables team lookup and
 - Policy on `code_author` or `changed_files`.
 
 ## Decisions to log on acceptance
-- Dot-prefixed attribute segments (`.target`, `.actor`, `.team`), relying
-  on `esc` never emitting a leading dot.
+- Attribute data in an ironbark-owned KV mount (`IRONBARK_ATTR_MOUNT`),
+  never under the shared `KV_MOUNT`; existing tiers stay put.
+- Dot-prefixed attribute segments (`.target`, `.actor`, `.team`,
+  `.target-actor`, `.target-team`), relying on `esc` never emitting a
+  leading dot; whole-prefix `esc(T)` so no attribute prefix nests another.
 - Actor source per event, "deployment has no actor", and push-family actor
   only on an operator-declared forge whose `sender` is a login.
 - Target from `deploy_to` or a configured manual variable; path-prefix

@@ -2,6 +2,7 @@ package identity
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -106,7 +107,7 @@ func TestParse(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := Parse([]byte(c.body))
+			got, err := Parse([]byte(c.body), Options{})
 
 			if c.wantErr != nil {
 				if !errors.Is(err, c.wantErr) {
@@ -118,7 +119,8 @@ func TestParse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse() unexpected err = %v", err)
 			}
-			if got != c.want {
+			got.Payload = PayloadFacts{} // raw payload facts are covered by TestParsePayloadFacts
+			if !reflect.DeepEqual(got, c.want) {
 				t.Fatalf("Parse() = %+v, want %+v", got, c.want)
 			}
 		})

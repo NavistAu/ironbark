@@ -138,7 +138,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
 	// valid signature is a client bug, not an attack — logged minimally,
 	// not the full verified-audit shape (there is no identity to attach
 	// it to).
-	id, err := identity.Parse(body)
+	id, err := identity.Parse(body, identity.Options{})
 	if err != nil {
 		s.metrics.requestsTotal.WithLabelValues("error").Inc()
 		s.logger.Info("identity parse failed", "remote_addr", r.RemoteAddr, "outcome", "error")

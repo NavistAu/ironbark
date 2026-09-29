@@ -1,6 +1,7 @@
 # Pipeline attributes: actor, target and teams in the grant
 
-Status: design, agreed with the maintainer 2026-09-30; for review. Built as
+Status: accepted 2026-09-30 (decisions logged as DEC-260930071252 …
+DEC-260930071456); implemented on `feat/pipeline-attributes`. Built as
 development images only — no release is cut until the payload facts below
 are confirmed on real pipelines (§8).
 
@@ -91,9 +92,11 @@ type TeamResolver interface {
   same forge. ironbark assumes a single-forge Woodpecker server (the payload
   cannot distinguish forges, §Payload facts). The two settings are
   independent except for one rule: when `IRONBARK_FORGE_PROVIDER=gitea`,
-  `IRONBARK_ACTOR_FORGE` defaults to `gitea` and may only be `gitea` or
-  `none` — `github`/`bitbucket` alongside a Gitea team provider is a
-  startup error. With the provider `none`, any actor-forge value is valid
+  `IRONBARK_ACTOR_FORGE` may only be `gitea` or `none` —
+  `github`/`bitbucket` alongside a Gitea team provider is a startup error.
+  `IRONBARK_ACTOR_FORGE` defaults to `none` whatever the provider
+  (maintainer ruling 2026-09-30), so enabling team lookup never implicitly
+  starts push-family actor grants. With the provider `none`, any actor-forge value is valid
   (actor policies without teams). This covers the manual actor too —
   `author` is a login on the server's one forge.
 - Failure (timeout, error, non-200) **fails closed**: no team policies, the
@@ -251,7 +254,7 @@ Additions to SPEC §7 (same conventions; `_FILE` only where marked):
 
 | Var | Default | Values / notes |
 |---|---|---|
-| `IRONBARK_ACTOR_FORGE` | `gitea` if `IRONBARK_FORGE_PROVIDER=gitea`, else `none` | `none` \| `gitea` \| `github` \| `bitbucket` (Bitbucket Cloud); anything else is a startup error; with provider `gitea` only `gitea` or `none` (§2) |
+| `IRONBARK_ACTOR_FORGE` | `none` | `none` \| `gitea` \| `github` \| `bitbucket` (Bitbucket Cloud); anything else is a startup error; with provider `gitea` only `gitea` or `none` (§2) |
 | `IRONBARK_ATTR_MOUNT` | `ironbark` | KV v2 mount holding all attribute data (§4); equal to, containing, or contained in `IRONBARK_KV_MOUNT` is a startup error |
 | `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | manual-run variable naming the target (§1) |
 | `IRONBARK_MAX_POLICIES` | `64` | integer ≥ 3 (P1, P2, actor are never dropped) (§3) |

@@ -47,7 +47,7 @@ assertions. They do not paste test bodies.
 
 ## Maintainer rulings
 
-**Pending confirmation. These are implemented as written and flagged:**
+**Confirmed by the maintainer 2026-09-30, together with D1–D8:**
 1. **`IRONBARK_ACTOR_FORGE` defaults to `none`**, unconditionally. This
    **differs from design §2/§7**, which default it to `gitea` when
    `IRONBARK_FORGE_PROVIDER=gitea`. The validation rule stays: with provider

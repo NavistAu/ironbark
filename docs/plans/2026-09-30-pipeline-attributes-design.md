@@ -55,10 +55,7 @@ outside `manual`.
 - **Target** — a slash-separated path, or empty. deployment: `deploy_to`;
   manual: `variables[IRONBARK_TARGET_VAR]` (default `DEPLOY_TO`); others:
   empty. Grammar: split on `/`; every segment non-empty (no leading,
-  trailing or doubled `/`); no segment equal to `actor` or `team` after
-  escaping (these are the conjunction separators — without the rule a
-  caller-chosen target `a/actor/x` would derive the conjunction name for
-  target `a` and actor `x`); at most 8 segments and 256 bytes. A value
+  trailing or doubled `/`); at most 8 segments and 256 bytes. A value
   violating this is treated as no target (no target policies) and the audit
   line records `target_invalid`.
 - **CodeAuthor** — `sender` on push-family events, recorded verbatim for
@@ -91,10 +88,13 @@ type TeamResolver interface {
 - Only called when Actor is non-empty. No caching.
 - One forge namespace: actor logins and team membership must come from the
   same forge. ironbark assumes a single-forge Woodpecker server (the payload
-  cannot distinguish forges, §Payload facts); with `IRONBARK_FORGE_PROVIDER`
-  set, `IRONBARK_ACTOR_FORGE` defaults to the same value and setting it to a
-  different non-`none` value is a startup error. This covers the manual
-  actor too — `author` is a login on the server's one forge.
+  cannot distinguish forges, §Payload facts). The two settings are
+  independent except for one rule: when `IRONBARK_FORGE_PROVIDER=gitea`,
+  `IRONBARK_ACTOR_FORGE` defaults to `gitea` and may only be `gitea` or
+  `none` — `github`/`bitbucket` alongside a Gitea team provider is a
+  startup error. With the provider `none`, any actor-forge value is valid
+  (actor policies without teams). This covers the manual actor too —
+  `author` is a login on the server's one forge.
 - Failure (timeout, error, non-200) **fails closed**: no team policies, the
   pipeline continues with its other policies, and the audit line records
   the failure. A team lookup never fails a pipeline. Because a failed
@@ -112,15 +112,23 @@ type TeamResolver interface {
 With `E = <prefix>/<org>/<repo>/<event>` (today's P1), ironbark additionally
 requests:
 
-- **Target prefixes** — for target `a/b/c`: `E/target/a`, `E/target/a/b`,
-  `E/target/a/b/c`. The admin creates a policy at the depth that owns the
+- **Target prefixes** — for target `a/b/c`: `E/.target/a`, `E/.target/a/b`,
+  `E/.target/a/b/c`. The admin creates a policy at the depth that owns the
   scope (e.g. only the top-level component); deeper names grant nothing
   unless created.
-- **Actor** — `E/actor/<esc(actor)>`.
-- **Teams** — `E/team/<esc(team)>` per resolved team.
+- **Actor** — `E/.actor/<esc(actor)>`.
+- **Teams** — `E/.team/<esc(team)>` per resolved team.
 - **Conjunctions** — for each target prefix `T`:
-  `T/actor/<esc(actor)>` and `T/team/<esc(team)>` per team. These let a
+  `T/.actor/<esc(actor)>` and `T/.team/<esc(team)>` per team. These let a
   secret require both "this target" and "this person/team".
+
+The attribute segments `.target`, `.actor` and `.team` are dot-prefixed on
+purpose: `identity.Esc` output is never dot-prefixed (SPEC §2.2), so no
+escaped branch (P2), target segment, actor or team can equal one. A branch
+literally named `target` keeps its own tier `E/target`, and a caller-chosen
+target `a/actor/x` becomes `E/.target/a/actor/x`, never the conjunction
+`E/.target/a/.actor/x`. In KV the dot-prefixed names are directories under
+`B/<event>`, which the existing sweep never descends (SPEC §4.1).
 
 Union semantics as today. Attribute policies are **grant-only as a
 security boundary**: every attribute can be absent (target omitted or
@@ -142,17 +150,17 @@ unchanged. The token role's `allowed_policies_glob` already covers
 ### 4. KV layout and sweep (additions to SPEC §2.4, §4.1)
 Each new policy name has a KV prefix of the same shape under `B`
 (`E` → `B/<event>`), with the same escaping as the policy name:
-`B/<event>/target/<esc(a)>[/<esc(b)>…]/<key>`,
-`B/<event>/actor/<esc(actor)>/<key>`, `B/<event>/team/<esc(team)>/<key>`,
+`B/<event>/.target/<esc(a)>[/<esc(b)>…]/<key>`,
+`B/<event>/.actor/<esc(actor)>/<key>`, `B/<event>/.team/<esc(team)>/<key>`,
 and the conjunction prefixes. The read set is still derived a priori — each
 prefix is LISTed independently, no descent, 403/404 tolerated, in this
 total order (most specific first):
 
-1. For each target prefix `T`, deepest first: `T/actor/<esc(actor)>`, then
-   `T/team/<esc(team)>` for each team in byte order of `esc(team)`.
+1. For each target prefix `T`, deepest first: `T/.actor/<esc(actor)>`, then
+   `T/.team/<esc(team)>` for each team in byte order of `esc(team)`.
 2. Target prefixes, deepest first.
-3. `B/<event>/actor/<esc(actor)>`.
-4. `B/<event>/team/<esc(team)>`, teams in byte order of `esc(team)`.
+3. `B/<event>/.actor/<esc(actor)>`.
+4. `B/<event>/.team/<esc(team)>`, teams in byte order of `esc(team)`.
 5. Today's tiers (SPEC §4.1): branch, event, base.
 
 Keys within one prefix are taken in lexicographic order, as today. Name
@@ -174,7 +182,7 @@ Additions to SPEC §7 (same conventions; `_FILE` only where marked):
 
 | Var | Default | Values / notes |
 |---|---|---|
-| `IRONBARK_ACTOR_FORGE` | value of `IRONBARK_FORGE_PROVIDER` | `none` \| `gitea` \| `github` \| `bitbucket` (Bitbucket Cloud); anything else is a startup error; must match a non-`none` `IRONBARK_FORGE_PROVIDER` (§2) |
+| `IRONBARK_ACTOR_FORGE` | `gitea` if `IRONBARK_FORGE_PROVIDER=gitea`, else `none` | `none` \| `gitea` \| `github` \| `bitbucket` (Bitbucket Cloud); anything else is a startup error; with provider `gitea` only `gitea` or `none` (§2) |
 | `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | manual-run variable naming the target (§1) |
 | `IRONBARK_MAX_POLICIES` | `64` | integer ≥ 3 (P1, P2, actor are never dropped) (§3) |
 | `IRONBARK_FORGE_PROVIDER` | `none` | `none` \| `gitea` (Gitea, Forgejo) |
@@ -197,14 +205,17 @@ required config; `IRONBARK_FORGE_PROVIDER=none` disables team lookup and
   recorded payloads (Gitea push, manual, promotion, GitHub deployment
   webhook, GitLab release with a display-name `sender` → empty actor);
   target grammar (empty segments, leading/trailing/doubled `/`, depth and
-  length limits, reserved `actor`/`team` segments → `target_invalid`);
+  length limits → `target_invalid`); no collision between the dot-prefixed
+  attribute segments and branches or target segments named `target`,
+  `actor`, `team` or `.target` (escaped to `%2etarget`);
   config validation (`IRONBARK_ACTOR_FORGE` vs `IRONBARK_FORGE_PROVIDER`
   mismatch is a startup error); escaping of hostile actor, team and
   target values (`/`, `.`, `..`, `%`, uppercase) in both policy names and
   KV paths; policy list construction incl. conjunctions and the
   `IRONBARK_MAX_POLICIES` drop order; first-writer-wins across attribute
   and existing tiers.
-- Integration (Vault and OpenBao): a target-prefix policy grants only its
+- Integration (Vault and OpenBao): dot-prefixed segments are accepted in
+  policy names and KV paths; a target-prefix policy grants only its
   subtree; a target-only policy is granted to any manual run naming that
   target, while a conjunction policy is not; team lookup timeout fails
   closed and grants nothing from team prefixes; overflow drops only
@@ -217,7 +228,8 @@ required config; `IRONBARK_FORGE_PROVIDER=none` disables team lookup and
 - Policy on `code_author` or `changed_files`.
 
 ## Decisions to log on acceptance
-- Reserved target segments `actor` and `team`.
+- Dot-prefixed attribute segments (`.target`, `.actor`, `.team`), relying
+  on `esc` never emitting a leading dot.
 - Actor source per event, "deployment has no actor", and push-family actor
   only on an operator-declared forge whose `sender` is a login.
 - Target from `deploy_to` or a configured manual variable; path-prefix

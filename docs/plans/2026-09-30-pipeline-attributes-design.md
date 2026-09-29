@@ -318,7 +318,9 @@ LISTs return 403/404 and are skipped.
   `kv/` cannot reach it; configuration table gains the §7 rows. The
   existing tier examples are corrected to per-tier paths (`+` for the key
   segment, exact metadata LIST path) so the `pull_request` example no
-  longer reads the `push/main` tier (§4).
+  longer reads the `push/main` tier (§4). This correction is independent of
+  attributes — it fixes the published examples as they stand — and lands
+  ahead of the attribute work, not with it.
 - CLIENT-SPEC: "same secrets as a CI run" is qualified to repo/event/branch
   tiers; `ib` does not read the attribute mount (§4).
 

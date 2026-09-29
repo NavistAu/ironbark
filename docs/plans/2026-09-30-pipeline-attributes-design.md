@@ -48,14 +48,17 @@ outside `manual`.
 
 - **Actor** — a person, or empty. manual: `author` (any forge).
   push-family: `sender`, but only when the operator declares a forge whose
-  `sender` is a login (`IRONBARK_ACTOR_FORGE`: `gitea` | `github` |
-  `bitbucket`; default `none` → push-family actor is empty). GitLab and
+  `sender` is a login (`IRONBARK_ACTOR_FORGE`, §7; `none` → push-family
+  actor is empty). GitLab and
   Bitbucket Data Center are never declarable (caveats above). deployment
   and cron: empty.
 - **Target** — a slash-separated path, or empty. deployment: `deploy_to`;
   manual: `variables[IRONBARK_TARGET_VAR]` (default `DEPLOY_TO`); others:
   empty. Grammar: split on `/`; every segment non-empty (no leading,
-  trailing or doubled `/`); at most 8 segments and 256 bytes. A value
+  trailing or doubled `/`); no segment equal to `actor` or `team` after
+  escaping (these are the conjunction separators — without the rule a
+  caller-chosen target `a/actor/x` would derive the conjunction name for
+  target `a` and actor `x`); at most 8 segments and 256 bytes. A value
   violating this is treated as no target (no target policies) and the audit
   line records `target_invalid`.
 - **CodeAuthor** — `sender` on push-family events, recorded verbatim for
@@ -84,10 +87,14 @@ type TeamResolver interface {
 - First implementation: Gitea-family forges (Gitea, Forgejo) — the repo's
   teams, then membership of `login` in each. Designed so other forges can be
   added behind the same interface.
-- Config (SPEC §7 conventions): `IRONBARK_FORGE_PROVIDER` (`none` default |
-  `gitea`), `IRONBARK_FORGE_URL`, `IRONBARK_FORGE_TOKEN` / `_FILE` (read
-  access to org teams), `IRONBARK_FORGE_TIMEOUT` (default 3s).
+- Config: the `IRONBARK_FORGE_*` variables (§7).
 - Only called when Actor is non-empty. No caching.
+- One forge namespace: actor logins and team membership must come from the
+  same forge. ironbark assumes a single-forge Woodpecker server (the payload
+  cannot distinguish forges, §Payload facts); with `IRONBARK_FORGE_PROVIDER`
+  set, `IRONBARK_ACTOR_FORGE` defaults to the same value and setting it to a
+  different non-`none` value is a startup error. This covers the manual
+  actor too — `author` is a login on the server's one forge.
 - Failure (timeout, error, non-200) **fails closed**: no team policies, the
   pipeline continues with its other policies, and the audit line records
   the failure. A team lookup never fails a pipeline. Because a failed
@@ -138,10 +145,19 @@ Each new policy name has a KV prefix of the same shape under `B`
 `B/<event>/target/<esc(a)>[/<esc(b)>…]/<key>`,
 `B/<event>/actor/<esc(actor)>/<key>`, `B/<event>/team/<esc(team)>/<key>`,
 and the conjunction prefixes. The read set is still derived a priori — each
-prefix is LISTed independently, most specific first (conjunctions, then
-target deepest-first, then actor, team, then today's tiers), no descent,
-403/404 tolerated. Name collisions: first writer wins, as today (SPEC
-§4.2), so the more specific key wins.
+prefix is LISTed independently, no descent, 403/404 tolerated, in this
+total order (most specific first):
+
+1. For each target prefix `T`, deepest first: `T/actor/<esc(actor)>`, then
+   `T/team/<esc(team)>` for each team in byte order of `esc(team)`.
+2. Target prefixes, deepest first.
+3. `B/<event>/actor/<esc(actor)>`.
+4. `B/<event>/team/<esc(team)>`, teams in byte order of `esc(team)`.
+5. Today's tiers (SPEC §4.1): branch, event, base.
+
+Keys within one prefix are taken in lexicographic order, as today. Name
+collisions: first writer wins (SPEC §4.2), so the earliest prefix in this
+order wins.
 
 ### 5. Directives
 None. (A per-repo `.config` override of the target variable is impossible:
@@ -153,7 +169,19 @@ Adds `actor`, `target` (or `target_invalid`), `code_author`, `teams` (or
 `teams_error`), `policies_dropped`, and the count of requested and
 existing-policy warnings.
 
-### 7. Compatibility
+### 7. Configuration and compatibility
+Additions to SPEC §7 (same conventions; `_FILE` only where marked):
+
+| Var | Default | Values / notes |
+|---|---|---|
+| `IRONBARK_ACTOR_FORGE` | value of `IRONBARK_FORGE_PROVIDER` | `none` \| `gitea` \| `github` \| `bitbucket` (Bitbucket Cloud); anything else is a startup error; must match a non-`none` `IRONBARK_FORGE_PROVIDER` (§2) |
+| `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | manual-run variable naming the target (§1) |
+| `IRONBARK_MAX_POLICIES` | `64` | integer ≥ 3 (P1, P2, actor are never dropped) (§3) |
+| `IRONBARK_FORGE_PROVIDER` | `none` | `none` \| `gitea` (Gitea, Forgejo) |
+| `IRONBARK_FORGE_URL` | — | required when provider ≠ `none` |
+| `IRONBARK_FORGE_TOKEN` / `_FILE` | — | required when provider ≠ `none`; read scope on org teams |
+| `IRONBARK_FORGE_TIMEOUT` | `3s` | Go duration |
+
 A repo with no attribute policies behaves exactly as today. No new
 required config; `IRONBARK_FORGE_PROVIDER=none` disables team lookup and
 `IRONBARK_ACTOR_FORGE=none` leaves push-family actor empty.
@@ -169,7 +197,9 @@ required config; `IRONBARK_FORGE_PROVIDER=none` disables team lookup and
   recorded payloads (Gitea push, manual, promotion, GitHub deployment
   webhook, GitLab release with a display-name `sender` → empty actor);
   target grammar (empty segments, leading/trailing/doubled `/`, depth and
-  length limits → `target_invalid`); escaping of hostile actor, team and
+  length limits, reserved `actor`/`team` segments → `target_invalid`);
+  config validation (`IRONBARK_ACTOR_FORGE` vs `IRONBARK_FORGE_PROVIDER`
+  mismatch is a startup error); escaping of hostile actor, team and
   target values (`/`, `.`, `..`, `%`, uppercase) in both policy names and
   KV paths; policy list construction incl. conjunctions and the
   `IRONBARK_MAX_POLICIES` drop order; first-writer-wins across attribute
@@ -187,6 +217,7 @@ required config; `IRONBARK_FORGE_PROVIDER=none` disables team lookup and
 - Policy on `code_author` or `changed_files`.
 
 ## Decisions to log on acceptance
+- Reserved target segments `actor` and `team`.
 - Actor source per event, "deployment has no actor", and push-family actor
   only on an operator-declared forge whose `sender` is a login.
 - Target from `deploy_to` or a configured manual variable; path-prefix

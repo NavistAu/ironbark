@@ -40,6 +40,7 @@ type mockVault struct {
 	sweepToken     string
 	sweepID        identity.Identity
 	sweepBranchful bool
+	sweepAttrPaths []string
 	sweepResult    vaultx.SweepResult
 	sweepErr       error
 
@@ -85,8 +86,9 @@ func (m *mockVault) ReadConfig(ctx context.Context, token, base string) (map[str
 	return m.configResult, m.configErr
 }
 
-func (m *mockVault) Sweep(ctx context.Context, token string, id identity.Identity, branchful bool) (vaultx.SweepResult, error) {
+func (m *mockVault) SweepWithAttributes(ctx context.Context, token string, id identity.Identity, branchful bool, attrPaths []string) (vaultx.SweepResult, error) {
 	m.sweepToken = token
+	m.sweepAttrPaths = attrPaths
 	m.sweepID = id
 	m.sweepBranchful = branchful
 	return m.sweepResult, m.sweepErr

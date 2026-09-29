@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/navistau/ironbark/internal/forge"
 	"github.com/navistau/ironbark/internal/identity"
 	"github.com/navistau/ironbark/internal/policy"
 	"github.com/navistau/ironbark/internal/vaultx"
@@ -35,7 +36,7 @@ type Vault interface {
 	RevokeSelf(ctx context.Context, token string) error
 	ReadIdentity(ctx context.Context, token, base string) (*string, error)
 	ReadConfig(ctx context.Context, token, base string) (map[string]string, error)
-	Sweep(ctx context.Context, token string, id identity.Identity, branchful bool) (vaultx.SweepResult, error)
+	SweepWithAttributes(ctx context.Context, token string, id identity.Identity, branchful bool, attrPaths []string) (vaultx.SweepResult, error)
 }
 
 var _ Vault = (*vaultx.Client)(nil)
@@ -75,6 +76,11 @@ type AuditFields struct {
 	SecretNames       []string
 	TokenAccessor     string
 	TokenTTL          time.Duration
+
+	// Pipeline attributes (design §6).
+	Teams           []string // resolved teams, verbatim
+	TeamsError      string   // team lookup failure; the lookup failed closed
+	PoliciesDropped []string // full names dropped by IRONBARK_MAX_POLICIES, in drop order
 }
 
 // Result is Handle's complete outcome: the HTTP status httpapi should
@@ -97,13 +103,32 @@ type Broker struct {
 	vault              Vault
 	policyPrefix       string
 	advertiseVaultAddr string
+	teams              forge.TeamResolver // nil: no team lookup
+	maxPolicies        int
+}
+
+// Option configures optional Broker behavior at construction (New).
+type Option func(*Broker)
+
+// WithTeamResolver enables team lookup for requests with an actor.
+func WithTeamResolver(r forge.TeamResolver) Option {
+	return func(b *Broker) { b.teams = r }
+}
+
+// WithMaxPolicies sets IRONBARK_MAX_POLICIES (default 64).
+func WithMaxPolicies(n int) Option {
+	return func(b *Broker) { b.maxPolicies = n }
 }
 
 // New builds a Broker. policyPrefix is POLICY_PREFIX (SPEC §2.3);
 // advertiseVaultAddr is ADVERTISE_VAULT_ADDR (SPEC §7), empty meaning the
 // vault_addr pin is never added.
-func New(v Vault, policyPrefix, advertiseVaultAddr string) *Broker {
-	return &Broker{vault: v, policyPrefix: policyPrefix, advertiseVaultAddr: advertiseVaultAddr}
+func New(v Vault, policyPrefix, advertiseVaultAddr string, opts ...Option) *Broker {
+	b := &Broker{vault: v, policyPrefix: policyPrefix, advertiseVaultAddr: advertiseVaultAddr, maxPolicies: 64}
+	for _, o := range opts {
+		o(b)
+	}
+	return b
 }
 
 // warningPolicyRe matches Vault/OpenBao's per-mint nonexistent-policy
@@ -184,14 +209,41 @@ func secretNames(secrets []Secret) []string {
 // registered below can inspect and, on a failed revoke, annotate it.
 func (b *Broker) Handle(ctx context.Context, id identity.Identity) (result Result) {
 	// Step 5: derive policies.
-	policies := policy.Derive(id, b.policyPrefix)
-	audit := AuditFields{PoliciesRequested: policies}
+	base := policy.Derive(id, b.policyPrefix)
+	audit := AuditFields{PoliciesRequested: base}
 
 	// Step 6, canary gate: no token exists yet, so there is nothing to
-	// revoke on this path — SPEC §1.2 step 6 / §3.5.
+	// revoke on this path — SPEC §1.2 step 6 / §3.5. It precedes the team
+	// lookup, so a failed canary never calls the forge (D7).
 	if !b.vault.CanaryOK() {
 		return Result{Status: 502, Outcome: OutcomeError, Audit: audit}
 	}
+
+	// Pipeline attributes (design §2, §3). A team lookup never fails the
+	// request: on error it fails closed to no teams.
+	var teams []string
+	if id.Actor != "" && b.teams != nil {
+		var err error
+		teams, err = b.teams.Teams(ctx, id.Org, id.Repo, id.Actor)
+		if err != nil {
+			teams = nil
+			audit.TeamsError = err.Error()
+		}
+		audit.Teams = teams
+	}
+	kept, dropped := policy.Cap(base, policy.Attributes(id, teams), b.maxPolicies)
+	// Request order (D1): P1, P2, then the kept attribute names in sweep
+	// order.
+	policies := append([]string(nil), base...)
+	var attrPaths []string
+	for _, a := range kept {
+		policies = append(policies, base[0]+"/"+a.Rel)
+		attrPaths = append(attrPaths, policy.AttrKVPath(id, a.Rel))
+	}
+	for _, a := range dropped {
+		audit.PoliciesDropped = append(audit.PoliciesDropped, base[0]+"/"+a.Rel)
+	}
+	audit.PoliciesRequested = policies
 
 	branchful := policy.Branchful(id.Event)
 	meta := map[string]string{
@@ -255,10 +307,10 @@ func (b *Broker) Handle(ctx context.Context, id identity.Identity) (result Resul
 		return finish(204, OutcomeUnonboarded, nil)
 	}
 
-	base := b.vault.Base(id)
+	kvBase := b.vault.Base(id)
 
 	// Step 7a: .identity (SPEC §4.4).
-	forgeID, err := b.vault.ReadIdentity(ctx, mint.Token, base)
+	forgeID, err := b.vault.ReadIdentity(ctx, mint.Token, kvBase)
 	if err != nil {
 		if errors.Is(err, vaultx.ErrMalformedDirective) {
 			return finish(204, OutcomeIdentityMismatch, nil)
@@ -273,13 +325,15 @@ func (b *Broker) Handle(ctx context.Context, id identity.Identity) (result Resul
 	// BOTH 502 here — unlike .identity, there is no 204 outcome for a
 	// broken .config (a broken suppression directive must never silently
 	// fall back to defaults).
-	config, err := b.vault.ReadConfig(ctx, mint.Token, base)
+	config, err := b.vault.ReadConfig(ctx, mint.Token, kvBase)
 	if err != nil {
 		return finish(502, OutcomeError, nil)
 	}
 
-	// Step 8: sweep (deref happens inside Sweep — SPEC §4.3 is subsumed).
-	sweep, err := b.vault.Sweep(ctx, mint.Token, id, branchful)
+	// Step 8: sweep (deref happens inside the sweep — SPEC §4.3 is
+	// subsumed). Only kept attribute prefixes are swept (D3): a dropped
+	// one would 403 anyway.
+	sweep, err := b.vault.SweepWithAttributes(ctx, mint.Token, id, branchful, attrPaths)
 	if err != nil {
 		return finish(502, OutcomeError, nil)
 	}

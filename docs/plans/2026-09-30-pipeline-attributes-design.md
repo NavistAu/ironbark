@@ -185,7 +185,9 @@ attribute policy `E/<rel>` has exactly one KV prefix:
 The documented attribute policy grants one prefix's plain keys and nothing
 else: `read` on `A/data/<org>/<repo>/<event>/<rel>/+` and `list` on
 `A/metadata/<org>/<repo>/<event>/<rel>/` (`+` is one path segment; `*`
-crosses `/`). Because no attribute prefix is a path-prefix of another
+crosses `/`; probed on Vault 1.20.4 and OpenBao dev servers: this exact
+metadata grant authorizes the sweep's LIST with or without a trailing
+slash on the request). Because no attribute prefix is a path-prefix of another
 (§3), even a trailing-`*` form `…/<rel>/*` reaches no other attribute
 prefix — a target-`a` policy does not reach `a%2fb`'s keys nor any
 conjunction on `a`, and an actor policy does not reach a conjunction naming

@@ -109,3 +109,47 @@ func escapeTeams(teams []string) []string {
 func AttrKVPath(id identity.Identity, rel string) string {
 	return id.Org + "/" + id.Repo + "/" + id.Event + "/" + rel
 }
+
+// dropRank is each droppable Kind's class in IRONBARK_MAX_POLICIES drop
+// order; KindActor is absent because it is never dropped.
+var dropRank = map[AttrKind]int{KindTargetTeam: 0, KindTargetActor: 1, KindTeam: 2, KindTarget: 3}
+
+// Cap bounds len(base)+len(kept) to max (design §3). base (P1/P2) and the
+// actor policy are never dropped. The rest drop in this order: target-team
+// conjunctions, target-actor conjunctions, team policies, target prefixes;
+// within a class deepest target first, then (D2) reverse esc(team) byte
+// order. kept stays in sweep order; dropped is in drop order.
+func Cap(base []string, attrs []Attr, max int) (kept, dropped []Attr) {
+	var order []int
+	for i, a := range attrs {
+		if _, ok := dropRank[a.Kind]; ok {
+			order = append(order, i)
+		}
+	}
+	sort.SliceStable(order, func(x, y int) bool {
+		a, b := attrs[order[x]], attrs[order[y]]
+		if dropRank[a.Kind] != dropRank[b.Kind] {
+			return dropRank[a.Kind] < dropRank[b.Kind]
+		}
+		if a.Depth != b.Depth {
+			return a.Depth > b.Depth
+		}
+		return a.Team > b.Team
+	})
+
+	over := len(base) + len(attrs) - max
+	drop := map[int]bool{}
+	for _, i := range order {
+		if len(drop) >= over {
+			break
+		}
+		drop[i] = true
+		dropped = append(dropped, attrs[i])
+	}
+	for i, a := range attrs {
+		if !drop[i] {
+			kept = append(kept, a)
+		}
+	}
+	return kept, dropped
+}

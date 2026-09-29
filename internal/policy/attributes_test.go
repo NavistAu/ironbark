@@ -161,3 +161,49 @@ func TestAttrKVPath(t *testing.T) {
 		t.Errorf("AttrKVPath = %q", got)
 	}
 }
+
+func TestCap(t *testing.T) {
+	attrs := Attributes(manualID("a/b", "alice"), []string{"ops", "dev"})
+	base := []string{"ci/acme/widgets/manual"}
+	allTT := []string{".target-team/a%2fb/ops", ".target-team/a%2fb/dev", ".target-team/a/ops", ".target-team/a/dev"}
+	cat := func(parts ...[]string) []string {
+		var out []string
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	cases := []struct {
+		max         int
+		wantKept    []string
+		wantDropped []string
+	}{
+		{64, exampleRels, nil},
+		{12, exampleRels, nil},
+		{11, nil, []string{".target-team/a%2fb/ops"}},
+		{9, nil, []string{".target-team/a%2fb/ops", ".target-team/a%2fb/dev", ".target-team/a/ops"}},
+		{5, []string{".target/a%2fb", ".target/a", ".actor/alice", ".team/dev"},
+			cat(allTT, []string{".target-actor/a%2fb/alice", ".target-actor/a/alice", ".team/ops"})},
+		{3, []string{".target/a", ".actor/alice"},
+			cat(allTT, []string{".target-actor/a%2fb/alice", ".target-actor/a/alice", ".team/ops", ".team/dev", ".target/a%2fb"})},
+	}
+	for _, c := range cases {
+		kept, dropped := Cap(base, attrs, c.max)
+		if !reflect.DeepEqual(rels(dropped), cat(c.wantDropped)) && !(len(dropped) == 0 && len(c.wantDropped) == 0) {
+			t.Errorf("max=%d dropped = %v, want %v", c.max, rels(dropped), c.wantDropped)
+		}
+		if len(base)+len(kept) > c.max {
+			t.Errorf("max=%d kept %d attrs over the cap", c.max, len(kept))
+		}
+		if c.wantKept != nil && !reflect.DeepEqual(rels(kept), c.wantKept) {
+			t.Errorf("max=%d kept = %v, want %v", c.max, rels(kept), c.wantKept)
+		}
+	}
+
+	// A branchful base of two plus the never-dropped actor fits max=3.
+	pushID := identity.Identity{Org: testOrg, Repo: testRepo, Event: "push", Branch: "main", Actor: "alice"}
+	kept, dropped := Cap(Derive(pushID, testPrefix), Attributes(pushID, nil), 3)
+	if len(dropped) != 0 || !reflect.DeepEqual(rels(kept), []string{".actor/alice"}) {
+		t.Errorf("push/main max=3: kept %v dropped %v", rels(kept), rels(dropped))
+	}
+}

@@ -1,7 +1,7 @@
 # Pipeline attributes: actor, target and teams in the grant
 
-Status: accepted 2026-09-30 (decisions logged as DEC-260930071252 …
-DEC-260930071456); implemented on `feat/pipeline-attributes`. Built as
+Status: accepted 2026-09-30 (decision entries proposed, not yet accepted:
+`2026-09-30-pipeline-attributes-decision-proposals.md`); implemented on `feat/pipeline-attributes`. Built as
 development images only — no release is cut until the payload facts below
 are confirmed on real pipelines (§8).
 

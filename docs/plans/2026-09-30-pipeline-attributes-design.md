@@ -37,8 +37,9 @@ Also: the promote endpoint requires push access (`server/router/api.go:122`,
 A promotion's `deploy_to` and `deploy_task` query parameters *do* reach the
 payload; its other query parameters become pipeline environment only and do
 not reach the payload's `variables` (the parent's `variables` are carried).
-`author` on non-manual events is forge-dependent (the pusher on
-Gitea-family forges, the commit author elsewhere) — never used as identity
+`author` on non-manual events is forge- and event-dependent (mostly the
+webhook sender; the PR poster or release author on some forges; the commit
+author's display name on GitLab `release`) — never used as identity
 outside `manual`.
 
 ## Design
@@ -145,9 +146,9 @@ invalid, actor empty, team lookup failed, policy dropped by the cap below),
 so a `deny` placed in an attribute policy is lifted by exactly the
 pipelines it was meant to stop. Narrowing is done by placing a secret
 *only* under the attribute or conjunction prefix that should reach it, not
-by denying it from a broader tier. Target
-segments are escaped individually with `identity.Esc`; `/` stays the
-hierarchy separator. `IRONBARK_MAX_POLICIES` (default 64) bounds the
+by denying it from a broader tier. Each target prefix is escaped whole
+(`esc(T)`, above), so in names and KV paths a target is always one
+segment and never a path-prefix of a deeper target. `IRONBARK_MAX_POLICIES` (default 64) bounds the
 request; when exceeded, names are dropped in a fixed order — team
 conjunctions deepest target first, then actor conjunctions deepest first,
 then team policies, then target prefixes deepest first — never P1/P2 or
@@ -164,8 +165,10 @@ begin with the mount path, so no policy written on `kv/…` — `*`, `+`,
 repo-root globs like the README's `kv/data/ci/acme/widgets/*`, or a
 careless `kv/*` — can match attribute data, whatever glob it uses. Only a
 policy that names the attribute mount reaches it, and those are exactly the
-attribute policies an admin chose to create. `IRONBARK_ATTR_MOUNT` equal to
-`IRONBARK_KV_MOUNT` is a startup error.
+attribute policies an admin chose to create. This holds only if neither
+mount contains the other, so after trimming slashes `IRONBARK_ATTR_MOUNT`
+equal to `IRONBARK_KV_MOUNT`, or either one a `/`-prefix of the other
+(`kv/attrs` under `kv`), is a startup error.
 
 With `A = <ATTR_MOUNT>` and the relative name `<rel>` from §3, each
 attribute policy `E/<rel>` has exactly one KV prefix:
@@ -179,13 +182,17 @@ attribute policy `E/<rel>` has exactly one KV prefix:
 <org>/<repo>/<event>/.target-team/<esc(T)>/<esc(team)>/<key>
 ```
 
-Because no attribute prefix is a path-prefix of another (§3), an attribute
-KV policy written in the README's style,
-`A/data/<org>/<repo>/<event>/<rel>/*`, grants exactly its own prefix's keys:
-a target-`a` policy does not reach `a%2fb`'s keys nor any conjunction under
-`a`, and an actor policy does not reach a conjunction naming that actor.
-(A policy that globs above a prefix, e.g. `A/data/<org>/<repo>/*`, grants
-everything below it — an admin's explicit choice, as with any KV policy.)
+The documented attribute policy grants one prefix's plain keys and nothing
+else: `read` on `A/data/<org>/<repo>/<event>/<rel>/+` and `list` on
+`A/metadata/<org>/<repo>/<event>/<rel>/` (`+` is one path segment; `*`
+crosses `/`). Because no attribute prefix is a path-prefix of another
+(§3), even a trailing-`*` form `…/<rel>/*` reaches no other attribute
+prefix — a target-`a` policy does not reach `a%2fb`'s keys nor any
+conjunction on `a`, and an actor policy does not reach a conjunction naming
+that actor; it additionally reaches only unswept keys an admin nests below
+`<rel>/`, which the returned `vault_token` could then read. (A policy that
+globs above a prefix, e.g. `A/data/<org>/<repo>/*`, grants everything
+below it — an admin's explicit choice, as with any KV policy.)
 
 The read set is still derived a priori — each prefix is LISTed
 independently (`A/metadata/…`), plain keys only, no descent, 403/404
@@ -215,8 +222,17 @@ ordinary tier cannot lift attribute-gated data into a pipeline without it.
 `B = <KV_PREFIX>/<org>/<repo>` in `KV_MOUNT`, unchanged and backwards
 compatible; this iteration moves nothing. Their isolation from each other
 relies on operators scoping each tier policy's paths to its own tier
-(README "Use exact paths under the tier"). Moving them into the attribute
+(README "Use exact paths under the tier") — and the README's own
+`pull_request` example breaks that rule: `kv/data/ci/acme/widgets/*` also
+reads the `push/main` tier. That is a documentation defect, not a layout
+one (a correctly scoped tier policy cannot cross tiers), so it is fixed in
+the README (§9), not by moving the tiers. Moving them into the attribute
 mount later is possible as a separate, opt-in change.
+
+**`ib` (CLIENT-SPEC) does not read the attribute mount in this
+iteration.** A local run has no signed payload to take a target or actor
+from, so attribute secrets are CI-only; CLIENT-SPEC's "same secrets as a
+CI run" is qualified to repo/event/branch tiers (§9).
 
 ### 5. Directives
 None. (A per-repo `.config` override of the target variable is impossible:
@@ -234,7 +250,7 @@ Additions to SPEC §7 (same conventions; `_FILE` only where marked):
 | Var | Default | Values / notes |
 |---|---|---|
 | `IRONBARK_ACTOR_FORGE` | `gitea` if `IRONBARK_FORGE_PROVIDER=gitea`, else `none` | `none` \| `gitea` \| `github` \| `bitbucket` (Bitbucket Cloud); anything else is a startup error; with provider `gitea` only `gitea` or `none` (§2) |
-| `IRONBARK_ATTR_MOUNT` | `ironbark` | KV v2 mount holding all attribute data (§4); must differ from `IRONBARK_KV_MOUNT` (startup error) |
+| `IRONBARK_ATTR_MOUNT` | `ironbark` | KV v2 mount holding all attribute data (§4); equal to, containing, or contained in `IRONBARK_KV_MOUNT` is a startup error |
 | `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | manual-run variable naming the target (§1) |
 | `IRONBARK_MAX_POLICIES` | `64` | integer ≥ 3 (P1, P2, actor are never dropped) (§3) |
 | `IRONBARK_FORGE_PROVIDER` | `none` | `none` \| `gitea` (Gitea, Forgejo) |
@@ -280,14 +296,16 @@ LISTs return 403/404 and are skipped.
     verbatim, plus `kv/data/ci/acme/widgets/*`, `kv/data/ci/*`, `kv/*` and
     `+`-segment variants — gets 403 on LIST and GET of every attribute
     path, and the sweep returns no attribute secret;
-  - a token holding one attribute policy written as
-    `<ATTR_MOUNT>/data/<org>/<repo>/<event>/<rel>/*` (plus its metadata
-    list) reads exactly that prefix's keys and gets 403 on every other
-    attribute prefix — the target-`a` policy on `a%2fb` and on both
-    conjunctions under `a`; the actor policy on conjunctions naming that
-    actor; a team policy on team conjunctions;
-  - `IRONBARK_ATTR_MOUNT` equal to `IRONBARK_KV_MOUNT` fails startup, and a
-    missing attribute mount leaves the sweep as today.
+  - a token holding one attribute policy, in both the documented `+` form
+    and a trailing-`*` form (§4), reads exactly that prefix's keys and gets
+    403 on every other attribute prefix — the target-`a` policy on `a%2fb`
+    and on both conjunctions on `a`; the actor policy on conjunctions
+    naming that actor; a team policy on team conjunctions;
+  - the corrected README tier examples (§9) grant each tier's own keys and
+    403 on every other tier's;
+  - `IRONBARK_ATTR_MOUNT` equal to, containing or contained in
+    `IRONBARK_KV_MOUNT` fails startup, and a missing attribute mount leaves
+    the sweep as today.
 
 ### 9. Documentation deltas
 - SPEC: §2.3 (§3 names), §2.4 and §4.1 (§4 mount, layout, read order),
@@ -295,7 +313,12 @@ LISTs return 403/404 and are skipped.
 - README: operator contract gains the attribute-mount prerequisite and one
   attribute policy example on that mount (generic `acme/widgets`), and
   states that attribute data is never under `kv/`, so tier policies on
-  `kv/` cannot reach it; configuration table gains the §7 rows.
+  `kv/` cannot reach it; configuration table gains the §7 rows. The
+  existing tier examples are corrected to per-tier paths (`+` for the key
+  segment, exact metadata LIST path) so the `pull_request` example no
+  longer reads the `push/main` tier (§4).
+- CLIENT-SPEC: "same secrets as a CI run" is qualified to repo/event/branch
+  tiers; `ib` does not read the attribute mount (§4).
 
 ## Out of scope
 - Recording who promoted a deployment (needs Woodpecker upstream).

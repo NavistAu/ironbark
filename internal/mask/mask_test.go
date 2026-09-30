@@ -99,22 +99,64 @@ func TestOverlappingValues(t *testing.T) {
 	}
 }
 
-// TestShortValueUntouched proves values shorter than 4 bytes are never
-// matched.
-func TestShortValueUntouched(t *testing.T) {
+// TestShortValuesAreMasked proves every value is masked, however short
+// (design §12.3): 1-, 2- and 3-byte values, and an empty one is ignored
+// rather than matching everywhere.
+func TestShortValuesAreMasked(t *testing.T) {
+	cases := []struct{ value, input, want string }{
+		{"a", "xaxax", "x" + placeholder + "x" + placeholder + "x"},
+		{"ab", "xabxab", "x" + placeholder + "x" + placeholder},
+		{"abc", "xxxabcxxx", "xxx" + placeholder + "xxx"},
+		{"", "untouched", "untouched"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			var dst bytes.Buffer
+			w := NewWriter(&dst, []string{tc.value})
+			if _, err := w.Write([]byte(tc.input)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+			if got := dst.String(); got != tc.want {
+				t.Errorf("dst = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShortValueSplitAcrossWrites proves a 3-byte value split over two
+// writes is still caught.
+func TestShortValueSplitAcrossWrites(t *testing.T) {
 	var dst bytes.Buffer
 	w := NewWriter(&dst, []string{"abc"})
+	for _, p := range []string{"xxab", "cxx"} {
+		if _, err := w.Write([]byte(p)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got, want := dst.String(), "xx"+placeholder+"xx"; got != want {
+		t.Errorf("dst = %q, want %q", got, want)
+	}
+}
 
-	input := "xxxabcxxx"
-	if _, err := w.Write([]byte(input)); err != nil {
+// TestShortAndLongOverlap proves a short value inside a longer one and next
+// to it merges cleanly, exposing no fragment of either.
+func TestShortAndLongOverlap(t *testing.T) {
+	var dst bytes.Buffer
+	w := NewWriter(&dst, []string{"ab", "abcdef", "ef"})
+	if _, err := w.Write([]byte("1abcdef2ef")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if err := w.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-
-	if got := dst.String(); got != input {
-		t.Errorf("dst = %q, want %q (untouched)", got, input)
+	if got, want := dst.String(), "1"+placeholder+"2"+placeholder; got != want {
+		t.Errorf("dst = %q, want %q", got, want)
 	}
 }
 

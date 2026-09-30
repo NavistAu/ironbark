@@ -13,31 +13,27 @@ import (
 // placeholder replaces every masked match.
 const placeholder = "<concealed by ib>"
 
-// minLen is the shortest value length masking ever considers (CLIENT-SPEC
-// §1.4: "every resolved value of length ≥ 4").
-const minLen = 4
-
-// Writer wraps dst, replacing every occurrence of any value (length ≥ 4)
+// Writer wraps dst, replacing every occurrence of any non-empty value
 // with placeholder before it reaches dst. It holds back up to maxLen-1
 // trailing bytes between Write calls so a value split across two writes
 // is still matched; Flush emits whatever is still held back.
 type Writer struct {
 	dst    io.Writer
-	values []string // filtered to len >= minLen, sorted longest first
+	values []string // non-empty, sorted longest first
 	maxLen int
 	buf    []byte
 	err    error
 }
 
 // NewWriter returns a Writer over dst that masks every occurrence of any
-// value in values whose length is at least 4 bytes; shorter values are
-// ignored entirely. Matching is longest-value-first, so a value that is
-// a substring of another is never left partially exposed.
+// non-empty value in values, however short (design §12.3). Matching is
+// longest-value-first, so a value that is a substring of another is never
+// left partially exposed.
 func NewWriter(dst io.Writer, values []string) *Writer {
 	filtered := make([]string, 0, len(values))
 	maxLen := 0
 	for _, v := range values {
-		if len(v) < minLen {
+		if v == "" {
 			continue
 		}
 		filtered = append(filtered, v)

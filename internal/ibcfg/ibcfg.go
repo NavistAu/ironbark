@@ -1,11 +1,13 @@
-// Package ibcfg loads ib's own env-var configuration (CLIENT-SPEC §5) —
-// distinct from internal/config, the broker's own surface, which
-// requires broker-only fields ib has no reason to supply. Load takes
-// getenv/home as injected values so tests run without touching the real
-// environment or filesystem; production wires os.Getenv and os.UserHomeDir.
+// Package ibcfg loads ib's own configuration (CLIENT-SPEC §5, design §12.1)
+// — distinct from internal/grantcfg, the broker's own surface, which
+// requires broker-only fields ib has no reason to supply. Settings come from
+// the environment, then from ~/.config/ib/config (a KEY=value file in
+// `ib run --env-file` syntax); the environment wins. Load takes getenv/home
+// as injected values so tests run without touching the real environment.
 package ibcfg
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,30 +15,67 @@ import (
 	"strings"
 
 	"github.com/hashicorp/vault/api"
+
+	"github.com/navistau/ironbark/internal/envfile"
+	"github.com/navistau/ironbark/internal/grantcfg"
 )
 
-// Config is ib's Vault connection and layout configuration (CLIENT-SPEC
-// §5).
+// Config is ib's OpenBao connection and grant-model configuration.
 type Config struct {
 	Addr  string
 	Token string
 	TLS   *api.TLSConfig
 
-	KVMount  string
-	KVPrefix string
-	Branch   string
+	// The four grant settings, under ironbark's own names (design §11.1).
+	DataPath  grantcfg.Template
+	EnvVar    string
+	TargetVar string
+	JWTRole   string
+
+	// Env and Target are IB_ENV and IB_TARGET; the --env and --target flags
+	// override them.
+	Env    string
+	Target string
 }
 
-// Load builds a Config from the environment (via getenv) and, if no
-// token env var is set, the token-helper file at <home>/.vault-token.
-// For address, token, and every TLS variable, a BAO_* var is checked
-// before its VAULT_* counterpart (CLIENT-SPEC §5.1). It returns an error
-// when no address is configured, or when no token is found anywhere
-// (env, then file) — that error's message says to run `ib auth`.
-func Load(getenv func(string) string, home string) (Config, error) {
-	var cfg Config
+// removed maps a variable that no longer exists to what replaces it.
+var removed = map[string]string{
+	"IB_KV_MOUNT":  "IRONBARK_DATA_PATH",
+	"IB_KV_PREFIX": "IRONBARK_DATA_PATH",
+	"IB_BRANCH":    "IB_ENV",
+}
 
-	cfg.Addr = pick(getenv, "BAO_ADDR", "VAULT_ADDR")
+// Load builds a Config. Tokens come only from the environment or the
+// token-helper file at <home>/.vault-token, never from the config file. For
+// address and every TLS variable a BAO_* var is checked before its VAULT_*
+// counterpart, environment before file (CLIENT-SPEC §5.1).
+func Load(getenv func(string) string, home string) (Config, error) {
+	file, err := readConfigFile(home)
+	if err != nil {
+		return Config{}, err
+	}
+	get := func(k string) string {
+		if v := getenv(k); v != "" {
+			return v
+		}
+		return file[k]
+	}
+	// pair is pick across both layers: the environment's BAO_*/VAULT_* pair
+	// first, then the file's.
+	pair := func(bao, vault string) string {
+		if v := pick(getenv, bao, vault); v != "" {
+			return v
+		}
+		return pick(func(k string) string { return file[k] }, bao, vault)
+	}
+	for name, repl := range removed {
+		if get(name) != "" {
+			return Config{}, fmt.Errorf("ibcfg: %s is no longer supported; use %s", name, repl)
+		}
+	}
+
+	var cfg Config
+	cfg.Addr = pair("BAO_ADDR", "VAULT_ADDR")
 	if cfg.Addr == "" {
 		return Config{}, fmt.Errorf("ibcfg: no Vault address set (BAO_ADDR or VAULT_ADDR)")
 	}
@@ -49,17 +88,49 @@ func Load(getenv func(string) string, home string) (Config, error) {
 		return Config{}, fmt.Errorf("ibcfg: no Vault token found (BAO_TOKEN, VAULT_TOKEN, or ~/.vault-token); run `ib auth`")
 	}
 
-	tls, err := loadTLS(getenv)
+	tls, err := loadTLS(pair)
 	if err != nil {
 		return Config{}, err
 	}
 	cfg.TLS = tls
 
-	cfg.KVMount = withDefault(getenv, "IB_KV_MOUNT", "kv")
-	cfg.KVPrefix = withDefault(getenv, "IB_KV_PREFIX", "ci")
-	cfg.Branch = getenv("IB_BRANCH")
+	dataPath := get("IRONBARK_DATA_PATH")
+	if dataPath == "" {
+		return Config{}, fmt.Errorf("ibcfg: IRONBARK_DATA_PATH is required (environment or ~/.config/ib/config)")
+	}
+	if cfg.DataPath, err = grantcfg.ParseTemplate(dataPath); err != nil {
+		return Config{}, fmt.Errorf("ibcfg: IRONBARK_DATA_PATH: %w", err)
+	}
+	cfg.EnvVar = withDefault(get, "IRONBARK_ENV_VAR", "DEPLOY_ENV")
+	cfg.TargetVar = withDefault(get, "IRONBARK_TARGET_VAR", "DEPLOY_TO")
+	cfg.JWTRole = withDefault(get, "IRONBARK_JWT_ROLE", "ci-{env}")
+	cfg.Env = get("IB_ENV")
+	cfg.Target = get("IB_TARGET")
 
 	return cfg, nil
+}
+
+// readConfigFile parses <home>/.config/ib/config. A missing file is an empty
+// config; a malformed one is an error naming its line.
+func readConfigFile(home string) (map[string]string, error) {
+	path := filepath.Join(home, ".config", "ib", "config")
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ibcfg: %w", err)
+	}
+	defer f.Close()
+	entries, err := envfile.Parse(f)
+	if err != nil {
+		return nil, fmt.Errorf("ibcfg: %s: %w", path, err)
+	}
+	m := make(map[string]string, len(entries))
+	for _, e := range entries {
+		m[e.Key] = e.Value
+	}
+	return m, nil
 }
 
 // pick returns getenv(bao) if set, else getenv(vault) — the BAO_*-before-
@@ -97,13 +168,13 @@ func readTokenFile(home string) string {
 // six variables is set — the underlying Vault API client already reads
 // VAULT_* TLS vars for free, so ib only needs to act when a BAO_* value
 // is present or when it must merge BAO_* and VAULT_* fields together.
-func loadTLS(getenv func(string) string) (*api.TLSConfig, error) {
-	caCert := pick(getenv, "BAO_CACERT", "VAULT_CACERT")
-	caPath := pick(getenv, "BAO_CAPATH", "VAULT_CAPATH")
-	clientCert := pick(getenv, "BAO_CLIENT_CERT", "VAULT_CLIENT_CERT")
-	clientKey := pick(getenv, "BAO_CLIENT_KEY", "VAULT_CLIENT_KEY")
-	tlsServerName := pick(getenv, "BAO_TLS_SERVER_NAME", "VAULT_TLS_SERVER_NAME")
-	skipVerify := pick(getenv, "BAO_SKIP_VERIFY", "VAULT_SKIP_VERIFY")
+func loadTLS(pair func(bao, vault string) string) (*api.TLSConfig, error) {
+	caCert := pair("BAO_CACERT", "VAULT_CACERT")
+	caPath := pair("BAO_CAPATH", "VAULT_CAPATH")
+	clientCert := pair("BAO_CLIENT_CERT", "VAULT_CLIENT_CERT")
+	clientKey := pair("BAO_CLIENT_KEY", "VAULT_CLIENT_KEY")
+	tlsServerName := pair("BAO_TLS_SERVER_NAME", "VAULT_TLS_SERVER_NAME")
+	skipVerify := pair("BAO_SKIP_VERIFY", "VAULT_SKIP_VERIFY")
 
 	if caCert == "" && caPath == "" && clientCert == "" && clientKey == "" && tlsServerName == "" && skipVerify == "" {
 		return nil, nil

@@ -13,9 +13,11 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -56,7 +58,18 @@ type Server struct {
 	parseOpts       identity.Options
 	metrics         *metrics
 	mux             *http.ServeMux
+
+	// unonboardedSeen dedupes the "request" audit line for unonboarded
+	// outcomes: the same pipeline is asked repeatedly and every ask ends
+	// the same way, so only the first is logged at info.
+	unonboardedMu   sync.Mutex
+	unonboardedSeen map[string]time.Time
 }
+
+const (
+	unonboardedDedupeWindow = 10 * time.Minute
+	unonboardedDedupeMax    = 4096
+)
 
 // New builds a Server. timeout is the SPEC §1.2 hard request timeout
 // (production: 30s); now is the clock wpsign.Verify checks freshness
@@ -73,6 +86,8 @@ func New(handler Handler, ready Ready, pubKey ed25519.PublicKey, freshnessWindow
 		logger:          logger,
 		parseOpts:       parseOpts,
 		metrics:         newMetrics(),
+
+		unonboardedSeen: map[string]time.Time{},
 	}
 
 	mux := http.NewServeMux()
@@ -238,7 +253,11 @@ func (s *Server) auditVerified(id identity.Identity, result broker.Result) {
 		s.metrics.mintWarningsTotal.Add(float64(n))
 	}
 
-	s.logger.Info("request",
+	level := slog.LevelInfo
+	if result.Outcome == broker.OutcomeUnonboarded && s.unonboardedRepeat(id) {
+		level = slog.LevelDebug
+	}
+	s.logger.Log(context.Background(), level, "request",
 		"org", id.Org,
 		"repo", id.Repo,
 		"event", id.Event,
@@ -268,6 +287,31 @@ func (s *Server) auditVerified(id identity.Identity, result broker.Result) {
 			"token_accessor", result.Audit.TokenAccessor,
 		)
 	}
+}
+
+// unonboardedRepeat reports whether an unonboarded outcome for this
+// pipeline was already seen within the dedupe window, recording it if not.
+// The metrics counter is unaffected: every request is still counted.
+func (s *Server) unonboardedRepeat(id identity.Identity) bool {
+	key := fmt.Sprintf("%s/%s/%d/%s/%s", id.Org, id.Repo, id.PipelineNumber, id.Event, id.Branch)
+	now := s.now()
+	s.unonboardedMu.Lock()
+	defer s.unonboardedMu.Unlock()
+	if t, ok := s.unonboardedSeen[key]; ok && now.Sub(t) < unonboardedDedupeWindow {
+		return true
+	}
+	if len(s.unonboardedSeen) >= unonboardedDedupeMax {
+		for k, t := range s.unonboardedSeen {
+			if now.Sub(t) >= unonboardedDedupeWindow {
+				delete(s.unonboardedSeen, k)
+			}
+		}
+		if len(s.unonboardedSeen) >= unonboardedDedupeMax {
+			clear(s.unonboardedSeen)
+		}
+	}
+	s.unonboardedSeen[key] = now
+	return false
 }
 
 // secretResponse is one SPEC §6 response-body secret entry. Images is

@@ -1,10 +1,12 @@
 package broker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -495,8 +497,46 @@ func TestWalkFailureRevokesAndReportsError(t *testing.T) {
 	if res.Outcome != status.Error || !onlyStatus(res) || !r.v.revoked("tok-ci-prod") {
 		t.Fatalf("res = %+v", res)
 	}
-	if got := statusLine(t, res); !strings.Contains(got, "reason=walk") {
+	if got := statusLine(t, res); !strings.Contains(got, "reason=view:prod/db") {
 		t.Errorf("status = %q", got)
+	}
+	if res.Audit.Entry != "prod/db" {
+		t.Errorf("audit entry = %q", res.Audit.Entry)
+	}
+}
+
+func TestOtherWalkFailureStaysReasonWalk(t *testing.T) {
+	r := newRig(t, "")
+	s := r.v.sessionFor("tok-ci-prod")
+	s.errs[repoMeta+"prod/"] = errors.New("boom")
+	res := r.b.Handle(context.Background(), payload(payloadOpts{event: "manual", branch: "main", author: "a", vars: map[string]string{"DEPLOY_ENV": "prod"}}))
+	if got := statusLine(t, res); !strings.Contains(got, "reason=walk") || res.Audit.Entry != "" {
+		t.Errorf("status = %q entry = %q", got, res.Audit.Entry)
+	}
+}
+
+func TestPayloadAttributesDebugLine(t *testing.T) {
+	r := newRig(t, "")
+	var buf bytes.Buffer
+	r.b.log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	r.b.Handle(context.Background(), payload(payloadOpts{event: "manual", branch: "main", sender: "sam", author: "alice", message: "SECRETMSG",
+		vars: map[string]string{"DEPLOY_ENV": "prod", "OTHER": "SECRETVAL"}}))
+	var line map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
+		t.Fatalf("log = %q: %v", buf.String(), err)
+	}
+	if line["msg"] != "payload attributes" || line["event"] != "manual" || line["sender"] != "sam" || line["author"] != "alice" ||
+		!reflect.DeepEqual(line["variable_names"], []any{"DEPLOY_ENV", "OTHER"}) {
+		t.Errorf("line = %v", line)
+	}
+	if strings.Contains(buf.String(), "SECRETVAL") || strings.Contains(buf.String(), "SECRETMSG") {
+		t.Errorf("a variable value or message reached the log: %s", buf.String())
+	}
+	buf.Reset()
+	r.b.log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	r.b.Handle(context.Background(), payload(payloadOpts{event: "manual", branch: "main", author: "alice"}))
+	if buf.Len() != 0 {
+		t.Errorf("emitted at info level: %s", buf.String())
 	}
 }
 

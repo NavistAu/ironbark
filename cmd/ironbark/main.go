@@ -115,6 +115,7 @@ func serve(getenv func(string) string, readFile func(string) ([]byte, error), st
 	}
 
 	var opts []broker.Option
+	opts = append(opts, broker.WithLogger(logger))
 	if cfg.ForgeProvider == "gitea" {
 		opts = append(opts, broker.WithLookups(forge.NewGitea(cfg.ForgeURL, cfg.ForgeToken, cfg.ForgeTimeout, nil)))
 	}

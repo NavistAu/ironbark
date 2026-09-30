@@ -10,6 +10,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -93,6 +94,7 @@ type Broker struct {
 	lk     forge.Lookups // nil: no forge
 	cfg    Config
 	now    func() time.Time
+	log    *slog.Logger
 }
 
 // Option configures a Broker.
@@ -101,12 +103,15 @@ type Option func(*Broker)
 // WithLookups enables the forge lookups (branch protection, teams).
 func WithLookups(lk forge.Lookups) Option { return func(b *Broker) { b.lk = lk } }
 
+// WithLogger sets the logger for the debug "payload attributes" line.
+func WithLogger(l *slog.Logger) Option { return func(b *Broker) { b.log = l } }
+
 // WithClock overrides the clock (tests).
 func WithClock(now func() time.Time) Option { return func(b *Broker) { b.now = now } }
 
 // New builds a Broker.
 func New(v Vault, s Signer, cfg Config, opts ...Option) *Broker {
-	b := &Broker{vault: v, signer: s, cfg: cfg, now: time.Now}
+	b := &Broker{vault: v, signer: s, cfg: cfg, now: time.Now, log: slog.New(slog.DiscardHandler)}
 	for _, o := range opts {
 		o(b)
 	}
@@ -122,6 +127,8 @@ func (b *Broker) Handle(ctx context.Context, body []byte) Result {
 		}
 		return Result{Status: 500, Outcome: status.Error, Err: err}
 	}
+
+	b.logPayloadAttributes(ctx, f)
 
 	a := status.Audit{
 		TS: b.now(), Org: f.Org, Repo: f.Repo, RepoKey: f.RepoKey, Event: f.Event,
@@ -253,6 +260,11 @@ func (b *Broker) Handle(ctx context.Context, body []byte) Result {
 	lv := levels.Levels(b.cfg.Data, org, repo, env, tgt.Escaped)
 	walkRes, err = walk.Walk(ctx, b.vault.Session(token), lv, walk.Options{})
 	if err != nil {
+		var ve *walk.ViewError
+		if errors.As(err, &ve) {
+			a.Entry = ve.Entry
+			return finish(status.Error, "view:"+ve.Entry, err)
+		}
 		return finish(status.Error, "walk", err)
 	}
 	walked = walkRes.Secrets
@@ -262,6 +274,21 @@ func (b *Broker) Handle(ctx context.Context, body []byte) Result {
 		}
 	}
 	return finish(status.OK, "", nil)
+}
+
+// logPayloadAttributes is the debug line behind the pipeline facts (design
+// §10): names only, never variable values or message text.
+func (b *Broker) logPayloadAttributes(ctx context.Context, f facts.Facts) {
+	if !b.log.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	names := make([]string, 0, len(f.Variables))
+	for k := range f.Variables {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	b.log.Debug("payload attributes", "event", f.Event, "sender", f.Sender, "author", f.Author,
+		"actor", f.Actor, "branch", f.Branch, "variable_names", names)
 }
 
 // login signs claims and logs in as role. On failure it returns the outcome

@@ -132,6 +132,7 @@ type Audit struct {
 	Role             string            `json:"role,omitempty"`
 	Sub              string            `json:"sub,omitempty"`
 	JTI              string            `json:"jti,omitempty"`
+	Entry            string            `json:"entry,omitempty"`  // entry whose view broke (design §9.3)
 	Levels           map[string]string `json:"levels,omitempty"` // label -> read | skipped_403 | skipped_404
 	SecretsReturned  []string          `json:"secrets_returned,omitempty"`
 	ImagesRelayed    []string          `json:"images_relayed,omitempty"`

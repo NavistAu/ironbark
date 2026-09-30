@@ -294,3 +294,32 @@ func TestWalkResolveHook(t *testing.T) {
 		}
 	}
 }
+
+// Design §9.3: a broken view fails the walk with an error that names the entry.
+func TestWalkBrokenViewNamesEntry(t *testing.T) {
+	var ve *ViewError
+	f := &tree{
+		lists: map[string]any{"m/r/": []string{"a"}, "m/r/prod/": []string{"db"}},
+		reads: map[string]any{"d/r/a": kv(map[string]any{"value": "A"}, nil), "d/r/prod/db": errors.New("502 quarantine")},
+	}
+	_, err := Walk(context.Background(), f, lvls()[:2], Options{})
+	if !errors.As(err, &ve) || ve.Entry != "prod/db" {
+		t.Fatalf("read 502: err = %v", err)
+	}
+	f.reads["d/r/prod/db"] = &vaultx.Secret{Data: map[string]json.RawMessage{"data": json.RawMessage(`"not an object"`)}}
+	if _, err = Walk(context.Background(), f, lvls()[:2], Options{}); !errors.As(err, &ve) || ve.Entry != "prod/db" {
+		t.Fatalf("undecodable view: err = %v", err)
+	}
+	// List and resolve failures are not view failures.
+	f.reads["d/r/prod/db"] = kv(nil, nil, "resolve", "eng/x")
+	_, err = Walk(context.Background(), f, lvls()[:2], Options{Resolve: func(context.Context, string) (*vaultx.Secret, error) {
+		return nil, errors.New("boom")
+	}})
+	if err == nil || errors.As(err, &ve) {
+		t.Fatalf("resolve error: err = %v", err)
+	}
+	f.lists["m/r/prod/"] = errors.New("boom")
+	if _, err = Walk(context.Background(), f, lvls()[:2], Options{}); err == nil || errors.As(err, &ve) {
+		t.Fatalf("list error: err = %v", err)
+	}
+}

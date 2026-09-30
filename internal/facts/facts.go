@@ -33,6 +33,7 @@ type Facts struct {
 	// no forge); "" when Branch is absent.
 	BranchProtected string
 	Actor           string
+	Sender, Author  string            // raw pipeline fields; debug logging only, never entitle
 	Pipeline        string            // pipeline number; audit only
 	Variables       map[string]string // manual, cron and deployment only
 }
@@ -106,6 +107,7 @@ func Build(ctx context.Context, body []byte, lk forge.Lookups, cfg Config) (Fact
 			f.Actor = pl.Sender
 		}
 	}
+	f.Sender, f.Author = pl.Sender, pl.Author
 	if len(f.Variables) == 0 {
 		f.Variables = nil
 	}

@@ -47,6 +47,17 @@ type Result struct {
 	Warnings      []string
 }
 
+// ViewError is a broken view: the read of a level entry failed (other than
+// 403/404, e.g. a voidstar quarantine 502) or its answer would not decode.
+// Entry is "<level>/<key>" (design §9.3).
+type ViewError struct {
+	Entry string
+	Err   error
+}
+
+func (e *ViewError) Error() string { return "walk: view " + e.Entry + ": " + e.Err.Error() }
+func (e *ViewError) Unwrap() error { return e.Err }
+
 // Resolver reads the engine path a resolve mapping points at (§7).
 type Resolver func(ctx context.Context, path string) (*vaultx.Secret, error)
 
@@ -93,11 +104,11 @@ func Walk(ctx context.Context, c Client, lv []levels.Level, opt Options) (Result
 				continue
 			}
 			if err != nil {
-				return res, fmt.Errorf("walk: read %s%s: %w", l.Data, key, err)
+				return res, &ViewError{Entry: entry, Err: fmt.Errorf("read %s%s: %w", l.Data, key, err)}
 			}
 			v, err := parseView(sec)
 			if err != nil {
-				return res, fmt.Errorf("walk: read %s%s: %w", l.Data, key, err)
+				return res, &ViewError{Entry: entry, Err: fmt.Errorf("read %s%s: %w", l.Data, key, err)}
 			}
 			if _, ok := v.meta[ignoredEventsKey]; ok {
 				res.IgnoredEvents = append(res.IgnoredEvents, entry)

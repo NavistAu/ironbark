@@ -6,7 +6,7 @@
 #
 # Confirmed image refs (pulled + verified locally, do not substitute):
 #   - hashicorp/vault:1.20            (docker.io)
-#   - ghcr.io/openbao/openbao:2.5.5   (ghcr.io, NOT docker.io/openbao/openbao)
+#   - ghcr.io/openbao/openbao:2.7.0   (ghcr.io, NOT docker.io/openbao/openbao)
 #   - postgres:16-alpine              (docker.io — see database-secrets-engine
 #     note below)
 #
@@ -53,14 +53,17 @@ services:
       timeout: 2s
       retries: 30
 
+  # OpenBao 2.7.0 with the voidstar plugin (built by build-voidstar.sh into
+  # ./plugins) for the grant-model tests. Dev mode, root token "root".
   openbao:
-    image: ghcr.io/openbao/openbao:2.5.5
+    image: ghcr.io/openbao/openbao:2.7.0
+    command: ["server", "-dev", "-dev-root-token-id=root", "-dev-listen-address=0.0.0.0:8200", "-dev-plugin-dir=/plugins"]
     environment:
-      BAO_DEV_ROOT_TOKEN_ID: root
-      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
       BAO_ADDR: http://127.0.0.1:8200
     cap_add:
       - IPC_LOCK
+    volumes:
+      - ./plugins:/plugins:ro
     ports:
       - "8300:8200"
     healthcheck:

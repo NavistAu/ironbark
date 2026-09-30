@@ -26,3 +26,4 @@ policy.local.*
 /.worktrees/
 /bin/
 /dist/
+/test/integration/plugins/

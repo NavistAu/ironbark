@@ -271,24 +271,49 @@ First match wins:
 2. The verified branch, by **level metadata**: when `branch_protected` is
    `"true"`, ironbark lists the directories under the repo level and reads
    each one's level metadata (§8.1). The environment is the level whose
-   `branches` includes the branch (`env_source=branch`).
+   `branches` matches the branch (`env_source=branch`, matching below).
    - No level claims the branch: no environment, the repo level only. Not an
      error; most branches are not environments.
-   - Two or more levels claim it: a configuration error (proposed, §17.3).
-     ironbark returns only `ironbark_status` (`outcome=config_error`, naming the levels) and
-     the job decides (§9). It never picks one.
+   - Two or more levels claim it: a configuration error. ironbark returns
+     no secrets, only `ironbark_status` (`outcome=config_error`, naming the
+     levels), and the job decides (§9). It never picks one.
 3. None. The walk reads the repo level only.
 
-`branches` is a comma-separated list of exact branch names, as the forge
-spells them (`main`, `release/1`), compared bytewise with the pushed branch.
-A level without `branches` is an environment that only `DEPLOY_ENV` selects.
+`branches` is a comma-separated list of branch patterns. A pattern is a
+Go `path.Match` pattern: `*` matches any run of characters except `/`, `?`
+one character except `/`, `[a-z]` a class, and `\` escapes the next
+character. Anything else is literal, so `main` and `release/1` are exact
+names and `release/*` matches `release/1` but not `release/1/rc` or
+`release`. `**` is not supported; it behaves as `*` and never crosses `/`,
+so a nested family needs one pattern per depth (`release/*,release/*/*`).
+Git refuses `*`, `?`, `[` and `\` in branch names, so no branch name ever
+needs escaping.
+
+Matching is done on the verified branch name exactly as the forge spells it,
+without `refs/heads/`, bytewise: never case-folded, never normalised
+(`Release/1` does not match `release/*`). Entries are split on `,` and
+trimmed of surrounding spaces; empty entries are ignored. ironbark tests
+the branch against every pattern of every level under the repo level; a
+level claims the branch when any of its patterns matches. One level
+claiming it selects that environment. Two or more levels claiming it,
+whether through exact names, globs or a mix (`main` at one level,
+`m*` at another), is the conflict above; nothing is resolved by
+specificity or order. A malformed pattern (for example an unclosed `[`)
+matches nothing, and the level is recorded like a level name outside the
+grammar. The claim is by pattern, not by the levels' names; it does not
+consult the role.
+
+A level without `branches` is an environment that only `DEPLOY_ENV`
+selects.
 
 Rule 2 needs a token to read level metadata before the environment is known.
 ironbark therefore logs in to the no-environment role (`ci`) first, reads
 the level metadata with that token, and then either keeps that token (no
 level claims the branch) or revokes it and logs in to the environment's role
 (§5.5). The discovery login only ever reads metadata; it never delivers a
-secret alongside an environment login. (Open question 1, §17.)
+secret alongside an environment login. This is accepted as compatible with
+one login role per run: the run holds one token at a time and delivers
+secrets from exactly one login.
 
 An environment name must match `^[a-z0-9][a-z0-9_-]{0,62}$`, which keeps it
 valid as a role-name suffix and as a path segment without escaping.
@@ -331,8 +356,8 @@ is escaped on its own (`esc()`, §5.3) and **each segment is a level**:
 `srv.talos/svc/gear` walks `prod/srv.talos/`, `prod/srv.talos/svc/` and
 `prod/srv.talos/svc/gear/`, deepest wins, so a nested target inherits its
 parents' secrets. An explicit value violating the grammar, `.` and `..` segments included,
-is refused like an invalid environment (`.`/`..` by ruling; the rest
-proposed, §17.4): no secrets, only `ironbark_status` (`outcome=invalid`,
+is refused like an invalid environment (`.`/`..` by ruling, the rest
+accepted): no secrets, only `ironbark_status` (`outcome=invalid`,
 `target_invalid`) saying why, never a silent walk that stops at the
 environment. This is in addition to the job's own kit guard, which stays.
 The refusal is not a rewrite: ironbark does not normalise or escape a dot
@@ -399,7 +424,8 @@ hex). OpenBao refuses to build an ACL whose template substitution contains
 not folded (`Main` → `%4dain`), so case variants of a protected branch stay
 distinct.
 
-`bound_claims` compare escaped values: a role binding `release/*` branches
+`bound_claims` compare escaped values (unlike level `branches`, §4.5, which
+match raw branch names): a role binding `release/*` branches
 writes the glob `release%2f*`. `repo_key` is built from escaped parts, so
 its `/` and `#` are always the separators.
 
@@ -885,7 +911,7 @@ ironbark/v1 outcome=refused env=prod env_source=variable target=web role=ci-prod
 | `ok` | walk ran (levels may have been skipped; `skipped=` lists them) | the walk's |
 | `refused` | OpenBao refused the login (role missing or claims not met) | none |
 | `invalid` | an explicit selector failed its grammar | none |
-| `config_error` | two environment levels claim the branch (`levels=` names them; proposed, §17.3) | none |
+| `config_error` | two environment levels claim the branch (`levels=` names them) | none |
 | `error` | anything else: OpenBao or voidstar unreachable, JWT rejected, a per-login assertion, a broken view (`reason=` says which) | none |
 
 Values never appear in it, only names, levels and reasons. A pipeline
@@ -913,7 +939,7 @@ Two Woodpecker behaviours bound this:
   exact value in logs. The `ironbark/v1` prefix makes the whole line
   unlikely to occur elsewhere; printing it needs a transform (for example
   `echo "$STATUS" | tr ' ' '\n'`). Confirmed against Woodpecker v3.18.0: a
-  secret extension cannot mark a secret as unmasked (§17 item 2).
+  secret extension cannot mark a secret as unmasked (§17 item 1).
 
 ### 9.3 Fail closed everywhere
 
@@ -1089,7 +1115,8 @@ nothing to print.
 - **Gate granularity is the environment.** Per-target gates are literal
   group policies (§6.4).
 - **A branch strategy is written twice**: as the level's `branches`
-  (selector) and the role's `branch` binding (gate). If they disagree, the
+  (selector, raw glob) and the role's `branch` binding (gate, escaped glob).
+If they disagree, the
   result is less, never more: a level claiming a branch its role refuses →
   `refused`; a role admitting a branch no level claims → pushes get the
   repo level, `DEPLOY_ENV` still works. The IaC should write both from one
@@ -1248,16 +1275,15 @@ Resolved by the operator's rulings and folded in above: refused login
 level metadata, §4.5), one role per run (§5.5), overrides (documented, no
 lint or logging, §8.2), image and event pins (§6.2, §8.4), `vault_token`
 (§8.5), repo rename (§6.2), target inheritance (§4.6), entity clean-up
-(§20), `changed_files` (removed, §4.6). Group-alias case (case-insensitive at OpenBao,
-moot after `esc()`, §4.4) and `%xx` view names (accepted, §16) are closed by the lab. Still open:
+(§20), `changed_files` (removed, §4.6), the discovery login (two logins on
+a push, §4.5), two claimants (no secrets, status only, §4.5), invalid
+explicit target (no secrets, status only, §4.6) and the `branches` syntax
+(globs, exact names being the plain case, §4.5). Group-alias case
+(case-insensitive at OpenBao, moot after `esc()`, §4.4) and `%xx` view names
+(accepted, §16) are closed by the lab. Nothing is open. One question was
+answered from source:
 
-1. **The discovery login.** An environment chosen by level metadata needs a
-   token before the environment is known, so such pushes log in twice: to
-   `ci` for metadata, then to the environment role (§4.5). Is that
-   compatible with "one login role per run", or should level metadata be
-   read another way (for example a separate discovery role granting only
-   metadata reads)?
-2. **`ironbark_status` masking. Answered (Woodpecker v3.18.0 source): no,
+1. **`ironbark_status` masking. Answered (Woodpecker v3.18.0 source): no,
    it cannot be unmasked.** An extension secret carries only `name`,
    `value`, `images`, `events` and `note`, with no mask flag, and the
    pipeline compiler and agent treat every returned secret value as a
@@ -1267,13 +1293,6 @@ moot after `esc()`, §4.4) and `%xx` view names (accepted, §16) are closed by t
    because it holds only names and reasons; to see it, print it through a
    transform (`echo "$STATUS" | tr ' ' '\n'`), since masking replaces the
    exact full value (§9.2). No other channel is needed.
-3. **Two claimants.** Proposed: status only, no secrets, like a refusal
-   (§4.5). The alternative is the repo level plus `config_error`.
-4. **Invalid explicit target.** Proposed: status only, like an invalid
-   environment (§4.6). The earlier draft walked to the environment level
-   and recorded `target_invalid`.
-5. **`branches` syntax.** Exact names only (proposed), or globs such as
-   `release/*`?
 
 ## 18. Testing
 
@@ -1284,6 +1303,12 @@ moot after `esc()`, §4.4) and `%xx` view names (accepted, §16) are closed by t
   every `IRONBARK_ACTOR_FORGE` value.
 - Environment selection: explicit variable; level metadata with no, one and
   two claimants; unreadable metadata; a level name outside the grammar.
+- Branch patterns (§4.5): exact name; `release/*` matching `release/1` and
+  not `release/1/rc`, `release` or `Release/1`; `?` and `[a-z]`; `**` acting
+  as `*`; comma list with spaces and empty entries; a malformed pattern
+  matching nothing and recorded; one level claiming through a glob; two
+  levels claiming one branch through glob and exact name (conflict, both
+  named, no order or specificity).
 - Target cascade: every rule, precedence, the grammar (`.` and `..`
   segments refused with `target_invalid`, `srv.talos` and `.hidden`
   accepted, `a/../b` and a trailing `/.` refused), trailer parsing (none, one, two), per-segment escaping.
@@ -1406,6 +1431,9 @@ New cases the model needs:
 | G14 | resolve mapping to a dynamic engine | lease owned by the pipeline token, revoked with it |
 | G15 | repo L recreated under the same name (new forge id) | login refused by `repo_key`, status only |
 | G16 | manual `DEPLOY_TO=.` or `svc.alpha/..` (M20 is the kit-guard variant) | `invalid`, status only naming `target_invalid`; no discovery, no secrets; `srv.alpha` style dotted names still walk |
+| G17 | push to protected `release/1` with `release/*` in a level's `branches` | that level is the environment (`env_source=branch`); the role decides entry |
+| G18 | push to protected `release/1/rc` and `Release/1` against `release/*` | no claim, repo level only, `ok` |
+| G19 | level `a` (`release/*`) and level `b` (`release/1`), push to protected `release/1` | `config_error` naming `a` and `b`, status only |
 
 Lab check (factual, not a decision): voidstar accepts `%xx` in view names
 (`part%41`) and lists them unchanged. Group-alias case is settled (§4.4).
@@ -1451,8 +1479,9 @@ Not recorded. Each would become one entry if accepted.
    promote field, a trailer or level metadata. OpenBao refuses what the
    facts do not allow.
 5. **Environments are named levels whose metadata lists the branches they
-   serve.** `DEPLOY_ENV` names a level directly; an unclaimed branch gets
-   the repo level; two claimants are a configuration error.
+   serve**, as exact names or globs (`release/*`). `DEPLOY_ENV` names a
+   level directly; an unclaimed branch gets the repo level; two claimants
+   are a configuration error.
 6. **Target cascade:** manual variable, promote `deploy_to`, `Deploy-To:`
    trailer, none. No `changed_files`. One target per pipeline; each segment
    is a level, so nested targets inherit.

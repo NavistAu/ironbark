@@ -1,11 +1,12 @@
 // Package httpapi is ironbark's HTTP surface (SPEC §1.1): it wires
-// signature verification (internal/wpsign), payload parsing
-// (internal/identity), and request orchestration (internal/broker)
-// together behind the routes Woodpecker and operators call, and owns the
-// SPEC §8.1 audit line and Prometheus metrics.
+// signature verification (internal/wpsign) and request orchestration
+// (internal/broker) together behind the routes Woodpecker and operators
+// call, and owns the audit line (design §10) and Prometheus metrics.
 //
-// Steps 1-4 of SPEC §1.2 (read body, verify signature, parse payload,
-// extract identity) live here; Handler.Handle runs steps 5-10.
+// Reading the body and verifying the signature live here; Handler.Handle
+// runs the rest (design §9.1). An invalid signature is 401 with nothing;
+// every verified request is 200 with a secrets list that includes
+// ironbark_status, except a payload that yields no identity (400).
 package httpapi
 
 import (
@@ -13,36 +14,31 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"sync"
+	"sort"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/navistau/ironbark/internal/broker"
-	"github.com/navistau/ironbark/internal/identity"
-	"github.com/navistau/ironbark/internal/vaultx"
+	"github.com/navistau/ironbark/internal/status"
 	"github.com/navistau/ironbark/internal/wpsign"
 )
 
 // maxBodyBytes is the SPEC §1.2 step 1 request-body ceiling.
 const maxBodyBytes = 1 << 20 // 1 MiB
 
-// Handler is everything the POST / route needs from the broker (SPEC §1.2
-// steps 5-10); *broker.Broker satisfies it. A narrow interface so tests
-// can mock it without a real Vault.
+// Handler is everything the POST / route needs from the broker; the body is
+// the verified payload. *broker.Broker satisfies it. A narrow interface so
+// tests can mock it without a real OpenBao.
 type Handler interface {
-	Handle(ctx context.Context, id identity.Identity) broker.Result
+	Handle(ctx context.Context, body []byte) broker.Result
 }
 
-// Ready reports readiness (SPEC §1.1 /readyz): Vault session valid AND
-// the startup canary passed. In production this is *vaultx.Client.Healthy
-// passed directly as a method value — it already has this signature, so
-// no adapter is needed.
+// Ready reports readiness (/readyz): OpenBao reachable and unsealed.
 type Ready func() bool
 
 // Server is ironbark's HTTP surface. Construct with New; it implements
@@ -55,27 +51,14 @@ type Server struct {
 	timeout         time.Duration
 	now             func() time.Time
 	logger          *slog.Logger
-	parseOpts       identity.Options
 	metrics         *metrics
 	mux             *http.ServeMux
-
-	// unonboardedSeen dedupes the "request" audit line for unonboarded
-	// outcomes: the same pipeline is asked repeatedly and every ask ends
-	// the same way, so only the first is logged at info.
-	unonboardedMu   sync.Mutex
-	unonboardedSeen map[string]time.Time
 }
-
-const (
-	unonboardedDedupeWindow = 10 * time.Minute
-	unonboardedDedupeMax    = 4096
-)
 
 // New builds a Server. timeout is the SPEC §1.2 hard request timeout
 // (production: 30s); now is the clock wpsign.Verify checks freshness
-// against (production: time.Now), both injectable for tests. parseOpts
-// configures pipeline-attribute extraction (identity.Parse).
-func New(handler Handler, ready Ready, pubKey ed25519.PublicKey, freshnessWindow, timeout time.Duration, now func() time.Time, logger *slog.Logger, parseOpts identity.Options) *Server {
+// against (production: time.Now), both injectable for tests.
+func New(handler Handler, ready Ready, pubKey ed25519.PublicKey, freshnessWindow, timeout time.Duration, now func() time.Time, logger *slog.Logger) *Server {
 	s := &Server{
 		handler:         handler,
 		ready:           ready,
@@ -84,10 +67,7 @@ func New(handler Handler, ready Ready, pubKey ed25519.PublicKey, freshnessWindow
 		timeout:         timeout,
 		now:             now,
 		logger:          logger,
-		parseOpts:       parseOpts,
 		metrics:         newMetrics(),
-
-		unonboardedSeen: map[string]time.Time{},
 	}
 
 	mux := http.NewServeMux()
@@ -103,15 +83,6 @@ func New(handler Handler, ready Ready, pubKey ed25519.PublicKey, freshnessWindow
 // ServeHTTP satisfies http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
-}
-
-// VaultMetrics returns this Server's metrics as a vaultx.Metrics, for
-// Task 12's cmd wiring to pass into vaultx.New(cfg, vaultx.WithMetrics(...))
-// when it constructs the *vaultx.Client — the seam that lets
-// ironbark_sweep_reads_total / ironbark_deref_reads_total actually
-// increment (SPEC §1.1 /metrics).
-func (s *Server) VaultMetrics() vaultx.Metrics {
-	return s.metrics
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -151,72 +122,54 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 3-4: parse and extract identity. The signature is verified, so
-	// the payload is trusted enough to parse; a malformed body past a
-	// valid signature is a client bug, not an attack — logged minimally,
-	// not the full verified-audit shape (there is no identity to attach
-	// it to).
-	id, err := identity.Parse(body, s.parseOpts)
-	if err != nil {
-		s.metrics.requestsTotal.WithLabelValues("error").Inc()
-		s.logger.Info("identity parse failed", "remote_addr", r.RemoteAddr, "outcome", "error")
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	s.logPayloadAttributes(r.Context(), id)
-
 	// SPEC §1.2 hard request timeout: wraps the broker call so a stuck
 	// broker cannot hold the connection past `timeout`, regardless of
 	// whether Handler.Handle itself respects context cancellation.
 	ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
 	defer cancel()
-	result := s.callHandler(ctx, id)
+	result := s.callHandler(ctx, body)
 
-	s.renderResult(w, result)
-	s.auditVerified(id, result)
-}
-
-// logPayloadAttributes emits the debug-level "payload attributes" line
-// (D8): the raw payload fields behind the pipeline attributes, for
-// verifying the payload facts on real pipelines. Variable names only,
-// never variable values.
-func (s *Server) logPayloadAttributes(ctx context.Context, id identity.Identity) {
-	if !s.logger.Enabled(ctx, slog.LevelDebug) {
+	if result.Status == http.StatusBadRequest {
+		s.metrics.requestsTotal.WithLabelValues("error").Inc()
+		s.logger.Info("payload rejected", "remote_addr", r.RemoteAddr, "outcome", "error", "error", errString(result.Err))
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	p := id.Payload
-	s.logger.Debug("payload attributes",
-		"event", id.Event,
-		"sender", p.Sender,
-		"author", p.Author,
-		"deploy_to", p.DeployTo,
-		"deploy_task", p.DeployTask,
-		"variable_names", p.VariableNames,
-		"reviewed_by", p.ReviewedBy,
-		"actor", id.Actor,
-		"target", id.Target,
-		"target_invalid", id.TargetInvalid,
-		"code_author", id.CodeAuthor,
-	)
+	s.renderResult(w, result)
+	s.auditVerified(result)
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // callHandler runs handler.Handle in a goroutine and races it against
 // ctx's deadline, so a broker that ignores context cancellation still
-// yields a 502 at the injected timeout (SPEC §1.2: "hard request timeout
-// 30s -> 502"). On timeout the goroutine is abandoned; it is expected to
-// observe ctx.Done() itself and unwind (the production broker does, via
-// the ctx it threads through every Vault call).
-func (s *Server) callHandler(ctx context.Context, id identity.Identity) broker.Result {
+// yields an answer at the injected timeout. The answer is still a 200
+// carrying ironbark_status (outcome=error): design §9.2, ironbark never
+// fails a pipeline. On timeout the goroutine is abandoned; the broker
+// observes ctx.Done() itself, unwinds and revokes its token.
+func (s *Server) callHandler(ctx context.Context, body []byte) broker.Result {
 	resultCh := make(chan broker.Result, 1)
 	go func() {
-		resultCh <- s.handler.Handle(ctx, id)
+		resultCh <- s.handler.Handle(ctx, body)
 	}()
 
 	select {
 	case result := <-resultCh:
 		return result
 	case <-ctx.Done():
-		return broker.Result{Status: http.StatusBadGateway, Outcome: broker.OutcomeError}
+		line := status.Status{Outcome: status.Error, Reason: "timeout"}.String()
+		return broker.Result{
+			Status:  http.StatusOK,
+			Outcome: status.Error,
+			Secrets: []broker.Secret{{Name: status.StatusName, Value: line}},
+			Err:     ctx.Err(),
+			Audit:   status.Audit{TS: s.now(), Outcome: status.Error},
+		}
 	}
 }
 
@@ -240,86 +193,50 @@ func (s *Server) logRefusedSignature(r *http.Request, verr error) {
 	)
 }
 
-// auditVerified emits the SPEC §8.1 verified-request audit line and, when
-// Result.RevokeFailed is set, an additional error-level line (SPEC §3.4).
-// Runs for every outcome once the signature and payload have been
-// accepted, including a timeout-synthesized 502.
-func (s *Server) auditVerified(id identity.Identity, result broker.Result) {
+// auditVerified emits the verified-request audit line (design §10), every
+// field of status.Audit as a top-level attribute, plus error lines for a
+// config or availability fault, walk warnings and a failed revoke (SPEC
+// §3.4: TTL is the backstop).
+func (s *Server) auditVerified(result broker.Result) {
 	s.metrics.requestsTotal.WithLabelValues(string(result.Outcome)).Inc()
 	if result.Audit.TokenAccessor != "" {
 		s.metrics.mintsTotal.Inc()
 	}
-	if n := len(result.Audit.PolicyWarnings); n > 0 {
-		s.metrics.mintWarningsTotal.Add(float64(n))
+	a := result.Audit
+	var fields map[string]any
+	if raw, err := a.JSON(); err == nil {
+		_ = json.Unmarshal(raw, &fields)
 	}
-
-	level := slog.LevelInfo
-	if result.Outcome == broker.OutcomeUnonboarded && s.unonboardedRepeat(id) {
-		level = slog.LevelDebug
+	delete(fields, "ts")
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
 	}
-	s.logger.Log(context.Background(), level, "request",
-		"org", id.Org,
-		"repo", id.Repo,
-		"event", id.Event,
-		"branch", id.Branch,
-		"pipeline_number", id.PipelineNumber,
-		"policies_requested", result.Audit.PoliciesRequested,
-		"policy_warnings", result.Audit.PolicyWarnings,
-		"secrets_returned", result.Audit.SecretNames,
-		"token_accessor", result.Audit.TokenAccessor,
-		"token_ttl", result.Audit.TokenTTL,
-		"actor", id.Actor,
-		"target", id.Target,
-		"target_invalid", id.TargetInvalid,
-		"code_author", id.CodeAuthor,
-		"teams", result.Audit.Teams,
-		"teams_error", result.Audit.TeamsError,
-		"policies_dropped", result.Audit.PoliciesDropped,
-		"policies_requested_count", len(result.Audit.PoliciesRequested),
-		"policy_warnings_count", len(result.Audit.PolicyWarnings),
-		"outcome", string(result.Outcome),
-	)
+	sort.Strings(keys)
+	args := make([]any, 0, 2*len(keys))
+	for _, k := range keys {
+		args = append(args, k, fields[k])
+	}
+	s.logger.Info("request", args...)
 
+	for _, w := range result.Warnings {
+		s.logger.Warn("walk", "repo_key", a.RepoKey, "warning", w)
+	}
+	if result.Outcome == status.Error && result.Err != nil {
+		s.logger.Error("request failed", "repo_key", a.RepoKey, "role", a.Role, "error", result.Err.Error())
+	}
 	if result.RevokeFailed {
-		s.logger.Error("best-effort token revoke failed after a non-200 response (SPEC §3.4); TTL is the backstop",
-			"org", id.Org,
-			"repo", id.Repo,
-			"token_accessor", result.Audit.TokenAccessor,
-		)
+		s.logger.Error("best-effort token revoke failed after a status-only response (SPEC §3.4); TTL is the backstop",
+			"repo_key", a.RepoKey, "token_accessor", a.TokenAccessor)
 	}
 }
 
-// unonboardedRepeat reports whether an unonboarded outcome for this
-// pipeline was already seen within the dedupe window, recording it if not.
-// The metrics counter is unaffected: every request is still counted.
-func (s *Server) unonboardedRepeat(id identity.Identity) bool {
-	key := fmt.Sprintf("%s/%s/%d/%s/%s", id.Org, id.Repo, id.PipelineNumber, id.Event, id.Branch)
-	now := s.now()
-	s.unonboardedMu.Lock()
-	defer s.unonboardedMu.Unlock()
-	if t, ok := s.unonboardedSeen[key]; ok && now.Sub(t) < unonboardedDedupeWindow {
-		return true
-	}
-	if len(s.unonboardedSeen) >= unonboardedDedupeMax {
-		for k, t := range s.unonboardedSeen {
-			if now.Sub(t) >= unonboardedDedupeWindow {
-				delete(s.unonboardedSeen, k)
-			}
-		}
-		if len(s.unonboardedSeen) >= unonboardedDedupeMax {
-			clear(s.unonboardedSeen)
-		}
-	}
-	s.unonboardedSeen[key] = now
-	return false
-}
-
-// secretResponse is one SPEC §6 response-body secret entry. Images is
-// omitted (not `null`/`[]`) when the secret carries no image pin.
+// secretResponse is one response-body secret entry in Woodpecker's
+// secret-extension shape. No events field is emitted (event pins are role
+// bound_claims); Images is omitted when the secret carries no image pin.
 type secretResponse struct {
 	Name   string   `json:"name"`
 	Value  string   `json:"value"`
-	Events []string `json:"events"`
 	Images []string `json:"images,omitempty"`
 }
 
@@ -327,65 +244,32 @@ type responseBody struct {
 	Secrets []secretResponse `json:"secrets"`
 }
 
-// renderResult writes result per SPEC §6: 200 with the JSON secrets body,
-// 204 empty, or 502 empty. Handler.Handle (broker.Broker.Handle) never
-// returns any other status.
+// renderResult writes the 200 JSON secrets body. Handler.Handle returns
+// only 200 (rendered here) or 400 (handled by the caller).
 func (s *Server) renderResult(w http.ResponseWriter, result broker.Result) {
-	switch result.Status {
-	case http.StatusOK:
-		secrets := make([]secretResponse, 0, len(result.Secrets))
-		for _, sec := range result.Secrets {
-			secrets = append(secrets, secretResponse{
-				Name:   sec.Name,
-				Value:  sec.Value,
-				Events: sec.Events,
-				Images: sec.Images,
-			})
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(responseBody{Secrets: secrets}); err != nil {
-			// The 200 status is already committed (WriteHeader above), so
-			// this cannot become a different status code — this is
-			// observability only, for a truncated/failed response body
-			// (e.g. the client disconnected mid-write).
-			s.logger.Debug("failed to encode response body", "error", err)
-		}
-	case http.StatusNoContent:
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		w.WriteHeader(http.StatusBadGateway)
+	secrets := make([]secretResponse, 0, len(result.Secrets))
+	for _, sec := range result.Secrets {
+		secrets = append(secrets, secretResponse{Name: sec.Name, Value: sec.Value, Images: sec.Images})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(responseBody{Secrets: secrets}); err != nil {
+		// The 200 status is already committed, so this is observability
+		// only (e.g. the client disconnected mid-write).
+		s.logger.Debug("failed to encode response body", "error", err)
 	}
 }
 
-// metrics is ironbark's Prometheus counter set (SPEC §1.1 /metrics,
-// §10). Each Server owns its own registry (rather than the global
-// DefaultRegisterer) so multiple Servers — one per test — can coexist
-// without a double-registration panic.
-//
-// metrics also implements vaultx.Metrics (IncSweepRead/IncDerefRead
-// below), adapting sweepReadsTotal/derefReadsTotal onto the interface
-// vaultx.Client accepts via vaultx.WithMetrics. Server.VaultMetrics()
-// exposes this adapter; Task 12's cmd wiring is what actually threads it
-// into vaultx.New, since that's where the *vaultx.Client gets
-// constructed — this package only makes the adapter exist and be
-// reachable.
+// metrics is ironbark's Prometheus counter set (SPEC §1.1 /metrics). Each
+// Server owns its own registry (rather than the global DefaultRegisterer)
+// so multiple Servers — one per test — can coexist without a
+// double-registration panic.
 type metrics struct {
 	registry               *prometheus.Registry
 	requestsTotal          *prometheus.CounterVec
 	signatureFailuresTotal *prometheus.CounterVec
 	mintsTotal             prometheus.Counter
-	mintWarningsTotal      prometheus.Counter
-	sweepReadsTotal        prometheus.Counter // incremented via IncSweepRead, below.
-	derefReadsTotal        prometheus.Counter // incremented via IncDerefRead, below.
 }
-
-// IncSweepRead and IncDerefRead satisfy vaultx.Metrics, so *metrics can be
-// passed (via Server.VaultMetrics) straight to vaultx.WithMetrics.
-func (m *metrics) IncSweepRead() { m.sweepReadsTotal.Inc() }
-func (m *metrics) IncDerefRead() { m.derefReadsTotal.Inc() }
-
-var _ vaultx.Metrics = (*metrics)(nil)
 
 func newMetrics() *metrics {
 	reg := prometheus.NewRegistry()
@@ -394,7 +278,7 @@ func newMetrics() *metrics {
 		registry: reg,
 		requestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ironbark_requests_total",
-			Help: "Total POST / requests by outcome (ok|unonboarded|identity_mismatch|error|refused_signature).",
+			Help: "Total POST / requests by outcome (ok|refused|invalid|config_error|error|refused_signature).",
 		}, []string{"outcome"}),
 		signatureFailuresTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ironbark_signature_failures_total",
@@ -402,30 +286,11 @@ func newMetrics() *metrics {
 		}, []string{"reason"}),
 		mintsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ironbark_mints_total",
-			Help: "Total Vault tokens minted.",
-		}),
-		mintWarningsTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "ironbark_mint_warnings_total",
-			Help: "Total nonexistent-policy warnings observed across mints.",
-		}),
-		sweepReadsTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "ironbark_sweep_reads_total",
-			Help: "Total per-entry KV reads performed during sweep.",
-		}),
-		derefReadsTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "ironbark_deref_reads_total",
-			Help: "Total dynamic-engine dereference reads.",
+			Help: "Total OpenBao tokens obtained by JWT login (the final login of each request).",
 		}),
 	}
 
-	reg.MustRegister(
-		m.requestsTotal,
-		m.signatureFailuresTotal,
-		m.mintsTotal,
-		m.mintWarningsTotal,
-		m.sweepReadsTotal,
-		m.derefReadsTotal,
-	)
+	reg.MustRegister(m.requestsTotal, m.signatureFailuresTotal, m.mintsTotal)
 
 	return m
 }

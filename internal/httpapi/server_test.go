@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +18,7 @@ import (
 	"time"
 
 	"github.com/navistau/ironbark/internal/broker"
-	"github.com/navistau/ironbark/internal/identity"
+	"github.com/navistau/ironbark/internal/status"
 	"github.com/navistau/ironbark/internal/wpsign/wpsigntest"
 )
 
@@ -84,17 +85,17 @@ func signedRequest(t *testing.T, key ed25519.PrivateKey, body []byte) *http.Requ
 // --- mock broker.Handler ---
 
 type mockHandler struct {
-	mu     sync.Mutex
-	result broker.Result
-	block  chan struct{} // if non-nil, Handle blocks on this channel (or ctx.Done())
-	gotID  identity.Identity
-	called bool
+	mu      sync.Mutex
+	result  broker.Result
+	block   chan struct{} // if non-nil, Handle blocks on this channel (or ctx.Done())
+	gotBody []byte
+	called  bool
 }
 
-func (m *mockHandler) Handle(ctx context.Context, id identity.Identity) broker.Result {
+func (m *mockHandler) Handle(ctx context.Context, body []byte) broker.Result {
 	m.mu.Lock()
 	m.called = true
-	m.gotID = id
+	m.gotBody = body
 	block := m.block
 	m.mu.Unlock()
 
@@ -107,10 +108,10 @@ func (m *mockHandler) Handle(ctx context.Context, id identity.Identity) broker.R
 	return m.result
 }
 
-func (m *mockHandler) wasCalledWith() identity.Identity {
+func (m *mockHandler) wasCalledWith() []byte {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.gotID
+	return m.gotBody
 }
 
 // --- captured slog logger: a JSON handler writing into a locked buffer so
@@ -167,23 +168,25 @@ func newTestServer(t *testing.T, h Handler, ready Ready, pub ed25519.PublicKey, 
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
-	s := New(h, ready, pub, testWindow, timeout, time.Now, logger, identity.Options{})
+	s := New(h, ready, pub, testWindow, timeout, time.Now, logger)
 	return s, buf
 }
 
 func okResult() broker.Result {
 	return broker.Result{
 		Status:  200,
-		Outcome: broker.OutcomeOK,
+		Outcome: status.OK,
 		Secrets: []broker.Secret{
-			{Name: "api_key", Value: "s3cr3t", Events: []string{"push"}},
-			{Name: "vault_token", Value: "tok-abc", Events: []string{"push"}, Images: []string{"golang:1.24"}},
+			{Name: "api_key", Value: "s3cr3t"},
+			{Name: "vault_token", Value: "tok-abc", Images: []string{"golang:1.24"}},
+			{Name: status.StatusName, Value: "ironbark/v1 outcome=ok"},
 		},
-		Audit: broker.AuditFields{
-			PoliciesRequested: []string{"ci/acme/widget/push"},
-			SecretNames:       []string{"api_key", "vault_token"},
-			TokenAccessor:     "accessor-abc",
-			TokenTTL:          900 * time.Second,
+		Audit: status.Audit{
+			Org: "acme", Repo: "widget", RepoKey: "acme/widget#forge-1", Event: "push", Env: "prod",
+			SecretsReturned: []string{"api_key", "vault_token"},
+			TokenAccessor:   "accessor-abc",
+			TokenTTL:        900,
+			Outcome:         status.OK,
 		},
 	}
 }
@@ -222,7 +225,7 @@ func TestUnsignedPOST_401AndRefusedSignatureAudit(t *testing.T) {
 	}
 	// SPEC §8.1: the refused-signature line carries NOTHING derived from
 	// the payload.
-	forbidden := []string{"org", "repo", "event", "branch", "pipeline_number", "policies_requested", "secrets_returned", "token_accessor", "token_ttl"}
+	forbidden := []string{"org", "repo", "repo_key", "event", "branch", "secrets_returned", "token_accessor", "token_ttl"}
 	for _, k := range forbidden {
 		if _, ok := line[k]; ok {
 			t.Errorf("refused-signature log line leaked payload-derived field %q: %v", k, line)
@@ -251,15 +254,17 @@ func TestSignedValidPOST_200RendersBrokerResultAndAudit(t *testing.T) {
 		Secrets []struct {
 			Name   string   `json:"name"`
 			Value  string   `json:"value"`
-			Events []string `json:"events"`
 			Images []string `json:"images"`
 		} `json:"secrets"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal response: %v (body=%s)", err, rec.Body.String())
 	}
-	if len(body.Secrets) != 2 {
-		t.Fatalf("secrets = %+v, want 2 entries", body.Secrets)
+	if len(body.Secrets) != 3 {
+		t.Fatalf("secrets = %+v, want 3 entries", body.Secrets)
+	}
+	if strings.Contains(rec.Body.String(), `"events"`) {
+		t.Errorf("no events field may be emitted: %s", rec.Body.String())
 	}
 
 	var gotAPIKey, gotToken bool
@@ -275,7 +280,7 @@ func TestSignedValidPOST_200RendersBrokerResultAndAudit(t *testing.T) {
 				t.Errorf("api_key images = %v, want none", sec.Images)
 			}
 			// images must be OMITTED (not present as null/[]) when empty.
-			if strings.Contains(rawBody, `"name":"api_key","value":"s3cr3t","events":["push"],"images"`) {
+			if strings.Contains(rawBody, `"name":"api_key","value":"s3cr3t","images"`) {
 				t.Errorf("api_key entry includes an images key, want omitted: %s", rawBody)
 			}
 		case "vault_token":
@@ -288,13 +293,12 @@ func TestSignedValidPOST_200RendersBrokerResultAndAudit(t *testing.T) {
 			}
 		}
 	}
-	if !gotAPIKey || !gotToken {
+	if !gotAPIKey || !gotToken || !strings.Contains(rawBody, `"name":"ironbark_status"`) {
 		t.Fatalf("secrets = %+v, missing expected entries", body.Secrets)
 	}
 
-	gotID := mh.wasCalledWith()
-	if gotID.Org != "acme" || gotID.Repo != "widget" || gotID.Event != "push" || gotID.Branch != "main" {
-		t.Errorf("Handle called with identity %+v, want org=acme repo=widget event=push branch=main", gotID)
+	if got := mh.wasCalledWith(); !bytes.Equal(got, testBody) {
+		t.Errorf("Handle called with %q, want the verified body", got)
 	}
 
 	lines := buf.logLines(t)
@@ -308,42 +312,51 @@ func TestSignedValidPOST_200RendersBrokerResultAndAudit(t *testing.T) {
 	if line["org"] != "acme" || line["repo"] != "widget" {
 		t.Errorf("org/repo = %v/%v, want acme/widget", line["org"], line["repo"])
 	}
-	if line["token_accessor"] != "accessor-abc" {
-		t.Errorf("token_accessor = %v, want accessor-abc", line["token_accessor"])
+	if line["token_accessor"] != "accessor-abc" || line["repo_key"] != "acme/widget#forge-1" || line["env"] != "prod" {
+		t.Errorf("audit fields = %v", line)
+	}
+	if _, ok := line["ts"]; ok {
+		t.Errorf("ts is the log time, not a field: %v", line)
+	}
+	for _, v := range line {
+		if v == "s3cr3t" || v == "tok-abc" {
+			t.Errorf("secret value in the audit line: %v", line)
+		}
 	}
 }
 
-func TestResult204_EmptyBody(t *testing.T) {
+func TestStatusOnly_200(t *testing.T) {
 	priv, pub := loadTestKeys(t)
-	mh := &mockHandler{result: broker.Result{Status: 204, Outcome: broker.OutcomeUnonboarded}}
+	res := broker.Result{Status: 200, Outcome: status.Refused, Secrets: []broker.Secret{{Name: status.StatusName, Value: "ironbark/v1 outcome=refused"}}}
+	mh := &mockHandler{result: res}
 	s, _ := newTestServer(t, mh, nil, pub, 0)
 
-	req := signedRequest(t, priv, testBody)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
+	s.ServeHTTP(rec, signedRequest(t, priv, testBody))
 
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (no 204/502 paths)", rec.Code)
 	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("body = %q, want empty", rec.Body.String())
+	want := `{"secrets":[{"name":"ironbark_status","value":"ironbark/v1 outcome=refused"}]}`
+	if got := strings.TrimSpace(rec.Body.String()); got != want {
+		t.Errorf("body = %s, want %s", got, want)
 	}
 }
 
-func TestResult502_EmptyBody(t *testing.T) {
+func TestErrorOutcomeLogsErrorLine(t *testing.T) {
 	priv, pub := loadTestKeys(t)
-	mh := &mockHandler{result: broker.Result{Status: 502, Outcome: broker.OutcomeError}}
-	s, _ := newTestServer(t, mh, nil, pub, 0)
-
-	req := signedRequest(t, priv, testBody)
-	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", rec.Code)
+	res := broker.Result{Status: 200, Outcome: status.Error, Err: errors.New("jwt rejected"),
+		Secrets: []broker.Secret{{Name: status.StatusName, Value: "ironbark/v1 outcome=error"}}}
+	s, buf := newTestServer(t, &mockHandler{result: res}, nil, pub, 0)
+	s.ServeHTTP(httptest.NewRecorder(), signedRequest(t, priv, testBody))
+	var saw bool
+	for _, l := range buf.logLines(t) {
+		if l["level"] == "ERROR" && l["error"] == "jwt rejected" {
+			saw = true
+		}
 	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("body = %q, want empty", rec.Body.String())
+	if !saw {
+		t.Errorf("no ERROR line carrying the fault: %s", buf.String())
 	}
 }
 
@@ -432,7 +445,7 @@ func TestBodyOverLimit_413(t *testing.T) {
 	}
 }
 
-func TestTimeout_502WithErrorAudit(t *testing.T) {
+func TestTimeout_200StatusOnlyWithErrorAudit(t *testing.T) {
 	priv, pub := loadTestKeys(t)
 	mh := &mockHandler{
 		result: okResult(),
@@ -440,66 +453,57 @@ func TestTimeout_502WithErrorAudit(t *testing.T) {
 	}
 	s, buf := newTestServer(t, mh, nil, pub, 50*time.Millisecond)
 
-	req := signedRequest(t, priv, testBody)
 	rec := httptest.NewRecorder()
-
 	start := time.Now()
-	s.ServeHTTP(rec, req)
+	s.ServeHTTP(rec, signedRequest(t, priv, testBody))
 	elapsed := time.Since(start)
 
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with a status line", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "outcome=error") || !strings.Contains(rec.Body.String(), "reason=timeout") || strings.Contains(rec.Body.String(), "s3cr3t") {
+		t.Errorf("body = %s", rec.Body.String())
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("ServeHTTP took %v, want to return promptly after the injected 50ms timeout", elapsed)
 	}
-
-	lines := buf.logLines(t)
-	if len(lines) != 1 {
-		t.Fatalf("got %d log lines, want 1: %v", len(lines), lines)
+	var sawInfo bool
+	for _, l := range buf.logLines(t) {
+		if l["msg"] == "request" && l["outcome"] == "error" {
+			sawInfo = true
+		}
 	}
-	if lines[0]["outcome"] != "error" {
-		t.Errorf("outcome = %v, want error", lines[0]["outcome"])
+	if !sawInfo {
+		t.Errorf("no error-outcome audit line: %s", buf.String())
 	}
 }
 
 func TestRevokeFailed_LogsErrorLine(t *testing.T) {
 	priv, pub := loadTestKeys(t)
 	res := broker.Result{
-		Status:       502,
-		Outcome:      broker.OutcomeError,
+		Status:       200,
+		Outcome:      status.OK,
 		RevokeFailed: true,
-		Audit:        broker.AuditFields{TokenAccessor: "accessor-doomed"},
+		Secrets:      []broker.Secret{{Name: status.StatusName, Value: "ironbark/v1 outcome=ok"}},
+		Audit:        status.Audit{TokenAccessor: "accessor-doomed"},
 	}
-	mh := &mockHandler{result: res}
-	s, buf := newTestServer(t, mh, nil, pub, 0)
+	s, buf := newTestServer(t, &mockHandler{result: res}, nil, pub, 0)
+	s.ServeHTTP(httptest.NewRecorder(), signedRequest(t, priv, testBody))
 
-	req := signedRequest(t, priv, testBody)
-	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", rec.Code)
-	}
-
-	lines := buf.logLines(t)
 	var sawError bool
-	for _, l := range lines {
+	for _, l := range buf.logLines(t) {
 		if l["level"] == "ERROR" {
 			sawError = true
 		}
 	}
 	if !sawError {
-		t.Fatalf("no ERROR-level log line found for RevokeFailed=true: %v", lines)
-	}
-	if len(lines) < 2 {
-		t.Fatalf("got %d log lines, want the verified audit line plus a revoke-failure error line: %v", len(lines), lines)
+		t.Fatalf("no ERROR-level log line found for RevokeFailed=true: %s", buf.String())
 	}
 }
 
 func TestMalformedPayload_400(t *testing.T) {
 	priv, pub := loadTestKeys(t)
-	mh := &mockHandler{result: okResult()}
+	mh := &mockHandler{result: broker.Result{Status: 400, Outcome: status.Error, Err: errors.New("malformed")}}
 	s, _ := newTestServer(t, mh, nil, pub, 0)
 
 	malformed := []byte(`not json`)
@@ -510,9 +514,7 @@ func TestMalformedPayload_400(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	if mh.called {
-		t.Errorf("broker Handler was called, want no call on malformed payload")
-	}
+
 }
 
 func TestMetrics_SignatureFailureIncrement(t *testing.T) {

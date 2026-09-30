@@ -7,9 +7,12 @@ of the form "SPEC §n" point there.
 ## 0. Scope
 
 `ib` gives a local run — an operator's shell, an agent, a script — the same
-secrets a CI run on the same repository and environment would get, read
-from the same KV layout (SPEC §2.4) the broker sweeps, subject to the
-divergences named in §6. One layout, one resolution algorithm, two
+repo/event/branch-tier secrets a CI run on the same repository and
+environment would get, read from the same KV layout (SPEC §2.4) the broker
+sweeps, subject to the divergences named in §6. `ib` never reads the
+attribute mount (SPEC §2.4, `IRONBARK_ATTR_MOUNT`): a local run has no
+signed payload to take a target or actor from, so attribute secrets are
+CI-only. One layout, one resolution algorithm, two
 callers: the broker for CI, `ib` for everything else.
 
 In scope: resolving secrets for a local checkout; delivering them as a

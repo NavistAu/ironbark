@@ -24,6 +24,13 @@ type fakeKV struct {
 	calls     map[string]int
 	lastToken map[string]string
 	responses map[string]fakeKVResp
+	reqs      []fakeKVReq // every request, in arrival order
+}
+
+// fakeKVReq records one request's decoded path and raw request URI.
+type fakeKVReq struct {
+	path string
+	uri  string
 }
 
 type fakeKVResp struct {
@@ -43,6 +50,7 @@ func (f *fakeKV) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.calls[r.URL.Path]++
+		f.reqs = append(f.reqs, fakeKVReq{path: r.URL.Path, uri: r.RequestURI})
 		f.lastToken[r.URL.Path] = r.Header.Get("X-Vault-Token")
 		resp, ok := f.responses[r.URL.Path]
 		f.mu.Unlock()

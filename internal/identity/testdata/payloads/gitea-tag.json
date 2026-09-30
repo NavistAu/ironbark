@@ -1,0 +1,26 @@
+{
+  "repo": {
+    "id": 7,
+    "forge_remote_id": "42",
+    "owner": "acme",
+    "name": "widgets",
+    "full_name": "acme/widgets",
+    "clone_url": "https://forge.example.test/acme/widgets.git"
+  },
+  "pipeline": {
+    "id": 1001,
+    "number": 17,
+    "author": "alice",
+    "parent": 0,
+    "event": "tag",
+    "deploy_to": "",
+    "deploy_task": "",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "branch": "main",
+    "ref": "refs/tags/v1.0.0",
+    "sender": "alice",
+    "author_email": "alice@example.test",
+    "reviewed_by": "",
+    "reviewed": 0
+  }
+}

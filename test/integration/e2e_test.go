@@ -38,6 +38,7 @@ import (
 
 	"github.com/navistau/ironbark/internal/broker"
 	"github.com/navistau/ironbark/internal/httpapi"
+	"github.com/navistau/ironbark/internal/identity"
 	"github.com/navistau/ironbark/internal/vaultx"
 	"github.com/navistau/ironbark/internal/wpsign/wpsigntest"
 )
@@ -107,6 +108,13 @@ type e2eStack struct {
 // http.Handler on a real listener.
 func newE2EStack(t *testing.T, ctx context.Context, addr string, fx Fixture, pub ed25519.PublicKey) *e2eStack {
 	t.Helper()
+	return newE2EStackWith(t, ctx, addr, fx, pub, "", identity.Options{})
+}
+
+// newE2EStackWith is newE2EStack with an attribute mount and payload parse
+// options (pipeline attributes).
+func newE2EStackWith(t *testing.T, ctx context.Context, addr string, fx Fixture, pub ed25519.PublicKey, attrMount string, parseOpts identity.Options) *e2eStack {
+	t.Helper()
 
 	vc, err := vaultx.New(vaultx.Config{
 		Addr:      addr,
@@ -115,6 +123,7 @@ func newE2EStack(t *testing.T, ctx context.Context, addr string, fx Fixture, pub
 		TokenRole: "ci",
 		KVMount:   "kv",
 		KVPrefix:  "ci",
+		AttrMount: attrMount,
 	})
 	if err != nil {
 		t.Fatalf("vaultx.New: %v", err)
@@ -132,7 +141,7 @@ func newE2EStack(t *testing.T, ctx context.Context, addr string, fx Fixture, pub
 	brk := broker.New(vc, "ci", addr)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httpapi.New(brk, vc.Healthy, pub, e2eFreshnessWindow, e2eRequestTimeout, time.Now, logger)
+	srv := httpapi.New(brk, vc.Healthy, pub, e2eFreshnessWindow, e2eRequestTimeout, time.Now, logger, parseOpts)
 	vc.SetMetrics(srv.VaultMetrics())
 
 	ts := httptest.NewServer(srv)

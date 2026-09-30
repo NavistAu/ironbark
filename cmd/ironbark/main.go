@@ -19,7 +19,9 @@ import (
 
 	"github.com/navistau/ironbark/internal/broker"
 	"github.com/navistau/ironbark/internal/config"
+	"github.com/navistau/ironbark/internal/forge"
 	"github.com/navistau/ironbark/internal/httpapi"
+	"github.com/navistau/ironbark/internal/identity"
 	"github.com/navistau/ironbark/internal/vaultx"
 )
 
@@ -46,7 +48,8 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
-	logger.Info("ironbark starting", "version", version)
+	logger.Info("ironbark starting", "version", version,
+		"attr_mount", cfg.AttrMount, "actor_forge", cfg.ActorForge, "forge_provider", cfg.ForgeProvider)
 
 	vc, err := vaultx.New(vaultx.Config{
 		Addr:      cfg.VaultAddr,
@@ -55,15 +58,21 @@ func main() {
 		TokenRole: cfg.TokenRole,
 		KVMount:   cfg.KVMount,
 		KVPrefix:  cfg.KVPrefix,
+		AttrMount: cfg.AttrMount,
 	}, vaultx.WithLogger(logger))
 	if err != nil {
 		logger.Error("vaultx client init failed", "error", err)
 		os.Exit(1)
 	}
 
-	brk := broker.New(vc, cfg.PolicyPrefix, cfg.AdvertiseVaultAddr)
+	brokerOpts := []broker.Option{broker.WithMaxPolicies(cfg.MaxPolicies)}
+	if cfg.ForgeProvider == "gitea" {
+		brokerOpts = append(brokerOpts, broker.WithTeamResolver(forge.NewGitea(cfg.ForgeURL, cfg.ForgeToken, cfg.ForgeTimeout, nil)))
+	}
+	brk := broker.New(vc, cfg.PolicyPrefix, cfg.AdvertiseVaultAddr, brokerOpts...)
 
-	srv := httpapi.New(brk, vc.Healthy, cfg.WoodpeckerPublicKey, cfg.FreshnessWindow, requestTimeout, time.Now, logger)
+	parseOpts := identity.Options{ActorForge: cfg.ActorForge, TargetVar: cfg.TargetVar}
+	srv := httpapi.New(brk, vc.Healthy, cfg.WoodpeckerPublicKey, cfg.FreshnessWindow, requestTimeout, time.Now, logger, parseOpts)
 
 	// The metrics/vaultx-Client construction cycle (httpapi's registry
 	// wants the broker, which wants the Client; the Client wants the

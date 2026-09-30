@@ -98,3 +98,34 @@ func FuzzEscInjective(f *testing.F) {
 		}
 	})
 }
+
+// attrSegments are the reserved attribute path segments (design §3).
+var attrSegments = map[string]bool{
+	".target": true, ".actor": true, ".team": true, ".target-actor": true, ".target-team": true,
+}
+
+func TestAttrSegmentsNeverEscOutput(t *testing.T) {
+	for _, in := range []string{
+		"target", "actor", "team", "target-actor", "target-team",
+		".target", ".actor", ".team", ".target-actor", ".target-team",
+	} {
+		if out := Esc(in); attrSegments[out] {
+			t.Errorf("Esc(%q) = %q, a reserved attribute segment", in, out)
+		}
+	}
+	if got := Esc(".target"); got != "%2etarget" {
+		t.Errorf("Esc(.target) = %q, want %%2etarget", got)
+	}
+}
+
+func FuzzEscNeverAttrSegment(f *testing.F) {
+	for s := range attrSegments {
+		f.Add(s)
+		f.Add(s[1:])
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if out := Esc(s); attrSegments[out] {
+			t.Fatalf("Esc(%q) = %q, a reserved attribute segment", s, out)
+		}
+	})
+}

@@ -1,385 +1,303 @@
-// Package broker orchestrates SPEC §1.2 steps 5–10: derive policies, mint
-// a pipeline token, read the repo's .identity/.config directives, sweep
-// its secrets, and build the response — enforcing the SPEC §3.4
-// revocation-by-outcome invariant (every non-200 response revokes the
-// minted token; a 200 never does) structurally: Handle's named return
-// is inspected by a single deferred func registered right after the mint
-// succeeds, so every return statement below that point — however it's
-// shaped, including a bare `Result{...}` literal — is revoke-checked;
-// there is no per-branch call to forget.
-//
-// Steps 1–4 (read body, verify signature, parse payload, extract
-// identity) belong to internal/httpapi (Task 11), which calls Handle
-// with the already-verified, already-parsed identity.
+// Package broker orchestrates one verified request (design §9.1 steps 2-9):
+// facts, selectors, the optional discovery login, the team lookup, the
+// signed-JWT login and its assertions, the walk, and the response. It never
+// fails a pipeline: every verified request yields a response carrying
+// ironbark_status (§9.2), and a response carrying nothing else revokes the
+// token the request obtained (§9.1). Steps 1-2's signature check belongs to
+// internal/httpapi. The broker never logs; it returns what httpapi logs.
 package broker
 
 import (
 	"context"
 	"errors"
-	"regexp"
-	"strconv"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/navistau/ironbark/internal/facts"
 	"github.com/navistau/ironbark/internal/forge"
+	"github.com/navistau/ironbark/internal/grantcfg"
 	"github.com/navistau/ironbark/internal/identity"
-	"github.com/navistau/ironbark/internal/policy"
+	"github.com/navistau/ironbark/internal/jwtsign"
+	"github.com/navistau/ironbark/internal/levels"
+	"github.com/navistau/ironbark/internal/selector"
+	"github.com/navistau/ironbark/internal/status"
 	"github.com/navistau/ironbark/internal/vaultx"
+	"github.com/navistau/ironbark/internal/walk"
 )
 
-// Vault is everything the broker needs from a Vault/OpenBao client;
-// *vaultx.Client satisfies it (asserted below). Mocked in tests.
+// Vault is what the broker needs from OpenBao. ironbark holds no OpenBao
+// credential: the signed JWT is the only thing it presents.
 type Vault interface {
-	CanaryOK() bool
-	Base(id identity.Identity) string
-	MintToken(ctx context.Context, policies []string, meta map[string]string, displayName string) (vaultx.Mint, error)
+	LoginJWT(ctx context.Context, mount, role, jwt string) (vaultx.Token, error)
 	RevokeSelf(ctx context.Context, token string) error
-	ReadIdentity(ctx context.Context, token, base string) (*string, error)
-	ReadConfig(ctx context.Context, token, base string) (map[string]string, error)
-	SweepWithAttributes(ctx context.Context, token string, id identity.Identity, branchful bool, attrPaths []string) (vaultx.SweepResult, error)
+	// Session binds a token for the walk.
+	Session(token string) walk.Client
 }
 
-var _ Vault = (*vaultx.Client)(nil)
+// Signer signs the JWT claims; *jwtsign.Signer satisfies it.
+type Signer interface {
+	Sign(claims map[string]any) (string, error)
+}
 
-// revokeCleanupTimeout bounds the best-effort revoke issued from Handle's
-// deferred cleanup (see below). It is deliberately NOT derived from the
-// request context: a request that reaches this defer via httpapi's 30s
-// timeout has an already-cancelled ctx, and cleanup/compensation work must
-// be decoupled from the operation whose failure triggered it — otherwise
-// the exact case where revocation matters most (Vault too slow to respond
-// in time) can never revoke, silently falling back to TTL expiry instead.
+var _ Signer = (*jwtsign.Signer)(nil)
+
+type connVault struct{ *vaultx.Conn }
+
+func (c connVault) Session(token string) walk.Client { return c.As(token) }
+
+// FromConn adapts a *vaultx.Conn to Vault.
+func FromConn(c *vaultx.Conn) Vault { return connVault{c} }
+
+// revokeCleanupTimeout bounds a best-effort revoke. It is not derived from
+// the request context: a request that timed out has a cancelled ctx, and
+// that is exactly when revocation matters.
 const revokeCleanupTimeout = 5 * time.Second
 
-// Secret is one entry of the SPEC §6 response body.
+// Config is what the broker takes from ironbark's configuration.
+type Config struct {
+	Data               grantcfg.Template
+	EnvVar, TargetVar  string
+	JWTRole, JWTMount  string
+	AdvertiseVaultAddr string
+	ActorForge         string
+}
+
+// Secret is one entry of the response body.
 type Secret struct {
 	Name   string
 	Value  string
-	Events []string
 	Images []string
 }
 
-// Outcome classifies a Handle result for the SPEC §8.1 audit line.
-type Outcome string
-
-const (
-	OutcomeOK               Outcome = "ok"
-	OutcomeUnonboarded      Outcome = "unonboarded"
-	OutcomeIdentityMismatch Outcome = "identity_mismatch"
-	OutcomeError            Outcome = "error"
-)
-
-// AuditFields carries everything httpapi (Task 11) needs to render the
-// SPEC §8.1 verified-request audit line. The broker never logs itself.
-type AuditFields struct {
-	PoliciesRequested []string
-	PolicyWarnings    []string
-	SecretNames       []string
-	TokenAccessor     string
-	TokenTTL          time.Duration
-
-	// Pipeline attributes (design §6).
-	Teams           []string // resolved teams, verbatim
-	TeamsError      string   // team lookup failure; the lookup failed closed
-	PoliciesDropped []string // full names dropped by IRONBARK_MAX_POLICIES, in drop order
-}
-
-// Result is Handle's complete outcome: the HTTP status httpapi should
-// send, the secrets to serialize (only meaningful on Status 200), the
-// classified Outcome, and the audit fields.
+// Result is Handle's outcome. Status is 200 for every verified request, or
+// 400 when the payload cannot yield an identity. Secrets always include
+// ironbark_status on a 200.
 type Result struct {
-	Status  int
-	Secrets []Secret
-	Outcome Outcome
-	// RevokeFailed is true when this Result's status was non-200 and the
-	// resulting best-effort RevokeSelf call itself errored (SPEC §3.4:
-	// revoke failures are logged, TTL is the backstop). The broker never
-	// logs; httpapi (Task 11) is expected to log this bool when set.
+	Status       int
+	Secrets      []Secret
+	Outcome      status.Outcome
 	RevokeFailed bool
-	Audit        AuditFields
+	// Err is the fault behind an error outcome, for httpapi's error log
+	// (a config or availability fault, not a policy outcome).
+	Err error
+	// Warnings are walk warnings and ignored-pin notes, for the log.
+	Warnings []string
+	Audit    status.Audit
 }
 
-// Broker holds the config Handle needs beyond the per-request identity.
+// Broker holds what Handle needs beyond the payload.
 type Broker struct {
-	vault              Vault
-	policyPrefix       string
-	advertiseVaultAddr string
-	teams              forge.TeamResolver // nil: no team lookup
-	maxPolicies        int
+	vault  Vault
+	signer Signer
+	lk     forge.Lookups // nil: no forge
+	cfg    Config
+	now    func() time.Time
 }
 
-// Option configures optional Broker behavior at construction (New).
+// Option configures a Broker.
 type Option func(*Broker)
 
-// WithTeamResolver enables team lookup for requests with an actor.
-func WithTeamResolver(r forge.TeamResolver) Option {
-	return func(b *Broker) { b.teams = r }
-}
+// WithLookups enables the forge lookups (branch protection, teams).
+func WithLookups(lk forge.Lookups) Option { return func(b *Broker) { b.lk = lk } }
 
-// WithMaxPolicies sets IRONBARK_MAX_POLICIES (default 64).
-func WithMaxPolicies(n int) Option {
-	return func(b *Broker) { b.maxPolicies = n }
-}
+// WithClock overrides the clock (tests).
+func WithClock(now func() time.Time) Option { return func(b *Broker) { b.now = now } }
 
-// New builds a Broker. policyPrefix is POLICY_PREFIX (SPEC §2.3);
-// advertiseVaultAddr is ADVERTISE_VAULT_ADDR (SPEC §7), empty meaning the
-// vault_addr pin is never added.
-func New(v Vault, policyPrefix, advertiseVaultAddr string, opts ...Option) *Broker {
-	b := &Broker{vault: v, policyPrefix: policyPrefix, advertiseVaultAddr: advertiseVaultAddr, maxPolicies: 64}
+// New builds a Broker.
+func New(v Vault, s Signer, cfg Config, opts ...Option) *Broker {
+	b := &Broker{vault: v, signer: s, cfg: cfg, now: time.Now}
 	for _, o := range opts {
 		o(b)
 	}
 	return b
 }
 
-// warningPolicyRe matches Vault/OpenBao's per-mint nonexistent-policy
-// warning (R§7.1's Go format string is `Policy %q does not exist`, %q
-// producing double-quoted output). The leading word is matched
-// case-insensitively: this codebase's own vaultx fixtures use a
-// lowercase "policy" (internal/vaultx/mint_test.go, client_test.go)
-// while the SPEC/DESIGN/research docs quote the capitalized form from
-// Vault's source — matching either avoids coupling un-onboarded
-// detection to a casing choice neither this package nor its tests
-// control.
-var warningPolicyRe = regexp.MustCompile(`(?i)^policy\s+"([^"]*)"\s+does not exist$`)
-
-// warnedNonexistentPolicies parses SPEC §1.2.6 / R§7.1 warnings, returning
-// the policy names each warning says do not exist. Warnings that don't
-// match the expected shape are ignored (not this function's concern).
-func warnedNonexistentPolicies(warnings []string) []string {
-	var out []string
-	for _, w := range warnings {
-		if m := warningPolicyRe.FindStringSubmatch(w); m != nil {
-			out = append(out, m[1])
-		}
-	}
-	return out
-}
-
-// allWarned reports whether warned covers every name in policies — the
-// SPEC §1.2.6 un-onboarded test ("every requested policy does not
-// exist"). A single requested policy with no matching warning means a
-// real tier exists, so the repo is NOT un-onboarded.
-func allWarned(policies, warned []string) bool {
-	warnedSet := make(map[string]bool, len(warned))
-	for _, w := range warned {
-		warnedSet[w] = true
-	}
-	for _, p := range policies {
-		if !warnedSet[p] {
-			return false
-		}
-	}
-	return true
-}
-
-// splitTrimCommaList splits a comma-separated .config value (SPEC §4.5's
-// vault_token_images), trimming whitespace around each element.
-// Deliberately diverges from vaultx's private splitTrimCommaList (SPEC
-// §4.6), which returns [""] for an empty input: here v=="" must return
-// nil (no Images at all), not a single empty-string image — load-bearing
-// for the common case where vault_token_images is unset. Do not unify the
-// two without preserving this difference.
-func splitTrimCommaList(v string) []string {
-	if v == "" {
-		return nil
-	}
-	parts := strings.Split(v, ",")
-	out := make([]string, len(parts))
-	for i, p := range parts {
-		out[i] = strings.TrimSpace(p)
-	}
-	return out
-}
-
-// secretNames returns the Name of every secret, for AuditFields.SecretNames
-// (SPEC §8.1: names only, never values).
-func secretNames(secrets []Secret) []string {
-	if len(secrets) == 0 {
-		return nil
-	}
-	names := make([]string, len(secrets))
-	for i, s := range secrets {
-		names[i] = s.Name
-	}
-	return names
-}
-
-// Handle runs SPEC §1.2 steps 5–10 for an already-verified, already-parsed
-// identity. The return is named (result) so the revoke-on-non-200 defer
-// registered below can inspect and, on a failed revoke, annotate it.
-func (b *Broker) Handle(ctx context.Context, id identity.Identity) (result Result) {
-	// Step 5: derive policies.
-	base := policy.Derive(id, b.policyPrefix)
-	audit := AuditFields{PoliciesRequested: base}
-
-	// Step 6, canary gate: no token exists yet, so there is nothing to
-	// revoke on this path — SPEC §1.2 step 6 / §3.5. It precedes the team
-	// lookup, so a failed canary never calls the forge (D7).
-	if !b.vault.CanaryOK() {
-		return Result{Status: 502, Outcome: OutcomeError, Audit: audit}
-	}
-
-	// Pipeline attributes (design §2, §3). A team lookup never fails the
-	// request: on error it fails closed to no teams.
-	var teams []string
-	if id.Actor != "" && b.teams != nil {
-		var err error
-		teams, err = b.teams.Teams(ctx, id.Org, id.Repo, id.Actor)
-		if err != nil {
-			teams = nil
-			audit.TeamsError = err.Error()
-		}
-		audit.Teams = teams
-	}
-	kept, dropped := policy.Cap(base, policy.Attributes(id, teams), b.maxPolicies)
-	// Request order (D1): P1, P2, then the kept attribute names in sweep
-	// order.
-	policies := append([]string(nil), base...)
-	var attrPaths []string
-	for _, a := range kept {
-		policies = append(policies, base[0]+"/"+a.Rel)
-		attrPaths = append(attrPaths, policy.AttrKVPath(id, a.Rel))
-	}
-	for _, a := range dropped {
-		audit.PoliciesDropped = append(audit.PoliciesDropped, base[0]+"/"+a.Rel)
-	}
-	audit.PoliciesRequested = policies
-
-	branchful := policy.Branchful(id.Event)
-	meta := map[string]string{
-		"org":             id.Org,
-		"repo":            id.Repo,
-		"event":           id.Event,
-		"branch":          id.Branch,
-		"pipeline_number": strconv.FormatInt(id.PipelineNumber, 10),
-		"commit":          id.Commit,
-	}
-	displayName := "ironbark-" + id.Org + "-" + id.Repo
-
-	mint, err := b.vault.MintToken(ctx, policies, meta, displayName)
+// Handle runs §9.1 steps 2-9 for a verified payload body.
+func (b *Broker) Handle(ctx context.Context, body []byte) Result {
+	f, err := facts.Build(ctx, body, b.lk, facts.Config{ActorForge: b.cfg.ActorForge})
 	if err != nil {
-		// Mint itself failed: no token was minted, nothing to revoke.
-		return Result{Status: 502, Outcome: OutcomeError, Audit: audit}
+		if errors.Is(err, identity.ErrMalformed) {
+			return Result{Status: 400, Outcome: status.Error, Err: err}
+		}
+		return Result{Status: 500, Outcome: status.Error, Err: err}
 	}
 
-	audit.TokenAccessor = mint.Accessor
-	audit.TokenTTL = mint.TTL
+	a := status.Audit{
+		TS: b.now(), Org: f.Org, Repo: f.Repo, RepoKey: f.RepoKey, Event: f.Event,
+		Branch: f.Branch, Ref: f.Ref, BranchProtected: f.BranchProtected, Actor: f.Actor,
+	}
+	st := status.Status{}
+	var token string
+	var walked []walk.Secret
+	var revokeFailed bool
+	var walkRes walk.Result
 
-	// From this point on a token exists. This defer is the ONLY place
-	// that revokes: it runs after every return statement below has
-	// already assigned the named `result`, so it is structurally
-	// impossible for any return in this function — through finish or a
-	// direct Result{...} literal — to produce a non-200 status without
-	// this check running (SPEC §3.4). A 200 is a no-op here; revoke
-	// failures never change the status (best-effort — TTL is the
-	// backstop) and are surfaced via result.RevokeFailed for httpapi to
-	// log, since the broker itself never logs.
-	//
-	// The revoke uses a fresh, detached context (not the request ctx):
-	// httpapi cancels ctx once its own deadline fires, and a post-mint
-	// timeout is exactly the case where this defer needs to run — reusing
-	// the already-cancelled ctx would make RevokeSelf fail immediately on
-	// that path, which is precisely when clean revocation matters most.
-	defer func() {
-		if result.Status != 200 {
-			revokeCtx, cancel := context.WithTimeout(context.Background(), revokeCleanupTimeout)
-			defer cancel()
-			if err := b.vault.RevokeSelf(revokeCtx, mint.Token); err != nil {
-				result.RevokeFailed = true
+	// finish builds the response and revokes the request's token when the
+	// response carries nothing but ironbark_status (and vault_addr).
+	finish := func(out status.Outcome, reason string, cause error) Result {
+		st.Outcome, st.Reason = out, reason
+		a.Outcome = out
+		for _, s := range walked {
+			a.SecretsReturned = append(a.SecretsReturned, s.Name)
+			if len(s.Images) > 0 {
+				a.ImagesRelayed = append(a.ImagesRelayed, s.Name)
+			}
+			if s.Name == "vault_token" {
+				a.VaultTokenIssued = true
 			}
 		}
-	}()
-
-	finish := func(status int, outcome Outcome, secrets []Secret) Result {
-		audit.SecretNames = secretNames(secrets)
-		return Result{Status: status, Outcome: outcome, Secrets: secrets, Audit: audit}
-	}
-
-	// token_type assertion (SPEC §1.2.6): a misconfigured role could mint
-	// a batch token; ironbark never proceeds with a non-service token.
-	if mint.TokenType != "service" {
-		return finish(502, OutcomeError, nil)
-	}
-
-	// Un-onboarded detection (SPEC §1.2.6, R§7.1).
-	audit.PolicyWarnings = warnedNonexistentPolicies(mint.Warnings)
-	if allWarned(policies, audit.PolicyWarnings) {
-		return finish(204, OutcomeUnonboarded, nil)
-	}
-
-	kvBase := b.vault.Base(id)
-
-	// Step 7a: .identity (SPEC §4.4).
-	forgeID, err := b.vault.ReadIdentity(ctx, mint.Token, kvBase)
-	if err != nil {
-		if errors.Is(err, vaultx.ErrMalformedDirective) {
-			return finish(204, OutcomeIdentityMismatch, nil)
+		a.Levels = walkRes.Levels
+		res := Result{Status: 200, Outcome: out, Err: cause, Warnings: walkWarnings(walkRes), RevokeFailed: revokeFailed}
+		names := map[string]string{status.StatusName: ""}
+		for _, s := range walked {
+			res.Secrets = append(res.Secrets, Secret{Name: s.Name, Value: s.Value, Images: s.Images})
+			names[s.Name] = ""
 		}
-		return finish(502, OutcomeError, nil)
-	}
-	if forgeID != nil && *forgeID != id.ForgeRemoteID {
-		return finish(204, OutcomeIdentityMismatch, nil)
-	}
-
-	// Step 7b: .config (SPEC §4.5). Malformed or a plain read error are
-	// BOTH 502 here — unlike .identity, there is no 204 outcome for a
-	// broken .config (a broken suppression directive must never silently
-	// fall back to defaults).
-	config, err := b.vault.ReadConfig(ctx, mint.Token, kvBase)
-	if err != nil {
-		return finish(502, OutcomeError, nil)
-	}
-
-	// Step 8: sweep (deref happens inside the sweep — SPEC §4.3 is
-	// subsumed). Only kept attribute prefixes are swept (D3): a dropped
-	// one would 403 anyway.
-	sweep, err := b.vault.SweepWithAttributes(ctx, mint.Token, id, branchful, attrPaths)
-	if err != nil {
-		return finish(502, OutcomeError, nil)
-	}
-
-	// Step 9: build response (SPEC §6).
-	secrets := make([]Secret, 0, len(sweep.Secrets)+2)
-	for _, s := range sweep.Secrets {
-		events := s.Events
-		if len(events) == 0 {
-			events = []string{id.Event}
+		res.Secrets = append(res.Secrets, Secret{Name: status.StatusName, Value: st.String()})
+		if b.cfg.AdvertiseVaultAddr != "" {
+			res.Secrets = append(res.Secrets, Secret{Name: status.VaultAddrName, Value: b.cfg.AdvertiseVaultAddr})
+			names[status.VaultAddrName] = ""
 		}
-		secrets = append(secrets, Secret{Name: s.Name, Value: s.Value, Events: events, Images: s.Images})
+		if token != "" && status.ShouldRevoke(names) {
+			if !b.revoke(token) {
+				res.RevokeFailed = true
+			}
+		}
+		res.Audit = a
+		return res
 	}
 
-	suppressed := config["vault_token"] == "false"
-	if !suppressed {
-		secrets = append(secrets, Secret{
-			Name:   "vault_token",
-			Value:  mint.Token,
-			Events: []string{id.Event},
-			Images: splitTrimCommaList(config["vault_token_images"]),
-		})
+	// Step 3: selectors. An invalid explicit selector is status only, before
+	// any login.
+	env, envSource := "", ""
+	if raw := f.Variables[b.cfg.EnvVar]; raw != "" {
+		if !selector.ValidEnv(raw) {
+			a.EnvInvalid = true
+			return finish(status.Invalid, "env_invalid", nil)
+		}
+		env, envSource = raw, "variable"
+	}
+	tgt, tgtSource, invalid := selector.SelectTarget(f, body, b.cfg.TargetVar)
+	a.TargetSource = tgtSource
+	if invalid != "" {
+		a.TargetInvalid = true
+		st.Env, st.EnvSource = env, envSource
+		return finish(status.Invalid, "target_invalid: "+invalid, nil)
+	}
+	org, repo := identity.Esc(f.Org), identity.Esc(f.Repo)
+
+	// Step 4: discovery, only when no explicit environment and the branch is
+	// protected. A no-claimant result keeps the discovery token.
+	if env == "" && f.BranchProtected == "true" {
+		role := grantcfg.RenderRole(b.cfg.JWTRole, "")
+		tok, out, reason, cause := b.login(ctx, role, jwtsign.DiscoveryClaims(f, b.now()))
+		st.Role, a.Role = role, role
+		if out != "" {
+			return finish(out, reason, cause)
+		}
+		token = tok.Value
+		a.DiscoveryLogin = true
+		a.TokenAccessor, a.TokenTTL = tok.Accessor, int(tok.TTL/time.Second)
+		d, err := walk.Discover(ctx, b.vault.Session(token), b.cfg.Data, org, repo, f.Branch)
+		switch {
+		case err != nil:
+			return finish(status.Error, "discovery", err)
+		case len(d.Claimants) > 1:
+			a.EnvClaimants = d.Claimants
+			st.Levels = d.Claimants
+			return finish(status.ConfigError, "env_conflict", nil)
+		case len(d.Claimants) == 1:
+			a.EnvClaimants = d.Claimants
+			env, envSource = d.Claimants[0], "branch"
+			// The discovery token is revoked before the environment login.
+			revokeFailed = !b.revoke(token)
+			token = ""
+		}
 	}
 
-	// Emptiness (SPEC §1.2 step 10 / §6): computed from the swept secrets
-	// and suppression state directly, never from len(secrets) — vault_addr
-	// must never count toward "non-empty" regardless of append order.
-	//
-	// Outcome-enum decision: SPEC §8.1 closes the audit outcome enum to
-	// exactly {ok, unonboarded, identity_mismatch, error} — this task's
-	// own type definition mirrors that closed set. Empty-and-suppressed
-	// is neither an error nor an identity problem, and "ok" would
-	// contradict a 204 status, so it reuses OutcomeUnonboarded: from an
-	// operator's perspective both mean the same thing — "this repo/tier
-	// currently has nothing ironbark can hand the pipeline" — and adding
-	// a 5th enum value would violate the closed set SPEC §8.1 documents.
-	if len(sweep.Secrets) == 0 && suppressed {
-		return finish(204, OutcomeUnonboarded, nil)
+	a.Target = strings.Join(tgt.Segments, "/") // recorded even when ignored
+	tgt, _ = selector.IgnoreWithoutEnv(tgt, env)
+	a.Env, a.EnvSource = env, envSource
+	st.Env, st.EnvSource = env, envSource
+	st.Target = strings.Join(tgt.Segments, "/")
+
+	// Step 5: teams, only with an environment and an actor; fail closed.
+	var teams []string
+	if env != "" && token == "" {
+		teams, err = facts.ResolveTeams(ctx, b.lk, f, env)
+		if err != nil {
+			teams, a.TeamsError = nil, err.Error()
+		}
+		a.Teams = teams
 	}
 
-	if b.advertiseVaultAddr != "" {
-		secrets = append(secrets, Secret{Name: "vault_addr", Value: b.advertiseVaultAddr, Events: []string{id.Event}})
+	// Steps 6-7: sign and log in with the rendered role, unless the
+	// discovery token is being kept.
+	role := grantcfg.RenderRole(b.cfg.JWTRole, env)
+	st.Role, a.Role = role, role
+	if token == "" {
+		claims := jwtsign.Claims(f, env, envSource, tgt, teams, b.now())
+		a.Sub, _ = claims["sub"].(string)
+		a.JTI, _ = claims["jti"].(string)
+		tok, out, reason, cause := b.login(ctx, role, claims)
+		if out != "" {
+			a.EnvRefused = out == status.Refused && envSource == "variable"
+			return finish(out, reason, cause)
+		}
+		token = tok.Value
+		a.TokenAccessor, a.TokenTTL = tok.Accessor, int(tok.TTL/time.Second)
 	}
 
-	// Step 10: a 200 never revokes (the deferred check above is a no-op
-	// when result.Status == 200) — the returned token and any deref
-	// leases must outlive the response.
-	return finish(200, OutcomeOK, secrets)
+	// Step 8: the walk.
+	lv := levels.Levels(b.cfg.Data, org, repo, env, tgt.Escaped)
+	walkRes, err = walk.Walk(ctx, b.vault.Session(token), lv, walk.Options{})
+	if err != nil {
+		return finish(status.Error, "walk", err)
+	}
+	walked = walkRes.Secrets
+	for _, lvl := range lv {
+		if o := walkRes.Levels[lvl.Label]; o != walk.LevelRead && o != "" {
+			st.Skipped = append(st.Skipped, lvl.Label)
+		}
+	}
+	return finish(status.OK, "", nil)
+}
+
+// login signs claims and logs in as role. On failure it returns the outcome
+// and reason for the status line; no token is held afterwards.
+func (b *Broker) login(ctx context.Context, role string, claims map[string]any) (tok vaultx.Token, out status.Outcome, reason string, cause error) {
+	jwt, err := b.signer.Sign(claims)
+	if err != nil {
+		return tok, status.Error, "sign", err
+	}
+	tok, err = b.vault.LoginJWT(ctx, b.cfg.JWTMount, role, jwt)
+	var refused *vaultx.RefusedError
+	var assertion *vaultx.AssertionError
+	switch {
+	case err == nil:
+		return tok, "", "", nil
+	case errors.As(err, &refused):
+		return tok, status.Refused, "bound_claims", nil
+	case errors.As(err, &assertion):
+		return tok, status.Error, "assertion: " + assertion.Reason, err
+	default:
+		return tok, status.Error, "login", err
+	}
+}
+
+// revoke is a best-effort revoke-self on a detached context.
+func (b *Broker) revoke(token string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), revokeCleanupTimeout)
+	defer cancel()
+	return b.vault.RevokeSelf(ctx, token) == nil
+}
+
+func walkWarnings(w walk.Result) []string {
+	out := append([]string(nil), w.Warnings...)
+	for _, e := range w.IgnoredEvents {
+		out = append(out, e+": ironbark_events is ignored; event pins are role bound_claims")
+	}
+	sort.Strings(out)
+	return out
 }

@@ -131,7 +131,7 @@ end, not trustworthy by virtue of the signature: fields still originate
 from webhooks, API callers and repo admins) plus two forge lookups. Only
 the facts below are used; every other payload field is ignored.
 
-| Fact | push | pull_request (all variants) | tag | release | manual | deployment (promote) | cron |
+| Fact | push | pull_request (`pull_request`) | tag | release | manual | deployment (promote) | cron |
 |---|---|---|---|---|---|---|---|
 | `org`, `repo` | `repo.full_name` | same | same | same | same | same | same |
 | `repo_id` | `repo.forge_remote_id` | same | same | same | same | same | same |
@@ -143,6 +143,11 @@ the facts below are used; every other payload field is ignored.
 | `teams` | lookup (§4.4) when actor and env | not resolved | not resolved | not resolved | lookup when env | none (no actor) | none |
 | `env` | cascade §4.5 | none | none | none | cascade | cascade | cascade |
 | `target` | cascade §4.6 | none | none | none | cascade | cascade | none |
+
+Only `pull_request` is a named PR event. Other PR variants
+(`pull_request_closed`, `pull_request_metadata`) are unknown events: they
+pass through lowercased with no branch, so they match only roles that list
+them in `event`, and the shipped roles do not.
 
 `manual` and `cron` read `pipeline.variables`; a `deployment` carries its
 parent's `variables` (the promote form's own parameters never reach the
@@ -213,8 +218,11 @@ First match wins:
    This is an **implicit** selection, the branch-as-environment convention.
 3. None. The walk reads the project level only.
 
-A value must match `^[a-z0-9][a-z0-9_-]{0,62}$`, or it is treated as no
-environment and the audit line records `env_invalid`. The grammar keeps env
+A value must match `^[a-z0-9][a-z0-9_-]{0,62}$`. An explicit value that
+does not is refused like any explicit request (§9.2 (A): nothing returned,
+502), never degraded to the implicit rule or to the project level; the audit
+line records `env_invalid`. An implicit (branch) value that does not match is
+simply no environment. The grammar keeps env
 names valid as a role-name suffix and as a path segment without escaping.
 Branch names outside it (`release/1`, `Main`) never select an environment
 implicitly. Rule 2 means environment levels are named after the branches
@@ -830,6 +838,21 @@ nothing to print.
   that OpenBao never removes. Growth is bounded by distinct
   `(repo, env, target, team-set)` tuples. Cleaning up needs a reaper
   outside ironbark, since ironbark holds no identity permissions.
+- **Repo rename protection is not carried over.** Data paths are keyed by
+  repo name. A repo renamed away, or deleted, and a new repo taking the old
+  name would read the old repo's levels. The `.identity` binding that closed
+  this is gone (§13). Until §16.7 is decided, deployers who need the guard
+  bind `repo_id` in per-repo roles, and rename or delete-recreate is a
+  data-path migration step.
+- **Per-secret image and event pins are not carried over.** A secret that
+  was pinned to some events or step images becomes visible to every event
+  its level's role admits. Migration must move such a secret to a level whose
+  role lists only those events (§15 step 3), or leave it out of the view
+  until §16.5 is decided. Image pins have no interim equivalent.
+- **`vault_token` suppression is not carried over.** The token is always
+  returned when the role grants one; it can read only what the role's
+  policies grant, which is what the walk would return anyway. A repo that
+  relied on suppression as defence in depth loses that layer.
 - **Metadata is string-only.** A list claim in `claim_mappings` fails the
   login. Teams therefore travel only through `groups_claim` and gate only
   through groups. No policy can template on a team.
@@ -865,7 +888,9 @@ AppRole and `kv/ci/...` tree stay untouched until the last repo has moved.
    - specific to one part → `<env>/<target>/` (`.target/web` in the `manual`
      or `deployment` tier → `<env>/web/`);
    - identifiers → out of the tree, into repo config (§3.3).
-3. **Turn access-only distinctions into gates:**
+3. **Turn access-only distinctions into gates** (an event pin on a single
+   secret becomes an event-restricted level and role; image pins are
+   dropped, §14):
    - event tiers (`pull_request`, `manual`, `cron`) → `event` lists in role
      `bound_claims`;
    - branch tiers → an environment role binding `branch` and

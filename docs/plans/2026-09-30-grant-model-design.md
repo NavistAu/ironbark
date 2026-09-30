@@ -848,7 +848,8 @@ where the whole policy union is acceptable to hand to that plugin.
    claimants → revoke, status only. One claimant → revoke, go on.
 5. With an environment and an actor: the team lookup (§4.4), bounded and
    fail-closed.
-6. Build and sign the JWT (§5). Log in with the rendered role. A refusal →
+6. Build and sign the JWT (§5; the discovery login in step 4 signs a
+   reduced one). Log in with the rendered role. A refusal →
    status only.
 7. Per-login assertions (§5.5).
 8. Walk (§8), resolving mappings (§7).

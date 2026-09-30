@@ -183,10 +183,12 @@ the facts below are used; every other payload field is ignored.
 | `env` | level metadata (§4.5) | none | none | none | variable, then level metadata | inherited variable, then level metadata | variable, then level metadata |
 | `target` | `Deploy-To:` trailer (§4.6) | none | none | none | variable | `deploy_to` | none |
 
-Only `pull_request` is a named PR event. Other PR variants
-(`pull_request_closed`, `pull_request_metadata`) are unknown events: they
-pass through lowercased with no branch, so they match only roles that list
-them in `event`, and the shipped roles do not.
+Only `pull_request` is a named PR event here. Other PR variants
+(`pull_request_closed`, `pull_request_metadata`) are not facts this design
+builds: they pass through lowercased with no `branch` (a behaviour change
+from today's SPEC, which treats `pull_request_closed` as branchful, §15.3),
+so they match only roles that list them in `event`, and the shipped roles do
+not.
 
 `manual` and `cron` read `pipeline.variables`; a `deployment` carries its
 parent's `variables` (the promote form's own parameters never reach the
@@ -214,7 +216,11 @@ otherwise, including a failed or timed-out lookup and
 "Protected" means "only people the forge allows could have produced this
 commit on this branch". It equals "reviewed" only if the forge rule blocks
 direct pushes. That is forge configuration, and the forge admin is in the
-trust base either way.
+trust base either way. It says nothing about who *triggered* the run: on
+`manual` and `cron` any user Woodpecker lets start a pipeline on that
+protected branch gets a verified `branch`. An environment that must not be
+reachable by every such user binds `actor` or a team gate (§6.4) in
+addition to `branch` and `branch_protected`.
 
 ### 4.3 Actor per event
 
@@ -268,8 +274,8 @@ First match wins:
    `branches` includes the branch (`env_source=branch`).
    - No level claims the branch: no environment, the repo level only. Not an
      error; most branches are not environments.
-   - Two or more levels claim it: a configuration error. ironbark returns
-     only `ironbark_status` (`outcome=config_error`, naming the levels) and
+   - Two or more levels claim it: a configuration error (proposed, §17.3).
+     ironbark returns only `ironbark_status` (`outcome=config_error`, naming the levels) and
      the job decides (§9). It never picks one.
 3. None. The walk reads the repo level only.
 
@@ -668,7 +674,7 @@ Identity policies are additive, and a role cannot cap them. So:
 | a break-glass person | a second level `prod-breakglass` (no `branches`) whose mappings point at the same upstream items as `prod`; its role binds `actor: ["alice"]`; selected with `DEPLOY_ENV` |
 | PRs see nothing | drop `pull_request` from `ci`'s events |
 | onboard a repo | append `acme/mono#<id>` to `repo_key` on every role that serves it |
-| a step may see a secret only from one image | `ironbark_images` on that secret's mapping (§8.4) |
+| a secret only a named plugin image may receive (normal steps cannot; Woodpecker refuses image filters on them) | `ironbark_images` on that secret's mapping (§8.4) |
 | a repo's pipelines get `vault_token` | a metadata-only `vault_token` mapping at the level that should get it, with its image pins (§8.5) |
 
 ## 7. Dynamic credentials
@@ -822,7 +828,8 @@ The token never widens access beyond the login's policies, and its TTL is
 the pipeline token's (§5.5). It can, however, read more than the walk did:
 the union of the login's policies includes literal per-target group stanzas
 (§6.4) and every convention-named engine path the policies grant (§7). The
-pin keeps it from untrusted steps.
+pin keeps it from untrusted steps. Issue `vault_token` only at a level
+where the whole policy union is acceptable to hand to that plugin.
 
 ## 9. Request sequence and failure behaviour
 
@@ -835,8 +842,9 @@ pin keeps it from untrusted steps.
    `IRONBARK_FORGE_TIMEOUT`, fails closed.
 3. Select the target (§4.6) and, if `DEPLOY_ENV` is set, the environment.
    An invalid explicit selector → status only.
-4. No explicit environment, protected branch: discovery login to `ci`, read
-   level metadata (§4.5). No claimant → keep this token, go to 7. Two
+4. No explicit environment, protected branch, and a backend with level
+   metadata (plain KV v2 has none, §3.1: skip to 5): discovery login to
+   `ci`, read level metadata (§4.5). No claimant → keep this token, go to 7. Two
    claimants → revoke, status only. One claimant → revoke, go on.
 5. With an environment and an actor: the team lookup (§4.4), bounded and
    fail-closed.
@@ -849,7 +857,9 @@ pin keeps it from untrusted steps.
 Every verified request gets a `200` carrying `ironbark_status`. `204` and
 `502` are gone. **Revocation by outcome** (SPEC §3.4) is restated: a
 response carrying only `ironbark_status` revokes any token the request
-obtained; a response carrying any other secret never does.
+obtained; a response carrying any other secret never does. The
+`vault_addr` convenience secret (when advertised) never counts (SPEC §3.4):
+a response of `ironbark_status` plus `vault_addr` still revokes.
 
 ### 9.2 ironbark never fails a pipeline
 
@@ -1183,6 +1193,9 @@ AppRole and `kv/ci/...` tree stay untouched until the last repo has moved.
   `ironbark_status` reports `target_invalid`. A pipeline that passed such a
   value (none has a legitimate reason to) now fails at the status, not at a
   missing marker. Dotted names (`srv.talos`) are unaffected.
+- **`pull_request_closed` loses its branch.** Today it is a branchful
+  event; here only `pull_request` is named, and the closed variant matches
+  only a role that lists it in `event`.
 
 ## 16. Required voidstar changes
 

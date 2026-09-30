@@ -133,11 +133,11 @@ the facts below are used; every other payload field is ignored.
 
 | Fact | push | pull_request (`pull_request`) | tag | release | manual | deployment (promote) | cron |
 |---|---|---|---|---|---|---|---|
-| `org`, `repo` | `repo.full_name` | same | same | same | same | same | same |
+| `org`, `repo` | `repo.full_name` split at its single `/` | same | same | same | same | same | same |
 | `repo_id` | `repo.forge_remote_id` | same | same | same | same | same | same |
 | `event` | `push` | `pull_request` | `tag` | `release` | `manual` | `deployment` | `cron` |
 | `branch` | pushed branch | **absent** (base branch is not a trust signal) | absent | absent | caller-chosen | inherited from parent | cron's branch |
-| `ref` | forge | not emitted | not emitted | not emitted | `refs/heads/<branch>` | inherited from parent | `refs/heads/<branch>` |
+| `ref` | forge | payload `refs/pull/N/head`, not used | payload `refs/tags/X`, not used | payload `refs/tags/X`, not used | `refs/heads/<branch>` | inherited from parent | `refs/heads/<branch>` |
 | `branch_protected` | lookup (§4.2) | absent | absent | absent | lookup | lookup | lookup |
 | `actor` | `sender` iff `IRONBARK_ACTOR_FORGE` declares a login forge | same rule | same rule | same rule | `author` | **none** | none |
 | `teams` | lookup (§4.4) when actor and env | not resolved | not resolved | not resolved | lookup when env | none (no actor) | none |
@@ -850,8 +850,10 @@ nothing to print.
   role lists only those events (§15 step 3), or leave it out of the view
   until §16.5 is decided. Image pins have no interim equivalent.
 - **`vault_token` suppression is not carried over.** The token is always
-  returned when the role grants one; it can read only what the role's
-  policies grant, which is what the walk would return anyway. A repo that
+  returned when the role grants one. It carries the union of the login's
+  policies, which can exceed the walk: literal per-target group policies
+  (§6.4) let a team member's token read every target that group gates in
+  that environment, not only the selected one. A repo that
   relied on suppression as defence in depth loses that layer.
 - **Metadata is string-only.** A list claim in `claim_mappings` fails the
   login. Teams therefore travel only through `groups_claim` and gate only

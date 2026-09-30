@@ -1,5 +1,11 @@
 # ironbark M1 — implementation specification
 
+**Grant model (2026-10):** §2.3–§2.5, §3, §4.1, §4.4–§4.6 and §7 are
+replaced or reduced to pointers at the [grant-model design](plans/2026-09-30-grant-model-design.md);
+the remaining sections (notably §1.1 `/readyz` and §1.2, §4.2–§4.3, §6,
+§8.1, §9) still describe the pre-grant model until updated. Breaking; see
+the CHANGELOG.
+
 Status: ACCEPTED 2026-07-11, after a 4-cycle adversarial cross-AI review
 (codex + gemini, zero remaining HIGH concerns —
 [`reviews/SPEC-REVIEWS.md`](reviews/SPEC-REVIEWS.md)). The §12 decisions
@@ -160,289 +166,62 @@ property-tested (§9.2).
 
 ### 2.3 Policy names
 
-Base prefix `POLICY_PREFIX` (default `ci`). For every request derive:
-
-- `P1 = <prefix>/<org>/<repo>/<event>`
-- `P2 = <prefix>/<org>/<repo>/<event>/<esc(branch)>` — only for
-  **branchful events**: `push`, `pull_request`, `pull_request_closed`,
-  `release`, `cron`, and only when branch is non-empty.
-
-`manual` and `deployment` are NEVER branchful — their branch fields are
-caller-supplied or inherited, not forge-verified [WP§6]; they get P1
-only. `tag` has no branch [WP§6]; P1 only.
-
-`/` in policy names is legal in both products [R§7.2]. Both policies are
-requested explicitly on every mint (never an empty list) [R§7.6];
-nonexistent ones warn and grant nothing [R§7.1].
-
-**Attribute policies.** With `E = P1`, ironbark additionally requests, for
-each prefix `T` of the target (`a/b/c` → `a`, `a/b`, `a/b/c`), the actor
-and each resolved team (§2.5):
-
-| Shape (`<rel>`) | Segments | Requested when |
-|---|---|---|
-| `.target-actor/<esc(T)>/<esc(actor)>` | 3 | target and actor |
-| `.target-team/<esc(T)>/<esc(team)>` | 3 | target and a team |
-| `.target/<esc(T)>` | 2 | target |
-| `.actor/<esc(actor)>` | 2 | actor |
-| `.team/<esc(team)>` | 2 | a team |
-
-Each name is `E/<rel>`. `esc` is applied to the **whole** prefix string, so
-`a/b` becomes the single segment `a%2fb`. The dot-prefixed segments
-`.target`, `.actor`, `.team`, `.target-actor`, `.target-team` are reserved:
-`esc` output is never dot-prefixed (§2.2), so no escaped branch, target,
-actor or team can equal one (a target `.target` escapes to `%2etarget`).
-Every shape has a fixed segment count, so no attribute name is a
-path-prefix of another attribute name or of P2. Teams are escaped, empty
-names and duplicates dropped, and ordered by `esc(team)` byte order.
-
-Request order (D1): P1, P2 (if any), then the attribute names in sweep
-order (§4.1). `IRONBARK_MAX_POLICIES` (default 64, ≥ 3) bounds the whole
-list. When exceeded, attribute names are dropped until it fits, in this
-order: target-team conjunctions, then target-actor conjunctions, then team
-policies, then target prefixes; within a class deepest target first, and
-among equal depth reverse `esc(team)` byte order (D2). P1, P2 and the
-actor policy are never dropped. Dropped names are audited (§8.1).
-
-**Attribute policies are grant-only as a security boundary.** Every
-attribute can be absent (target omitted or invalid, actor empty, team
-lookup failed, name dropped by the cap), so a `deny` placed in an
-attribute policy is lifted by exactly the pipelines it was meant to stop.
-Narrowing is done by placing a secret *only* under the attribute or
-conjunction prefix that should reach it. Target and actor are
-caller-influenced (anyone who can trigger a manual run or promote names
-any target), so a target-only policy scopes a secret away from other
-pipelines of the event but does not restrict *who* gets it; a secret that
-must be limited to people uses a conjunction.
+**Replaced by the grant model** ([grant-model design](plans/2026-09-30-grant-model-design.md) §6.3). ironbark requests no policies
+and derives no policy names. Access is three OpenBao-side templated policies
+(`ci-project`, `ci-env`, `ci-target`, printed by `ironbark render-policies`)
+attached to JWT roles; the login's claims decide which paths a token can
+read. The tier/attribute policy derivation, `IRONBARK_POLICY_PREFIX` and
+`IRONBARK_MAX_POLICIES` are gone.
 
 ### 2.5 Teams
 
-When `actor` is non-empty and `IRONBARK_FORGE_PROVIDER` is not `none`,
-ironbark resolves the actor's teams for the repo on the forge (Gitea
-family: `GET /api/v1/repos/{org}/{repo}/teams`, then
-`GET /api/v1/teams/{id}/members/{login}` per team; 200 member, 404 not a
-member). The whole lookup is bounded by `IRONBARK_FORGE_TIMEOUT`; there is
-no caching. Any failure — timeout, transport error, a repo-teams status
-other than 200 (including 404 for a user-owned repo, D6), a membership
-status other than 200/404 — **fails closed**: no team policies, the
-request continues with its other policies, and the audit line records
-`teams_error`. A team lookup never fails a request. The lookup runs after
-the canary gate (§3.5), so a failed canary never calls the forge (D7).
-
-Trust: Vault stays the sole authority over *what* a team grants; the forge
-becomes the authority over *who* is in a team. Anyone who can edit forge
-team membership (forge admins, org owners, a leaked
-`IRONBARK_FORGE_TOKEN` with write scope) can widen a pipeline's grant
-through team policies. The token needs read scope only. Actor logins and
-team membership must come from the same forge: ironbark assumes a
-single-forge Woodpecker server.
-
-**Token owner matters, not just scope.** Gitea-family forges answer the
-membership endpoint only for a site admin, an owner of the team's org, or a
-member of that team; for anyone else they return 404 — the same status as
-"not a member". A token owned by an ordinary user therefore makes every
-lookup silently report *no teams*: team policies never match, and nothing
-errors. The token must belong to a site admin or to an owner of every org
-whose teams ironbark should see. Its scopes can still be read-only
-(`read:organization`, plus `read:repository` for the repo-teams endpoint),
-but on a site-admin account those scopes read every org and every
-repository — size that exposure deliberately. Verify after setup with a
-known team member's manual run (the audit line lists the resolved teams).
+**Changed** ([grant-model design](plans/2026-09-30-grant-model-design.md) §4.4). Teams are still resolved on the forge, fail closed,
+and only when an actor exists **and** an environment is selected. They reach
+OpenBao as the JWT `teams` claim (always sent, `[]` when none), each entry
+`esc(org)/esc(team)`, through the mount's `groups_claim` to external groups.
+They no longer produce policy names.
 
 ### 2.4 KV layout
 
-Mount `KV_MOUNT` (default `kv`, KV v2), prefix `KV_PREFIX` (default
-`ci`), base `B = <KV_PREFIX>/<org>/<repo>`:
+**Replaced** ([grant-model design](plans/2026-09-30-grant-model-design.md) §8.1). The secret tree is addressed by
+`IRONBARK_DATA_PATH`, for example `vs/data/pipelines/{repo}/{env}/{target...}`:
+a repo level, an environment level, and one level per target segment. There
+are no event or branch tiers, no `.identity`/`.config` directives and no
+attribute mount.
 
-```
-B/<key>                      # all events of the repo
-B/<event>/<key>              # event tier
-B/<event>/<esc(branch)>/<key># branch tier (branchful events only)
-B/.identity                  # reserved: identity binding (§4.4)
-B/.config                    # reserved: repo directives (§4.5)
-```
+## 3. Login (was: Minting)
 
-Entries whose name begins with `.` are directives, never returned as
-secrets, and only recognized at the base level.
+**Replaced** ([grant-model design](plans/2026-09-30-grant-model-design.md) §5, §9). ironbark holds no OpenBao credential, mints no
+token and runs no startup canary.
 
-**Attribute data** lives in its own ironbark-owned KV v2 mount,
-`IRONBARK_ATTR_MOUNT` (default `ironbark`), never under `KV_MOUNT`. ACL
-paths begin with the mount, so no policy written on `KV_MOUNT` — whatever
-glob it uses — can match attribute data. The two mounts must neither be
-equal nor nest (§7). Each attribute policy `E/<rel>` has exactly one KV
-prefix, `<org>/<repo>/<event>/<rel>`, holding plain keys:
-
-```
-<org>/<repo>/<event>/.target/<esc(T)>/<key>
-<org>/<repo>/<event>/.actor/<esc(actor)>/<key>
-<org>/<repo>/<event>/.team/<esc(team)>/<key>
-<org>/<repo>/<event>/.target-actor/<esc(T)>/<esc(actor)>/<key>
-<org>/<repo>/<event>/.target-team/<esc(T)>/<esc(team)>/<key>
-```
-
-The documented attribute policy grants `read` on
-`<ATTR_MOUNT>/data/<org>/<repo>/<event>/<rel>/+` and `list` on
-`<ATTR_MOUNT>/metadata/<org>/<repo>/<event>/<rel>/` (`+` is one segment,
-`*` crosses `/`). Because no attribute prefix is a path-prefix of another,
-even a trailing-`*` form reaches no other attribute prefix; it additionally
-reaches only unswept keys nested below `<rel>/`. The attribute mount has
-no directives. Writers using raw HTTP must send the `%` of an escaped
-segment as `%25`.
-
-## 3. Minting
-
-### 3.1 Token role contract (documented prerequisite, enforced by tests)
-
-The Vault/OpenBao operator provides token role `TOKEN_ROLE` (default
-`ci`) with, at minimum:
-
-```
-allowed_policies_glob   = ["<POLICY_PREFIX>/*"]   # must cover §2.3 output space
-token_type              = "service"               # hard requirement, R§7.4; batch
-                                                  # leases would parent to ironbark's
-                                                  # own token (research §4)
-token_explicit_max_ttl  = <operator choice, e.g. 15m>  # THE lifetime bound — see note
-orphan                  = true                    # see §3.3
-renewable               = false                   # TTL is the lifetime, full stop:
-                                                  # default policy grants renew-self,
-                                                  # so a renewable token could outlive
-                                                  # the threat model's "dies in minutes"
-token_no_default_policy = false                   # default policy is load-bearing:
-                                                  # revoke-self powers §3.4
-```
-
-**Note on the lifetime bound (integration-verified, 2026-07-16, Vault
-1.20 + OpenBao 2.5.5):** the token-store role endpoint
-(`auth/token/roles/:name`) does **not** honor a `token_ttl` field — it is
-silently dropped (no warning), and a token minted with no request TTL then
-inherits the token auth mount's `default_lease_ttl` (32 days by default).
-So `token_ttl` on the role is a NO-OP and would leave CI tokens alive for
-32 days, defeating the threat model's "dies in minutes." The field that
-actually bounds a role-minted token's lifetime is
-`token_explicit_max_ttl` (a hard, unrenewable expiry cap the role backend
-does honor on both products). ironbark still sends no `ttl` at mint (§3.2);
-`token_explicit_max_ttl` is what makes "TTL is the bound" (DEC-260711114102) real.
-Operators MUST set it; the M1 integration suite asserts a minted token's
-TTL is bounded by it on both products. (Alternatively/additionally the
-operator may lower the token mount's `default_lease_ttl` via
-`sys/auth/token/tune`, but that is instance-wide; the per-role
-`token_explicit_max_ttl` is the correct, scoped control.)
-
-Note on the glob: `allowed_policies_glob` uses plain substring globbing
-(`ryanuber/go-glob` — `*` matches ANY characters including `/`; there are
-no path-segment semantics) [R§7.6], so the single pattern
-`<POLICY_PREFIX>/*` covers every multi-level name §2.3 can derive.
-
-A requested policy outside the glob ERRORS the mint [R§7.6] — the glob is
-availability-critical. (M2's doctor verifies template ⊆ glob; M1
-documents it and integration-tests it.)
-
-### 3.2 Mint call
-
-`POST auth/token/create/<TOKEN_ROLE>` with:
-
-| Param | Value |
-|---|---|
-| `policies` | `[P1, P2?]` — always explicit (§2.3) |
-| `meta` | `org`, `repo`, `event`, `branch`, `pipeline_number`, `commit` — lands in Vault's audit log |
-| `display_name` | `ironbark-<org>-<repo>` |
-| `ttl`, `num_uses`, `type` | NOT sent — role config governs; `num_uses` is deliberately unused [R§7.4] |
-
-The `default` policy remains attached (lookup-self, renew-self,
-revoke-self — the last is load-bearing for §3.4) [R§7.6].
-
-### 3.3 Orphan vs child
-
-Decision: tokens are minted against the role with `orphan = true` set on
-the role, so pipeline tokens do NOT die when ironbark's own AppRole token
-rotates or is revoked mid-pipeline. TTL is then the only lifetime bound.
-(Without orphan, ironbark's routine re-login could cascade-revoke live
-pipeline tokens and their STS leases.)
-
-### 3.4 Revocation
-
-Where this spec says "revoke": call `auth/token/revoke-self`
-authenticated as the *minted* token (powered by the `default` policy —
-§3.1). The rule is by outcome:
-
-- **Every path that does not return a `200`** — un-onboarded `204`,
-  identity mismatch, empty-and-suppressed `204`, and ALL failure paths
-  (`502`) — revokes the minted token, even if dereferences already
-  created leases: the service-token cascade revokes those leases too,
-  which is the desired cleanup since nothing was delivered.
-- **A `200` never revokes** — returned dereferenced leases and/or the
-  returned `vault_token` must outlive the response (DEC-260711061324); TTL is
-  the cleanup.
-
-Revoke failures are logged and do not change the response code
-(best-effort; TTL is the backstop).
-
-### 3.5 Startup canary (self-check)
-
-At startup (and after every AppRole re-login), ironbark performs one
-canary mint against `TOKEN_ROLE` requesting the single policy
-`<POLICY_PREFIX>/ironbark-selftest` (conventional prefix, nonexistent —
-warning expected):
-
-- Mint must succeed → proves AppRole capability and that the role glob
-  covers the convention prefix [R§7.6].
-- Response `token_type` must be `service` → catches the silent
-  misconfiguration (G1) without granting ironbark any read on the role.
-- Response `renewable` must be `false` (cycle-2 C2-1).
-- Orphan status: asserted from the mint response IF the products expose
-  it there (cycle-2 G2-3: exposure unverified either way); the privileged
-  integration test (§9.3) is the definitive orphan check regardless.
-- `auth/token/revoke-self` with the canary token must succeed → proves
-  the `default` policy survived role config (C5).
-
-**Canary state is a hard gate on minting** (cycle-2 C2-2): while the
-canary state is failed or unknown (startup, or after a re-login whose
-canary hasn't passed yet), POST requests return `502` without minting —
-a role misconfigured in ways the per-mint assertion cannot see
-(non-orphan, renewable, stripped default) must not produce tokens.
-Canary failure: log at error with the specific violated expectation;
-`/readyz` serves 503.
+- Per request it signs an RS256 JWT (`IRONBARK_JWT_SIGNING_KEY`; the
+  OpenBao `jwt` mount trusts the public key) and logs in
+  (`POST auth/<IRONBARK_JWT_MOUNT>/login`) with the role rendered from
+  `IRONBARK_JWT_ROLE` (`ci-{env}`, or `ci` with no environment). A refused
+  login is never retried with another role.
+- The role must issue a service, orphan token with an explicit max TTL. Each
+  login asserts this (`token_type`, `orphan`, `lookup-self`
+  `explicit_max_ttl`); a violation revokes and reports `outcome=error`.
+- The only other login is the metadata-only discovery login to `ci` before
+  an environment chosen by level metadata; it is revoked before the
+  environment login unless no level claims the branch.
+- **Revocation by outcome.** A response carrying only `ironbark_status`
+  (and possibly `vault_addr`) revokes any token the request obtained; a
+  response carrying any other secret never does.
+- Every verified request is `200` with `ironbark_status`
+  (`outcome=ok|refused|invalid|config_error|error`); `204` and `502` are
+  gone. An invalid signature is still `401` with nothing.
 
 ## 4. Sweep
 
 ### 4.1 Read set
 
-All sweep prefixes are derived from the identity a priori — no LIST-based
-discovery or descent. Using the minted token, ironbark LISTs each
-applicable prefix **independently** (so a least-privilege policy granting
-only one tier still works — C2), in this order (most specific first, G2):
-
-1. `LIST <mount>/metadata/<B>/<event>/<esc(branch)>` — branchful events
-   with non-empty branch only.
-2. `LIST <mount>/metadata/<B>/<event>`
-3. `LIST <mount>/metadata/<B>`
-
-From each LIST result, only plain keys at that level are taken —
-directory entries are never descended (deeper nesting is NOT swept; v1
-constraint, documented). Keys beginning with `.` are NEVER treated as
-secret entries at any level (cycle-3 G3-3): at the base level they are
-the directive namespace (§2.4); everywhere they are skipped by the
-sweep. Every LIST/GET tolerates `403` and `404` by
-skipping that level/entry — partial visibility IS the tiering mechanism
-(DESIGN §5). Any other status: revoke + `502` (§1.2 step 8). Plain keys
-are read via `GET <mount>/data/...`.
-
-**Attribute prefixes come first.** Before the three tiers above, each
-requested-and-kept attribute prefix is LISTed in `ATTR_MOUNT`
-(`LIST <ATTR_MOUNT>/metadata/<org>/<repo>/<event>/<rel>`), with the same
-rules (plain keys, no descent, dot-keys skipped, 403/404 skipped —
-including a missing attribute mount — any other status revoke + `502`), in
-this order:
-
-1. For each target prefix `T`, deepest first: `.target-actor/<esc(T)>/<esc(actor)>`,
-   then `.target-team/<esc(T)>/<esc(team)>` per team.
-2. `.target/<esc(T)>`, deepest first.
-3. `.actor/<esc(actor)>`.
-4. `.team/<esc(team)>` per team.
-
-Names dropped by `IRONBARK_MAX_POLICIES` are not swept (D3): the minted
-token cannot read them. One first-writer-wins set spans both mounts, so an
-attribute secret beats a same-named tier secret (§4.2).
+**Replaced by the walk** ([grant-model design](plans/2026-09-30-grant-model-design.md) §8.2). Levels (repo, environment, one per
+target segment) are read shallow to deep as the login's token: `LIST` each
+level, `GET` each entry, deeper level wins, unreadable levels and entries
+skipped. Entries are voidstar views: `fetch` (default), `resolve`
+(dynamic engine paths, one hop, leases parent to the pipeline token) and
+`metadata` (the `vault_token` marker). `ironbark_status` is a reserved name.
 
 ### 4.2 Entry forms and secret naming
 
@@ -511,49 +290,20 @@ request body into a privileged write — out of scope for M1 and a
 deliberate trust-surface exclusion. If PKI issuance via `$ref` is ever
 needed, that is a post-M1 design change, not a bug.
 
-### 4.4 `.identity` binding
+### 4.4 `.identity` binding and 4.5 `.config` directives
 
-If `GET <mount>/data/<B>/.identity` succeeds and yields
-`{"forge_remote_id": <string>}`: compare against the payload's
-`forge_remote_id`; mismatch → §1.2 step 7. If the entry is absent (404)
-or unreadable (403), the binding is not enforced (opt-in hardening,
-written by the M2 module; conventional policies SHOULD grant read on it).
-**Fail-closed rules (C1):** if the entry exists but is malformed —
-`forge_remote_id` missing, non-string, or empty — treat as a mismatch
-(revoke, error log naming the malformation, `204`); a non-403/404 read
-error (5xx, timeout) → revoke + `502`. A broken binding must never
-silently degrade to "not enforced". This closes the
-repo-rename/recreate inheritance hole (DESIGN §3) when enabled.
+**Removed** ([grant-model design](plans/2026-09-30-grant-model-design.md) §13). Repo identity is bound by the role's `repo_key`
+claim (`esc(org)/esc(repo)#esc(forge_remote_id)`). `vault_token` is returned
+only where a metadata-only `vault_token` mapping exists at a walked level
+(§8.5); there is no suppression or `vault_token_images` directive.
 
-### 4.5 `.config` directives
+### 4.6 Per-secret pins
 
-`GET <mount>/data/<B>/.config`, optional, all fields optional:
-
-| Key | Type | Effect |
-|---|---|---|
-| `vault_token` | `"false"` | Suppress returning the minted token |
-| `vault_token_images` | comma-separated string | `images` pin on the `vault_token` secret |
-
-Unknown keys ignored (logged at debug). **Fail-closed rules (C1):** a
-non-403/404 read error → revoke + `502`; an entry that exists but cannot
-be parsed as a flat string map → revoke + `502` with an error log (a
-broken directive must never silently fall back to defaults — it may be an
-operator's suppression attempt).
-
-### 4.6 Per-secret pins via custom_metadata
-
-If a swept entry's KV v2 `custom_metadata` contains:
-
-| Key | Effect |
-|---|---|
-| `ironbark_images` | comma-separated → the returned secret's `images` list |
-| `ironbark_events` | comma-separated → REPLACES the default event pin (rare; e.g. a secret valid for `push` and `cron`) |
-
-`custom_metadata` is read from the KV v2 data-GET response's metadata
-block — no fallback metadata-GET (G3). That the data-GET carries
-`custom_metadata` on BOTH products is a named integration-test assertion
-(§9.3); if that assertion ever fails, this section is the thing to
-re-design, not silently work around.
+**Changed** ([grant-model design](plans/2026-09-30-grant-model-design.md) §8.4). Image pins live on the voidstar mapping as
+`ironbark_images` in its `custom_metadata`, relayed as the secret's
+`images`. Event pins are gone: they are role `bound_claims`. An entry still
+carrying `ironbark_events` is logged as ignored. No `events` field is
+emitted in the response.
 
 ## 5. Signature verification (load-bearing; DESIGN §6)
 
@@ -604,35 +354,32 @@ uncovered required component, missing `created`, stale/future `created`.
 ## 7. Configuration (complete surface)
 
 Env vars (a `_FILE` suffix variant reads the value from a file path, for
-ESO/k8s mounts):
+ESO/k8s mounts). The grant settings are defined in [grant-model design](plans/2026-09-30-grant-model-design.md) §11.
 
 | Var | Default | Notes |
 |---|---|---|
+| `IRONBARK_DATA_PATH` | — (required) | path template with `{repo}`, `{env}`, `{target...}` as the last three segments; second segment `data` |
+| `IRONBARK_ENV_VAR` | `DEPLOY_ENV` | pipeline variable naming the environment |
+| `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | manual-run variable naming the target (must differ from the env var) |
+| `IRONBARK_JWT_ROLE` | `ci-{env}` | login role template; renders `ci` with no environment |
+| `IRONBARK_JWT_SIGNING_KEY` / `_FILE` | — (required) | PEM RSA private key, at least 3072 bits |
+| `IRONBARK_JWT_MOUNT` | `jwt` | auth mount path |
 | `IRONBARK_LISTEN_ADDR` | `:8080` | |
 | `IRONBARK_WOODPECKER_PUBLIC_KEY` / `_FILE` | — (required) | PEM ed25519 |
 | `IRONBARK_VAULT_ADDR` | — (required) | Vault/OpenBao URL |
-| `IRONBARK_VAULT_ROLE_ID` / `_FILE` | — (required) | AppRole |
-| `IRONBARK_VAULT_SECRET_ID` / `_FILE` | — (required) | AppRole |
-| `IRONBARK_TOKEN_ROLE` | `ci` | token role name |
-| `IRONBARK_KV_MOUNT` | `kv` | KV v2 mount |
-| `IRONBARK_KV_PREFIX` | `ci` | |
-| `IRONBARK_POLICY_PREFIX` | `ci` | |
 | `IRONBARK_FRESHNESS_WINDOW` | `10s` | §5 |
 | `IRONBARK_ADVERTISE_VAULT_ADDR` | unset | §6 |
 | `IRONBARK_LOG_LEVEL` | `info` | |
-| `IRONBARK_ATTR_MOUNT` | `ironbark` | KV v2 mount holding attribute data (§2.4); leading/trailing `/` trimmed; equal to, containing or contained in `IRONBARK_KV_MOUNT` is a startup error |
-| `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | manual-run variable naming the target (§2.1) |
-| `IRONBARK_MAX_POLICIES` | `64` | integer ≥ 3 (§2.3) |
-| `IRONBARK_ACTOR_FORGE` | `none` | `none` \| `gitea` \| `github` \| `bitbucket` (Bitbucket Cloud): the forge whose push-family `sender` is a login (§2.1); GitLab and Bitbucket Data Center are not declarable. With `IRONBARK_FORGE_PROVIDER=gitea` only `gitea` or `none` |
-| `IRONBARK_FORGE_PROVIDER` | `none` | `none` \| `gitea` (Gitea, Forgejo): team resolution (§2.5) |
-| `IRONBARK_FORGE_URL` | — | required when provider ≠ `none`; absolute `http(s)` URL |
-| `IRONBARK_FORGE_TOKEN` / `_FILE` | — | required when provider ≠ `none`; read scope on org teams |
-| `IRONBARK_FORGE_TIMEOUT` | `3s` | Go duration > 0; bounds a whole team lookup |
+| `IRONBARK_ACTOR_FORGE` | `none` | `none` \| `gitea` \| `github` \| `bitbucket`: the forge whose push-family `sender` is a login. With `IRONBARK_FORGE_PROVIDER=gitea` only `gitea` or `none` |
+| `IRONBARK_FORGE_PROVIDER` | `none` | `none` \| `gitea` (Gitea, Forgejo): branch protection and teams. `none` makes `branch_protected` always `"false"` (startup warning) |
+| `IRONBARK_FORGE_URL` | — | required when provider ≠ `none` |
+| `IRONBARK_FORGE_TOKEN` / `_FILE` | — | required when provider ≠ `none` |
+| `IRONBARK_FORGE_TIMEOUT` | `3s` | Go duration > 0; bounds each forge lookup (protection, teams) |
 
-Any other value for an enumerated var is a startup error. None of the
-attribute vars is required: a repo with no attribute policies behaves as
-before, and until the attribute mount exists its LISTs return 403/404 and
-are skipped.
+Removed: `IRONBARK_VAULT_ROLE_ID`, `IRONBARK_VAULT_SECRET_ID`,
+`IRONBARK_TOKEN_ROLE`, `IRONBARK_KV_MOUNT`, `IRONBARK_KV_PREFIX`,
+`IRONBARK_POLICY_PREFIX`, `IRONBARK_ATTR_MOUNT`, `IRONBARK_MAX_POLICIES`.
+`/readyz` reports 200 while OpenBao answers `sys/health` unsealed.
 
 No config file, no rule tables, no path maps (DEC-260711061323). TLS termination
 is the deployment's concern (in-cluster service mesh / ingress); ironbark

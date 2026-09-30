@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING: grant model)
+
+- ironbark no longer mints tokens. It signs an RS256 JWT per request and logs
+  in to OpenBao's `jwt` auth mount as a role rendered from
+  `IRONBARK_JWT_ROLE`; what a run may read is OpenBao configuration (roles,
+  templated level policies, external groups, voidstar views). Design:
+  `docs/plans/2026-09-30-grant-model-design.md`. Two deployments run side by
+  side to migrate; there is no dual mode.
+- Secrets live on a level tree (repo, environment, target segments) addressed
+  by `IRONBARK_DATA_PATH`, read by one walk. Environments are selected by
+  `IRONBARK_ENV_VAR` or by level-metadata `branches` on protected branches.
+- Every verified request returns `200` with an `ironbark_status` secret
+  (`outcome=ok|refused|invalid|config_error|error`); `204` and `502` are
+  gone (invalid signature is still `401`). A response with nothing but
+  `ironbark_status` (and `vault_addr`) revokes the token it obtained.
+- `events` is no longer emitted; event pins are role `bound_claims`.
+  `ironbark_events` is ignored (logged). `vault_token` is returned only where
+  a metadata-only `vault_token` mapping exists.
+- Audit line reworked (`repo_key`, `env`, `env_source`, `target_source`,
+  `levels`, `role`, `sub`, `jti`, `discovery_login`, `outcome`, ...).
+- `/readyz` reflects OpenBao `sys/health`; the startup canary and AppRole
+  session are gone.
+
+### Added
+
+- `ironbark render-policies -accessor ACC`: prints the three level policies
+  for `IRONBARK_DATA_PATH`, with no OpenBao access.
+- Config: `IRONBARK_DATA_PATH`, `IRONBARK_ENV_VAR`, `IRONBARK_JWT_ROLE`,
+  `IRONBARK_JWT_SIGNING_KEY[_FILE]`, `IRONBARK_JWT_MOUNT`.
+
+### Removed
+
+- `IRONBARK_VAULT_ROLE_ID`, `IRONBARK_VAULT_SECRET_ID`, `IRONBARK_TOKEN_ROLE`,
+  `IRONBARK_KV_MOUNT`, `IRONBARK_KV_PREFIX`, `IRONBARK_POLICY_PREFIX`,
+  `IRONBARK_ATTR_MOUNT`, `IRONBARK_MAX_POLICIES`; tier and attribute
+  policies, `.identity` / `.config` directives, `$ref` pointers (replaced by
+  `resolve` mappings), the mint/canary/sweep path (`ib` still uses the legacy
+  sweep until its own rewrite).
+
 ### Added
 
 - `ib`, a local client (`cmd/ib`) giving an operator's or agent's local run

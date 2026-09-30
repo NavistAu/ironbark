@@ -32,12 +32,14 @@ import (
 )
 
 const (
-	grantAddr     = "http://127.0.0.1:8300"
-	grantTemplate = "vs/data/pipelines/{repo}/{env}/{target...}"
+	grantAddr = "http://127.0.0.1:8300" // OpenBao 2.7.0 + voidstar
+	vaultAddr = "http://127.0.0.1:8200" // Vault 1.20, plain KV v2 only
 )
 
 // Grant is the shared grant-model fixture.
 type Grant struct {
+	Addr     string
+	Mount    string // "vs" (voidstar views over kv/) or "kv" (plain KV v2, Vault)
 	Root     *api.Client
 	Accessor string // jwt mount accessor
 	Tmpl     grantcfg.Template
@@ -47,19 +49,29 @@ type Grant struct {
 }
 
 var (
-	grantOnce sync.Once
-	grantFix  *Grant
-	grantErr  error
+	grantOnce, vaultOnce sync.Once
+	grantFix, vaultFix   *Grant
+	grantErr, vaultErr   error
 )
 
-// GetGrant provisions the fixture once per test binary.
+// GetGrant provisions the OpenBao + voidstar fixture once per test binary.
 func GetGrant(t *testing.T) *Grant {
 	t.Helper()
-	grantOnce.Do(func() { grantFix, grantErr = setupGrant() })
+	grantOnce.Do(func() { grantFix, grantErr = setupGrant(grantAddr, true) })
 	if grantErr != nil {
 		t.Fatalf("grant fixture: %v", grantErr)
 	}
 	return grantFix
+}
+
+// GetVault provisions the plain-KV fixture on Vault 1.20 once per test binary.
+func GetVault(t *testing.T) *Grant {
+	t.Helper()
+	vaultOnce.Do(func() { vaultFix, vaultErr = setupGrant(vaultAddr, false) })
+	if vaultErr != nil {
+		t.Fatalf("vault fixture: %v", vaultErr)
+	}
+	return vaultFix
 }
 
 func genKey() (*rsa.PrivateKey, []byte, string, error) {
@@ -75,14 +87,17 @@ func genKey() (*rsa.PrivateKey, []byte, string, error) {
 	return k, priv, string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
 }
 
-func setupGrant() (*Grant, error) {
-	c, err := api.NewClient(&api.Config{Address: grantAddr})
+func setupGrant(addr string, voidstar bool) (*Grant, error) {
+	c, err := api.NewClient(&api.Config{Address: addr})
 	if err != nil {
 		return nil, err
 	}
 	c.SetToken("root")
-	g := &Grant{Root: c}
-	if g.Tmpl, err = grantcfg.ParseTemplate(grantTemplate); err != nil {
+	g := &Grant{Root: c, Addr: addr, Mount: "vs"}
+	if !voidstar {
+		g.Mount = "kv"
+	}
+	if g.Tmpl, err = grantcfg.ParseTemplate(g.Mount + "/data/pipelines/{repo}/{env}/{target...}"); err != nil {
 		return nil, err
 	}
 	var priv []byte
@@ -97,50 +112,25 @@ func setupGrant() (*Grant, error) {
 			break
 		}
 		if i > 60 {
-			return nil, fmt.Errorf("openbao at %s not healthy", grantAddr)
+			return nil, fmt.Errorf("openbao at %s not healthy", addr)
 		}
 		time.Sleep(time.Second)
 	}
-	bin, err := os.ReadFile("plugins/openbao-plugin-secrets-voidstar")
-	if err != nil {
-		return nil, fmt.Errorf("voidstar plugin missing (run build-voidstar.sh): %w", err)
-	}
-	sum := sha256.Sum256(bin)
-	steps := []struct {
-		path string
-		body map[string]any
-	}{
-		{"sys/plugins/catalog/secret/vs", map[string]any{"sha256": hex.EncodeToString(sum[:]), "command": "openbao-plugin-secrets-voidstar"}},
-		{"sys/mounts/vs", map[string]any{"type": "vs"}},
+	common := []step{
 		{"sys/mounts/kv", map[string]any{"type": "kv", "options": map[string]any{"version": "2"}}},
-		{"sys/mounts/database", map[string]any{"type": "database"}},
-		{"sys/auth/approle", map[string]any{"type": "approle"}},
 		{"sys/auth/jwt", map[string]any{"type": "jwt"}},
-		{"sys/policies/acl/voidstar-loopback", map[string]any{"policy": `path "kv/data/*" { capabilities = ["read"] }`}},
-		{"auth/approle/role/voidstar-loopback", map[string]any{"token_policies": "voidstar-loopback", "secret_id_num_uses": 0, "secret_id_ttl": 0}},
-		{"database/config/pg", map[string]any{
-			"plugin_name": "postgresql-database-plugin", "allowed_roles": "*",
-			"connection_url": "postgresql://{{username}}:{{password}}@postgres:5432/postgres?sslmode=disable",
-			"username":       "vaultadmin", "password": "vaultpw"}},
 		{"auth/jwt/config", map[string]any{"bound_issuer": jwtsign.Issuer, "jwt_validation_pubkeys": g.PubPEM}},
 	}
-	for _, s := range steps {
+	if voidstar {
+		if err := g.setupVoidstar(); err != nil {
+			return nil, err
+		}
+	}
+	for _, s := range common {
 		// Mounts already in use: the container outlived an earlier test binary.
 		if _, err := c.Logical().Write(s.path, s.body); err != nil && !strings.Contains(err.Error(), "already in use") {
 			return nil, fmt.Errorf("write %s: %w", s.path, err)
 		}
-	}
-	rid, err := c.Logical().Read("auth/approle/role/voidstar-loopback/role-id")
-	if err != nil {
-		return nil, err
-	}
-	sid, err := c.Logical().Write("auth/approle/role/voidstar-loopback/secret-id", nil)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := c.Logical().Write("vs/admin/config", map[string]any{
-		"role_id": rid.Data["role_id"], "secret_id": sid.Data["secret_id"], "api_addr": "http://127.0.0.1:8200"}); err != nil {
-		return nil, err
 	}
 	auths, err := c.Sys().ListAuth()
 	if err != nil {
@@ -320,4 +310,65 @@ func uniq(prefix string) string {
 	var b [4]byte
 	_, _ = rand.Read(b[:])
 	return strings.ToLower(prefix) + hex.EncodeToString(b[:])
+}
+
+type step struct {
+	path string
+	body map[string]any
+}
+
+// setupVoidstar registers and mounts the plugin, the database engine on the
+// compose Postgres, and the plugin's loopback AppRole.
+func (g *Grant) setupVoidstar() error {
+	c := g.Root
+	bin, err := os.ReadFile("plugins/openbao-plugin-secrets-voidstar")
+	if err != nil {
+		return fmt.Errorf("voidstar plugin missing (run build-voidstar.sh): %w", err)
+	}
+	sum := sha256.Sum256(bin)
+	steps := []step{
+		{"sys/plugins/catalog/secret/vs", map[string]any{"sha256": hex.EncodeToString(sum[:]), "command": "openbao-plugin-secrets-voidstar"}},
+		{"sys/mounts/vs", map[string]any{"type": "vs"}},
+		{"sys/mounts/kv", map[string]any{"type": "kv", "options": map[string]any{"version": "2"}}},
+		{"sys/mounts/database", map[string]any{"type": "database"}},
+		{"sys/auth/approle", map[string]any{"type": "approle"}},
+		{"sys/policies/acl/voidstar-loopback", map[string]any{"policy": `path "kv/data/*" { capabilities = ["read"] }`}},
+		{"auth/approle/role/voidstar-loopback", map[string]any{"token_policies": "voidstar-loopback", "secret_id_num_uses": 0, "secret_id_ttl": 0}},
+		{"database/config/pg", map[string]any{
+			"plugin_name": "postgresql-database-plugin", "allowed_roles": "*",
+			"connection_url": "postgresql://{{username}}:{{password}}@postgres:5432/postgres?sslmode=disable",
+			"username":       "vaultadmin", "password": "vaultpw"}},
+	}
+	for _, s := range steps {
+		if _, err := c.Logical().Write(s.path, s.body); err != nil && !strings.Contains(err.Error(), "already in use") {
+			return fmt.Errorf("write %s: %w", s.path, err)
+		}
+	}
+	rid, err := c.Logical().Read("auth/approle/role/voidstar-loopback/role-id")
+	if err != nil {
+		return err
+	}
+	sid, err := c.Logical().Write("auth/approle/role/voidstar-loopback/secret-id", nil)
+	if err != nil {
+		return err
+	}
+	_, err = c.Logical().Write("vs/admin/config", map[string]any{
+		"role_id": rid.Data["role_id"], "secret_id": sid.Data["secret_id"], "api_addr": "http://127.0.0.1:8200"})
+	return err
+}
+
+// Data is the data path of a secret at rel (relative to pipelines/), e.g.
+// "acme/mono/prod/web/db".
+func (g *Grant) Data(rel string) string { return g.Mount + "/data/pipelines/" + rel }
+
+// Secret makes {value: val} readable at Data(rel): a voidstar view over a KV
+// upstream, or a plain KV entry on Vault.
+func (g *Grant) Secret(t *testing.T, rel, val string) {
+	t.Helper()
+	if g.Mount == "kv" {
+		g.KV(t, "pipelines/"+rel, map[string]any{"value": val})
+		return
+	}
+	g.KV(t, "src/"+rel, map[string]any{"value": val})
+	g.View(t, "pipelines/"+rel, map[string]any{"target": "kv/data/src/" + rel})
 }

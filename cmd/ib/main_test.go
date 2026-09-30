@@ -48,6 +48,9 @@ func testMainRun(m *testing.M) int {
 		return 1
 	}
 
+	// ib reads ~/.config/ib/config: never the developer's real one.
+	os.Setenv("HOME", dir)
+
 	return m.Run()
 }
 

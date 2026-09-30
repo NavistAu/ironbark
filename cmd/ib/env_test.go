@@ -8,14 +8,13 @@ import (
 	"testing"
 
 	"github.com/navistau/ironbark/internal/envfile"
-	"github.com/navistau/ironbark/internal/gitenv"
 )
 
 func TestCmdEnv_SortedFormatAndLeaseNote(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
 	var stdout, stderr bytes.Buffer
-	opts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: &stderr}
+	opts := vc.opts(t, fx, &stderr)
 
 	if err := cmdEnv(context.Background(), opts, &stdout, ""); err != nil {
 		t.Fatalf("cmdEnv: %v (stderr: %s)", err, stderr.String())
@@ -33,13 +32,13 @@ func TestCmdEnv_SortedFormatAndLeaseNote(t *testing.T) {
 }
 
 // TestCmdEnv_JSONOutput_ShapeAndSorting exercises CLIENT-SPEC §1.3's
-// --output json shape: {"branch", "rule", "secrets"}, secrets keyed by the
+// --output json shape: {"env", "rule", "secrets"}, secrets keyed by the
 // sweep's own lowercase names (not SECRET_<NAME>), sorted.
 func TestCmdEnv_JSONOutput_ShapeAndSorting(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
 	var stdout, stderr bytes.Buffer
-	opts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: &stderr}
+	opts := vc.opts(t, fx, &stderr)
 
 	if err := cmdEnv(context.Background(), opts, &stdout, "json"); err != nil {
 		t.Fatalf("cmdEnv: %v (stderr: %s)", err, stderr.String())
@@ -49,11 +48,11 @@ func TestCmdEnv_JSONOutput_ShapeAndSorting(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v (stdout: %q)", err, stdout.String())
 	}
-	if got.Branch != "main" {
-		t.Errorf("Branch = %q, want %q", got.Branch, "main")
+	if got.Env != "staging" {
+		t.Errorf("Env = %q, want %q", got.Env, "staging")
 	}
-	if got.Rule != "direct" {
-		t.Errorf("Rule = %q, want %q", got.Rule, "direct")
+	if got.Rule != "explicit" {
+		t.Errorf("Rule = %q, want %q", got.Rule, "explicit")
 	}
 	want := map[string]string{
 		"dbref_password": "p",
@@ -86,7 +85,7 @@ func TestCmdEnv_JSONOutput_PureStdout(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
 	var stdout, stderr bytes.Buffer
-	opts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: &stderr}
+	opts := vc.opts(t, fx, &stderr)
 
 	if err := cmdEnv(context.Background(), opts, &stdout, "json"); err != nil {
 		t.Fatalf("cmdEnv: %v (stderr: %s)", err, stderr.String())
@@ -107,7 +106,7 @@ func TestCmdEnv_JSONOutput_StderrUnchanged(t *testing.T) {
 	fxEnv, fvEnv := setupGetEnvFixture(t)
 	vcEnv := newTestVault(t, fvEnv)
 	var stderrEnv, stdoutEnv bytes.Buffer
-	optsEnv := resolveOpts{Runner: gitenv.ExecRunner{Dir: fxEnv.clone}, Vault: vcEnv, Token: rtToken, Stderr: &stderrEnv}
+	optsEnv := vcEnv.opts(t, fxEnv, &stderrEnv)
 	if err := cmdEnv(context.Background(), optsEnv, &stdoutEnv, ""); err != nil {
 		t.Fatalf("cmdEnv (env): %v", err)
 	}
@@ -115,7 +114,7 @@ func TestCmdEnv_JSONOutput_StderrUnchanged(t *testing.T) {
 	fxJSON, fvJSON := setupGetEnvFixture(t)
 	vcJSON := newTestVault(t, fvJSON)
 	var stderrJSON, stdoutJSON bytes.Buffer
-	optsJSON := resolveOpts{Runner: gitenv.ExecRunner{Dir: fxJSON.clone}, Vault: vcJSON, Token: rtToken, Stderr: &stderrJSON}
+	optsJSON := vcJSON.opts(t, fxJSON, &stderrJSON)
 	if err := cmdEnv(context.Background(), optsJSON, &stdoutJSON, "json"); err != nil {
 		t.Fatalf("cmdEnv (json): %v", err)
 	}
@@ -125,20 +124,18 @@ func TestCmdEnv_JSONOutput_StderrUnchanged(t *testing.T) {
 	}
 }
 
-// TestCmdEnv_JSONOutput_NoBranchTiers_EmptyBranch exercises the "chosen or
-// empty" branch case: CLIENT-SPEC §3's no-branch-tiers path selects no
-// branch at all, so the JSON object's "branch" is "" and "rule" names the
-// no-branch-tiers path, not an omitted or null field.
-func TestCmdEnv_JSONOutput_NoBranchTiers_EmptyBranch(t *testing.T) {
+// TestCmdEnv_JSONOutput_NoEnvironment_EmptyEnv: with no environment
+// selected the JSON object's "env" is "" and "rule" is "none", not an
+// omitted or null field.
+func TestCmdEnv_JSONOutput_NoEnvironment_EmptyEnv(t *testing.T) {
 	fx := newIBFixture(t, nil)
+	gitRaw(t, fx.clone, "checkout", "-q", "-b", "wip/x")
 
-	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtBase, 200, listBody([]string{"shared"}))
-	fv.set("/v1/kv/data/"+rtBase+"/shared", 200, entryBody(map[string]interface{}{"value": "shared-value"}, nil))
-
+	fv := discoveryVault()
 	vc := newTestVault(t, fv)
 	var stdout, stderr bytes.Buffer
-	opts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: &stderr}
+	opts := vc.opts(t, fx, &stderr)
+	opts.Env = ""
 
 	if err := cmdEnv(context.Background(), opts, &stdout, "json"); err != nil {
 		t.Fatalf("cmdEnv: %v (stderr: %s)", err, stderr.String())
@@ -148,13 +145,10 @@ func TestCmdEnv_JSONOutput_NoBranchTiers_EmptyBranch(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v (stdout: %q)", err, stdout.String())
 	}
-	if got.Branch != "" {
-		t.Errorf("Branch = %q, want empty (no branch tiers)", got.Branch)
+	if got.Env != "" || got.Rule != "none" {
+		t.Errorf("Env, Rule = %q, %q, want \"\", none", got.Env, got.Rule)
 	}
-	if got.Rule != "no-branch-tiers" {
-		t.Errorf("Rule = %q, want %q", got.Rule, "no-branch-tiers")
-	}
-	if len(got.Secrets) != 1 || got.Secrets["shared"] != "shared-value" {
-		t.Errorf("Secrets = %v, want just shared=shared-value", got.Secrets)
+	if len(got.Secrets) != 1 || got.Secrets["shared"] != "sv" {
+		t.Errorf("Secrets = %v, want just shared=sv", got.Secrets)
 	}
 }

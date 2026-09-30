@@ -17,7 +17,7 @@ import (
 // encoding/json sorts string-keyed map keys when marshaling, satisfying
 // the "sorted keys" requirement without any extra work here.
 type envJSON struct {
-	Branch  string            `json:"branch"`
+	Env     string            `json:"env"`
 	Rule    string            `json:"rule"`
 	Secrets map[string]string `json:"secrets"`
 }
@@ -37,7 +37,7 @@ func cmdEnv(ctx context.Context, opts resolveOpts, stdout io.Writer, output stri
 	}
 
 	if output == outputJSON {
-		out := envJSON{Branch: sel.Branch, Rule: sel.Rule, Secrets: make(map[string]string, len(secrets))}
+		out := envJSON{Env: sel.Env, Rule: sel.Rule, Secrets: make(map[string]string, len(secrets))}
 		for n, s := range secrets {
 			out.Secrets[n] = s.Value
 		}

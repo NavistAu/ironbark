@@ -19,6 +19,8 @@ func baseEnv() map[string]string {
 	return map[string]string{
 		"VAULT_ADDR":  "https://vault.example.com",
 		"VAULT_TOKEN": "s.base-token",
+
+		"IRONBARK_DATA_PATH": testDataPath,
 	}
 }
 
@@ -203,41 +205,138 @@ func TestLoadTLS(t *testing.T) {
 	})
 }
 
-func TestLoadLayoutAndBranch(t *testing.T) {
-	t.Run("KV defaults", func(t *testing.T) {
-		env := baseEnv()
-		cfg, err := Load(fakeGetenv(env), t.TempDir())
+const testDataPath = "vs/data/pipelines/{repo}/{env}/{target...}"
+
+func writeConfigFile(t *testing.T, home, body string) {
+	t.Helper()
+	dir := filepath.Join(home, ".config", "ib")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadGrantSettings(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		cfg, err := Load(fakeGetenv(baseEnv()), t.TempDir())
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if cfg.KVMount != "kv" {
-			t.Errorf("KVMount = %q, want kv", cfg.KVMount)
-		}
-		if cfg.KVPrefix != "ci" {
-			t.Errorf("KVPrefix = %q, want ci", cfg.KVPrefix)
-		}
-		if cfg.Branch != "" {
-			t.Errorf("Branch = %q, want empty", cfg.Branch)
+		if cfg.DataPath.Prefix[0] != "vs" || cfg.EnvVar != "DEPLOY_ENV" || cfg.TargetVar != "DEPLOY_TO" || cfg.JWTRole != "ci-{env}" {
+			t.Errorf("got %+v", cfg)
 		}
 	})
 
-	t.Run("overrides applied", func(t *testing.T) {
+	t.Run("data path is required and names itself", func(t *testing.T) {
 		env := baseEnv()
-		env["IB_KV_MOUNT"] = "secret"
-		env["IB_KV_PREFIX"] = "prefix"
-		env["IB_BRANCH"] = "develop"
-		cfg, err := Load(fakeGetenv(env), t.TempDir())
+		delete(env, "IRONBARK_DATA_PATH")
+		_, err := Load(fakeGetenv(env), t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "IRONBARK_DATA_PATH") {
+			t.Fatalf("err = %v, want one naming IRONBARK_DATA_PATH", err)
+		}
+	})
+
+	t.Run("bad data path errors", func(t *testing.T) {
+		env := baseEnv()
+		env["IRONBARK_DATA_PATH"] = "vs/data/{env}"
+		if _, err := Load(fakeGetenv(env), t.TempDir()); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestLoadConfigFilePrecedence(t *testing.T) {
+	t.Run("file supplies what env lacks", func(t *testing.T) {
+		home := t.TempDir()
+		writeConfigFile(t, home, "# ib\nBAO_ADDR=https://file.example.com\nIRONBARK_DATA_PATH='"+testDataPath+"'\nIRONBARK_ENV_VAR=MY_ENV\nIRONBARK_TARGET_VAR=MY_TO\nIRONBARK_JWT_ROLE=r-{env}\nUNRELATED=1\n")
+		cfg, err := Load(fakeGetenv(map[string]string{"BAO_TOKEN": "s.t"}), home)
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if cfg.KVMount != "secret" {
-			t.Errorf("KVMount = %q, want secret", cfg.KVMount)
-		}
-		if cfg.KVPrefix != "prefix" {
-			t.Errorf("KVPrefix = %q, want prefix", cfg.KVPrefix)
-		}
-		if cfg.Branch != "develop" {
-			t.Errorf("Branch = %q, want develop", cfg.Branch)
+		if cfg.Addr != "https://file.example.com" || cfg.EnvVar != "MY_ENV" || cfg.TargetVar != "MY_TO" || cfg.JWTRole != "r-{env}" {
+			t.Errorf("got %+v", cfg)
 		}
 	})
+
+	t.Run("env wins over file, across the BAO/VAULT pair", func(t *testing.T) {
+		home := t.TempDir()
+		writeConfigFile(t, home, "BAO_ADDR=https://file-bao\nIRONBARK_DATA_PATH="+testDataPath+"\nIRONBARK_ENV_VAR=FILE_ENV\n")
+		env := map[string]string{"VAULT_ADDR": "https://env-vault", "VAULT_TOKEN": "t", "IRONBARK_ENV_VAR": "ENV_ENV"}
+		cfg, err := Load(fakeGetenv(env), home)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Addr != "https://env-vault" {
+			t.Errorf("Addr = %q, want the env VAULT_ADDR over the file BAO_ADDR", cfg.Addr)
+		}
+		if cfg.EnvVar != "ENV_ENV" {
+			t.Errorf("EnvVar = %q, want env value", cfg.EnvVar)
+		}
+	})
+
+	t.Run("a token in the file is never used", func(t *testing.T) {
+		home := t.TempDir()
+		writeConfigFile(t, home, "BAO_TOKEN=s.from-file\n")
+		env := baseEnv()
+		delete(env, "VAULT_TOKEN")
+		if _, err := Load(fakeGetenv(env), home); err == nil {
+			t.Fatal("expected the no-token error")
+		}
+	})
+
+	t.Run("missing file is fine", func(t *testing.T) {
+		if _, err := Load(fakeGetenv(baseEnv()), t.TempDir()); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+	})
+
+	t.Run("malformed file names its line", func(t *testing.T) {
+		home := t.TempDir()
+		writeConfigFile(t, home, "BAO_ADDR=x\n\nnot a pair\n")
+		_, err := Load(fakeGetenv(baseEnv()), home)
+		if err == nil || !strings.Contains(err.Error(), "line 3") {
+			t.Fatalf("err = %v, want one naming line 3", err)
+		}
+	})
+}
+
+func TestLoadRemovedVars(t *testing.T) {
+	cases := map[string]string{
+		"IB_KV_MOUNT":  "IRONBARK_DATA_PATH",
+		"IB_KV_PREFIX": "IRONBARK_DATA_PATH",
+		"IB_BRANCH":    "IB_ENV",
+	}
+	for name, repl := range cases {
+		t.Run(name+" in env", func(t *testing.T) {
+			env := baseEnv()
+			env[name] = "x"
+			_, err := Load(fakeGetenv(env), t.TempDir())
+			if err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), repl) {
+				t.Fatalf("err = %v, want one naming %s and %s", err, name, repl)
+			}
+		})
+		t.Run(name+" in file", func(t *testing.T) {
+			home := t.TempDir()
+			writeConfigFile(t, home, name+"=x\n")
+			_, err := Load(fakeGetenv(baseEnv()), home)
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("err = %v, want one naming %s", err, name)
+			}
+		})
+	}
+}
+
+func TestLoadSelection(t *testing.T) {
+	env := baseEnv()
+	env["IB_ENV"] = "staging"
+	env["IB_TARGET"] = "web/api"
+	cfg, err := Load(fakeGetenv(env), t.TempDir())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Env != "staging" || cfg.Target != "web/api" {
+		t.Errorf("Env, Target = %q, %q", cfg.Env, cfg.Target)
+	}
 }

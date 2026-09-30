@@ -15,14 +15,15 @@ import (
 
 	"github.com/navistau/ironbark/internal/envfile"
 	"github.com/navistau/ironbark/internal/mask"
-	"github.com/navistau/ironbark/internal/vaultx"
+	"github.com/navistau/ironbark/internal/walk"
 )
 
 // runOpts is cmdRun's own configuration, parsed from ib run's flags by
 // parseRunArgs.
 type runOpts struct {
-	EnvFiles  []string
-	NoMasking bool
+	EnvFiles    []string
+	NoMasking   bool
+	Env, Target string // --env and --target ("" if not given)
 }
 
 // stringSliceFlag implements flag.Value for a repeatable string flag
@@ -39,7 +40,7 @@ func (s *stringSliceFlag) Set(v string) error {
 // literal "--": what precedes it are ib run's own flags, what follows is
 // the child command. A missing "--", or nothing after it, is a usage
 // error (CLIENT-SPEC §7 exit 1).
-func parseRunArgs(args []string) (opts runOpts, branch string, cmdArgs []string, err error) {
+func parseRunArgs(args []string) (opts runOpts, cmdArgs []string, err error) {
 	sepIdx := -1
 	for i, a := range args {
 		if a == "--" {
@@ -48,11 +49,11 @@ func parseRunArgs(args []string) (opts runOpts, branch string, cmdArgs []string,
 		}
 	}
 	if sepIdx < 0 {
-		return runOpts{}, "", nil, fmt.Errorf("%w: ib run needs a '--' before the command", errUsage)
+		return runOpts{}, nil, fmt.Errorf("%w: ib run needs a '--' before the command", errUsage)
 	}
 	cmdArgs = args[sepIdx+1:]
 	if len(cmdArgs) == 0 {
-		return runOpts{}, "", nil, fmt.Errorf("%w: no command given after '--'", errUsage)
+		return runOpts{}, nil, fmt.Errorf("%w: no command given after '--'", errUsage)
 	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -60,12 +61,13 @@ func parseRunArgs(args []string) (opts runOpts, branch string, cmdArgs []string,
 	var envFiles stringSliceFlag
 	fs.Var(&envFiles, "env-file", "env file to layer onto the child's environment (repeatable)")
 	noMasking := fs.Bool("no-masking", false, "pass the child's stdio through untouched")
-	branchFlag := fs.String("branch", "", "override the selected branch (CLIENT-SPEC §3 rule 1)")
+	envFlag := fs.String("env", "", "environment level to walk (default: discovered from the local branch)")
+	targetFlag := fs.String("target", "", "target path to walk below the environment")
 	if err := fs.Parse(args[:sepIdx]); err != nil {
-		return runOpts{}, "", nil, fmt.Errorf("%w: %v", errUsage, err)
+		return runOpts{}, nil, fmt.Errorf("%w: %v", errUsage, err)
 	}
 
-	return runOpts{EnvFiles: envFiles, NoMasking: *noMasking}, *branchFlag, cmdArgs, nil
+	return runOpts{EnvFiles: envFiles, NoMasking: *noMasking, Env: *envFlag, Target: *targetFlag}, cmdArgs, nil
 }
 
 // envOverride is one parsed --env-file entry, in file/entry order.
@@ -145,8 +147,8 @@ func childExitCode(waitErr error) int {
 // loads Vault configuration — CLIENT-SPEC §5, M2) runs when no --env-file
 // was given at all, or when at least one given file holds a reference;
 // an --env-file whose entries are all literal never sweeps, unchanged
-// from before mode (a) existed. An unresolved reference in mode (b) exits
-// 3 before the child starts. Masking (default on) pipes the child's
+// from before mode (a) existed. An unresolved reference in mode (b) leaves
+// its variable unset, with one stderr line (design §12.4). Masking (default on) pipes the child's
 // stdout/stderr through a mask.Writer for every injected/resolved value —
 // every swept secret in mode (a), every reference resolved in mode (b);
 // --no-masking passes stdio straight through. Signals in the forwarded
@@ -179,7 +181,7 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, buildOpts func(
 		}
 	}
 
-	var secrets map[string]vaultx.SweptSecret
+	var secrets map[string]walk.Secret
 	if noEnvFiles || hasRef {
 		ropts, berr := buildOpts()
 		if berr != nil {
@@ -199,7 +201,7 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, buildOpts func(
 			// runs on every exit path below — an unresolved reference, a
 			// cmd.Start failure, or the child actually running.
 			defer func() {
-				reportRevokeErrors(stderr, ropts.Vault.RevokeLeases(ctx, ropts.Token, leaseIDs))
+				reportRevokeErrors(stderr, ropts.Leases.Revoke(ctx, leaseIDs))
 			}()
 		}
 	}
@@ -219,8 +221,11 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, buildOpts func(
 		if name, ok := envfile.Ref(o.value); ok {
 			s, found := secrets[name]
 			if !found {
-				fmt.Fprintf(stderr, "ib: unresolved secret reference %q\n", name)
-				return 3
+				// design §12.4: the variable stays unset; the wrapped tool
+				// validates its own inputs.
+				fmt.Fprintf(stderr, "ib: %s left unset: no secret %q was produced\n", o.key, name)
+				delete(envMap, o.key)
+				continue
 			}
 			val = s.Value
 			usedValues = append(usedValues, val)

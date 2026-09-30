@@ -3,8 +3,8 @@ package main
 // A minimal fake Vault HTTP server for cmd/ib's own tests. Mirrors
 // internal/vaultx/sweep_test.go's fakeKV (unexported there, so not
 // importable across the package boundary): per-path programmable
-// status/body, keyed on the literal request path, plus a recorder for
-// PUT sys/leases/revoke calls.
+// status/body, keyed on the literal request path (a LIST under "LIST "; a level's
+// metadata read has a trailing slash), plus a recorder for PUT sys/leases/revoke calls.
 
 import (
 	"encoding/json"
@@ -34,6 +34,12 @@ func (f *fakeVault) set(path string, status int, body string) {
 	f.responses[path] = fakeVaultResp{status: status, body: body}
 }
 
+// setList programs the LIST of a mount-relative path (a request path and its level-metadata
+// GET share the trailing-slash path, so they are keyed apart).
+func (f *fakeVault) setList(path string, keys ...string) {
+	f.set("LIST /v1/"+path, 200, listBody(keys))
+}
+
 func (f *fakeVault) revokedIDs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -54,8 +60,12 @@ func (f *fakeVault) handler() http.HandlerFunc {
 			return
 		}
 
+		key := r.URL.Path
+		if r.Method == "LIST" || r.URL.Query().Get("list") == "true" {
+			key = "LIST " + key
+		}
 		f.mu.Lock()
-		resp, ok := f.responses[r.URL.Path]
+		resp, ok := f.responses[key]
 		f.mu.Unlock()
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -105,5 +115,33 @@ func derefBody(fields map[string]interface{}, leaseID string) string {
 	wire.LeaseID = leaseID
 	wire.Data = fields
 	b, _ := json.Marshal(wire)
+	return string(b)
+}
+
+// levelMetaBody is a level-metadata read: GET on a metadata path with a
+// trailing slash.
+func levelMetaBody(custom map[string]string) string {
+	b, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"custom_metadata": custom}})
+	return string(b)
+}
+
+// resolveBody is a voidstar view in mode=resolve pointing at target, with the
+// mapping's custom_metadata.
+func resolveBody(target string, customMeta map[string]string) string {
+	b, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{
+		"data":     map[string]interface{}{},
+		"metadata": map[string]interface{}{"custom_metadata": customMeta},
+		"voidstar": map[string]interface{}{"mode": "resolve", "path": target},
+	}})
+	return string(b)
+}
+
+// markerBody is a metadata-only view (the vault_token marker).
+func markerBody() string {
+	b, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{
+		"data":     map[string]interface{}{},
+		"metadata": map[string]interface{}{"custom_metadata": map[string]string{}},
+		"voidstar": map[string]interface{}{"mode": "metadata"},
+	}})
 	return string(b)
 }

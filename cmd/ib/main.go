@@ -15,7 +15,6 @@ import (
 
 	"github.com/navistau/ironbark/internal/gitenv"
 	"github.com/navistau/ironbark/internal/ibcfg"
-	"github.com/navistau/ironbark/internal/vaultx"
 )
 
 func main() {
@@ -45,37 +44,37 @@ func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
-// buildResolveOpts loads CLIENT-SPEC §5 configuration from the real
-// environment and builds the resolveOpts every get/env/run invocation
-// shares. branchFlag is the command's own --branch value ("" if unset);
-// it wins over IB_BRANCH (ibcfg.Config.Branch) per CLIENT-SPEC §1.
-func buildResolveOpts(branchFlag string, stderr io.Writer) (resolveOpts, error) {
+// buildResolveOpts loads configuration (CLIENT-SPEC §5) and builds the
+// resolveOpts every get/env/run invocation shares. envFlag and targetFlag
+// are the command's own --env/--target ("" if unset); each wins over
+// IB_ENV/IB_TARGET.
+func buildResolveOpts(envFlag, targetFlag string, stderr io.Writer) (resolveOpts, error) {
 	home, _ := os.UserHomeDir()
 	cfg, err := ibcfg.Load(os.Getenv, home)
 	if err != nil {
 		return resolveOpts{}, fmt.Errorf("%w: %v", errConfig, err)
 	}
 
-	vc, err := vaultx.New(vaultx.Config{
-		Addr:     cfg.Addr,
-		KVMount:  cfg.KVMount,
-		KVPrefix: cfg.KVPrefix,
-		TLS:      cfg.TLS,
-	})
+	client, leases, err := newVault(cfg.Addr, cfg.TLS, cfg.Token)
 	if err != nil {
 		return resolveOpts{}, fmt.Errorf("%w: %v", errConfig, err)
 	}
 
-	branch := branchFlag
-	if branch == "" {
-		branch = cfg.Branch
+	env, target := cfg.Env, cfg.Target
+	if envFlag != "" {
+		env = envFlag
+	}
+	if targetFlag != "" {
+		target = targetFlag
 	}
 
 	return resolveOpts{
 		Runner: gitenv.ExecRunner{},
-		Vault:  vc,
-		Token:  cfg.Token,
-		Branch: branch,
+		Client: client,
+		Leases: leases,
+		Tmpl:   cfg.DataPath,
+		Env:    env,
+		Target: target,
 		Stderr: stderr,
 	}, nil
 }
@@ -99,9 +98,9 @@ func stdoutIsTerminal(w io.Writer) bool {
 // single-dash form) pair out of args wherever it appears, returning the
 // value ("" if not given) and the remaining args in their original
 // relative order (M8). Go's flag package alone stops parsing at the first
-// non-flag argument, so `ib get NAME --branch x` would otherwise leave
+// non-flag argument, so `ib get NAME --env x` would otherwise leave
 // both NAME and --branch/x as unrecognized positional args — get/env's
-// --branch (CLIENT-SPEC §1) and --output (CLIENT-SPEC §1.2/§1.3) need to
+// --env and --target (design §12.2) and --output (CLIENT-SPEC §1.2/§1.3) need to
 // work regardless of where they appear. ib run does NOT use this: its own
 // "--" already marks where ib's flags end and the child command begins,
 // so flags-after-positionals has no meaning there.
@@ -128,12 +127,6 @@ func splitFlag(args []string, name string) (value string, rest []string, err err
 	return value, rest, nil
 }
 
-// splitBranchFlag pulls --branch (CLIENT-SPEC §1) out of args; see
-// splitFlag.
-func splitBranchFlag(args []string) (branch string, rest []string, err error) {
-	return splitFlag(args, "branch")
-}
-
 // splitOutputFlag pulls --output (CLIENT-SPEC §1.2/§1.3) out of args; see
 // splitFlag.
 func splitOutputFlag(args []string) (output string, rest []string, err error) {
@@ -147,10 +140,21 @@ func splitOutputFlag(args []string) (output string, rest []string, err error) {
 // default, so only the json case needs a named constant here.
 const outputJSON = "json"
 
-func dispatchGet(args []string, stdout, stderr io.Writer) int {
-	const usage = "ib: usage: ib get [--branch <name>] [--output raw|json] <name>"
+// splitSelectionFlags pulls --env and --target out of args; see splitFlag.
+func splitSelectionFlags(args []string) (env, target string, rest []string, err error) {
+	if env, rest, err = splitFlag(args, "env"); err != nil {
+		return "", "", nil, err
+	}
+	if target, rest, err = splitFlag(rest, "target"); err != nil {
+		return "", "", nil, err
+	}
+	return env, target, rest, nil
+}
 
-	branch, rest, err := splitBranchFlag(args)
+func dispatchGet(args []string, stdout, stderr io.Writer) int {
+	const usage = "ib: usage: ib get [--env <name>] [--target <path>] [--output raw|json] <name>"
+
+	env, target, rest, err := splitSelectionFlags(args)
 	if err != nil {
 		fmt.Fprintln(stderr, usage)
 		return 1
@@ -161,7 +165,7 @@ func dispatchGet(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	opts, err := buildResolveOpts(branch, stderr)
+	opts, err := buildResolveOpts(env, target, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return exitCode(err)
@@ -175,9 +179,9 @@ func dispatchGet(args []string, stdout, stderr io.Writer) int {
 }
 
 func dispatchEnv(args []string, stdout, stderr io.Writer) int {
-	const usage = "ib: usage: ib env [--branch <name>] [--output env|json]"
+	const usage = "ib: usage: ib env [--env <name>] [--target <path>] [--output env|json]"
 
-	branch, rest, err := splitBranchFlag(args)
+	env, target, rest, err := splitSelectionFlags(args)
 	if err != nil {
 		fmt.Fprintln(stderr, usage)
 		return 1
@@ -188,7 +192,7 @@ func dispatchEnv(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	opts, err := buildResolveOpts(branch, stderr)
+	opts, err := buildResolveOpts(env, target, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return exitCode(err)
@@ -202,17 +206,17 @@ func dispatchEnv(args []string, stdout, stderr io.Writer) int {
 }
 
 func dispatchRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	runOpts, branch, cmdArgs, err := parseRunArgs(args)
+	runOpts, cmdArgs, err := parseRunArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, "ib:", err)
 		return exitCode(err)
 	}
 
-	// M2: building resolveOpts loads CLIENT-SPEC §5 Vault configuration,
-	// which a run with no ironbark:// reference at all doesn't need — so
-	// it's deferred to cmdRun, which only calls this when a reference is
+	// M2: building resolveOpts loads CLIENT-SPEC §5 configuration, which a
+	// run with no ironbark:// reference at all doesn't need — so it's
+	// deferred to cmdRun, which only calls this when a reference is
 	// actually present.
-	buildOpts := func() (resolveOpts, error) { return buildResolveOpts(branch, stderr) }
+	buildOpts := func() (resolveOpts, error) { return buildResolveOpts(runOpts.Env, runOpts.Target, stderr) }
 
 	return cmdRun(context.Background(), runOpts, cmdArgs, buildOpts, os.Environ(), stdin, stdout, stderr)
 }

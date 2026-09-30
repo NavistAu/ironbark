@@ -1,19 +1,18 @@
 # ib — the ironbark local client (M3)
 
-Status: draft for review. Roadmap: [DESIGN §10 M3](DESIGN.md#10-milestones).
-Normative companion to [SPEC.md](SPEC.md) (the broker). Section references
-of the form "SPEC §n" point there.
+Status: rewritten for the grant model (plans/2026-09-30-grant-model-design.md,
+§12 is the source for §3–§5 here). Normative companion to [SPEC.md](SPEC.md)
+(the broker). Section references of the form "SPEC §n" point there; where
+this file and the grant-model design disagree, the design wins.
 
 ## 0. Scope
 
-`ib` gives a local run — an operator's shell, an agent, a script — the same
-repo/event/branch-tier secrets a CI run on the same repository and
-environment would get, read from the same KV layout (SPEC §2.4) the broker
-sweeps, subject to the divergences named in §6. `ib` never reads the
-attribute mount (SPEC §2.4, `IRONBARK_ATTR_MOUNT`): a local run has no
-signed payload to take a target or actor from, so attribute secrets are
-CI-only. One layout, one resolution algorithm, two
-callers: the broker for CI, `ib` for everything else.
+`ib` gives a local run — an operator's shell, an agent, a script — the
+secrets a CI run on the same repository, environment and target would get:
+the same levels (project, environment, nested target), read by the same
+walk (`internal/walk`, design §8.2), made with the caller's own OpenBao
+login instead of a pipeline JWT. One walk, two callers: the broker for CI,
+`ib` for everything else.
 
 In scope: resolving secrets for a local checkout; delivering them as a
 single value, an env file, or a child process environment.
@@ -25,9 +24,10 @@ bound on what `ib` returns (§6).
 
 ## 1. Commands
 
-`get`, `env`, and `run` each also accept a global `--branch <name>` (or
-`IB_BRANCH=<name>`) override, §3 rule 1; omitted from the synopses below
-for brevity. `auth` takes no such flag — it has no environment to select.
+`get`, `env`, and `run` each also accept `--env <name>` and
+`--target <path>` (or `IB_ENV` / `IB_TARGET`), §3; omitted from the
+synopses below for brevity. `auth` takes no such flags — it has nothing to
+select. There is no `--branch`.
 
 ### 1.1 `ib auth [args…]`
 
@@ -42,9 +42,9 @@ else — no token storage of its own.
 
 ### 1.2 `ib get [--output raw|json] <name>`
 
-Resolves the checkout's environment (§3), sweeps it (§4) and writes the
+Resolves the checkout's environment (§3), walks it (§4) and writes the
 value of secret `<name>` to stdout. `<name>` is the final secret name as
-the sweep produces it (SPEC §4.2 naming: lowercase, `[a-z0-9_]+`, general
+the walk produces it (SPEC §4.2 naming: lowercase, `[a-z0-9_]+`, general
 entries as `E_f`). Unknown name → exit 3 (§7).
 
 `--output` (default `raw`) selects the stdout shape:
@@ -53,16 +53,16 @@ entries as `E_f`). Unknown name → exit 3 (§7).
   when stdout is a terminal.
 - `json`: one line, `{"name": "<name>", "value": "<value>"}`.
 
-`--output`, like `--branch`, is recognized wherever it appears among the
-command's arguments (§3 rule 1's splitting). An unrecognized `--output`
+`--output`, like `--env` and `--target`, is recognized wherever it appears among the
+command's arguments (§3). An unrecognized `--output`
 value is a usage error (exit 1). In every mode, stdout carries only the
 value (or the JSON object) — every status/diagnostic line (selection,
-stale refs, skipped entries, lease notes) stays on stderr, unchanged by
+skipped entries, warnings, lease notes) stays on stderr, unchanged by
 `--output`; an error prints its message to stderr and nothing to stdout.
 
 ### 1.3 `ib env [--output env|json]`
 
-Resolves and sweeps as `get`, then writes every secret to stdout.
+Resolves and walks as `get`, then writes every secret to stdout.
 `--output` (default `env`) selects the shape:
 
 - `env` (default): one line per secret,
@@ -77,19 +77,18 @@ Resolves and sweeps as `get`, then writes every secret to stdout.
   one.
 - `json`: one JSON object,
   ```
-  {"branch": "<chosen or empty>", "rule": "<selection rule>", "secrets": {"<name>": "<value>", …}}
+  {"env": "<chosen or empty>", "rule": "<selection rule>", "secrets": {"<name>": "<value>", …}}
   ```
-  `branch`/`rule` are the §3 selection outcome (`rule` is one of that
-  section's rule names — `override`, `direct`, `nearest`, `reflog`,
-  `cascade`, `no-branch-tiers`; `branch` is `""` for `no-branch-tiers`).
-  `secrets` is keyed by the sweep's own lowercase names (not the
+  `env`/`rule` are the §3 selection outcome (`rule` is `explicit`, `branch`
+  or `none`; `env` is `""` for `none`).
+  `secrets` is keyed by the walk's own lowercase names (not the
   `SECRET_<NAME>` form `env` output uses), with keys sorted.
 
-`--output`, like `--branch`, is recognized wherever it appears among the
+`--output`, like `--env` and `--target`, is recognized wherever it appears among the
 command's (otherwise empty) argument list. An unrecognized `--output`
 value is a usage error (exit 1). In every mode, stdout carries only the
 env lines or the JSON object — every status/diagnostic line (selection,
-stale refs, skipped entries, lease notes) stays on stderr, unchanged by
+skipped entries, warnings, lease notes) stays on stderr, unchanged by
 `--output`; an error prints its message to stderr and nothing to stdout.
 
 ### 1.4 `ib run [--env-file <file>]… [--no-masking] -- <cmd> [args…]`
@@ -97,7 +96,7 @@ stale refs, skipped entries, lease notes) stays on stderr, unchanged by
 Runs `<cmd>` with an environment built from the caller's environment,
 plus one of two modes:
 
-- **No `--env-file` (the normal way to invoke `ib run`).** The sweep
+- **No `--env-file` (the normal way to invoke `ib run`).** The walk
   always runs, and every secret it produces is injected as
   `SECRET_<NAME>` — `<NAME>` upper-cased, exactly the naming `ib env`
   (§1.3) uses. A caller env var already named `SECRET_<NAME>` is
@@ -106,11 +105,11 @@ plus one of two modes:
 - **One or more `--env-file` (to use a subset, or your own names).**
   Each file is applied in order (later files override earlier ones): a
   value of the exact form `ironbark://<name>` is replaced by secret
-  `<name>` from the sweep, and any other value is passed through as is.
+  `<name>` from the walk, and any other value is passed through as is.
   Reach for this when `<cmd>` expects specific variable names, only some
   secrets should reach it, or it needs literal values (like `DEBUG=true`)
   alongside secrets. Since a reference file holds only `ironbark://`
-  names, never values, it's safe to commit to the repo. The sweep runs
+  names, never values, it's safe to commit to the repo. The walk runs
   once per `ib run`, and only if at least one value across the given
   files is an `ironbark://` reference — a file with no reference at all
   never touches Vault.
@@ -124,13 +123,18 @@ ends the entry, so a literal newline inside an open quote (as `ib env`,
 §1.3, emits) is part of the value, not a line break. A file written by
 `ib env` is valid input.
 
-A `--env-file` reference to a name the sweep did not produce → exit 3
-before `<cmd>` starts; `ib run` never starts a command with a
-half-resolved environment. (There's no such failure in the no-file mode:
-it injects whatever the sweep produced, under names it derives itself.)
+A `--env-file` reference to a name the walk did not produce leaves that
+variable **unset** in the child (even one the caller's environment already
+had), with one stderr line naming it (`ib: <VAR> left unset: no secret
+"<name>" was produced`); `ib run` still starts the command. `ib` does not
+check that expected names arrived — the wrapped tool validates its own
+inputs (design §12.4). Exit 3 remains only for `ib get <name>`, where
+there is nothing to print.
 
-**Masking** (default on): every injected or resolved value of length ≥ 4
-— every swept secret in the no-file mode, every value substituted for an
+**Masking** (default on): every injected or resolved value, whatever its
+length (no exemption for short values: a short value that masks noise is an
+identifier stored as a secret, and the fix is on the data side) — every
+walked secret in the no-file mode, every value substituted for an
 `ironbark://` reference in `--env-file` mode — is replaced by
 `<concealed by ib>` in the child's stdout and stderr, which `ib` pipes
 through, scanning as a byte stream rather than line-by-line (so a match
@@ -144,11 +148,11 @@ Exit status is the child's. Signals received by `ib` are forwarded to the
 child.
 
 **Leases.** If any injected or resolved secret came from a lease-bearing
-deref (SPEC §4.3, e.g. a dynamic-engine credential), `ib run` revokes each
+deref (design §7, a resolve mapping to a dynamic engine), `ib run` revokes each
 such lease after the child exits by its `lease_id` (`PUT
 sys/leases/revoke`), authenticated with the caller's own token — never
 `auth/token/revoke-self`, which would revoke the caller's actual Vault
-session, not a lease. This is every lease the sweep created, referenced
+session, not a lease. This is every lease the walk took, referenced
 or not — not only the leases behind values actually substituted into the
 child's environment. This needs the caller's policy to grant `update` on
 `sys/leases/revoke` (or the lease's own prefix); a revoke failure is
@@ -159,167 +163,151 @@ Applies to both modes above.
 
 ## 2. Identity
 
-`ib` builds the same identity shape as the broker (SPEC §2.1) from the
-checkout, never from flags:
+`ib` takes the repository from the checkout, never from flags:
 
 - **Org / repo:** from the `origin` remote URL (`git remote get-url
   origin`). Accepted forms: `https://host[:port]/org/repo[.git]`,
   `ssh://[user@]host[:port]/org/repo[.git]`, `[user@]host:org/repo[.git]`.
-  The last two path segments are org and repo, lowercased (SPEC §2.1).
-  The host is not part of the identity. No `origin`, or a URL that does
-  not parse → exit 2.
-- **Event:** always `push`. A local run reads what a push to the chosen
-  branch reads.
-- **Branch:** chosen by §3.
+  The last two path segments are org and repo, lowercased, then escaped
+  (`identity.Esc`) into path segments as the broker does. The host is not
+  part of the identity. No `origin`, or a URL that does not parse → exit 2.
+- **Branch:** the checked-out branch, used only by §3's discovery; empty in
+  a detached `HEAD`.
 
 The checkout is located with `git rev-parse` (so linked worktrees, whose
 `.git` is a file, work unchanged). A detached `HEAD` is valid.
 
-`.identity` (SPEC §4.4) is not checked: `ib` has no forge-verified remote
-id to compare against — see §6 for the security implication where an
-operator relies on `.identity` hardening. `.config` (SPEC §4.5) is not
-read: `vault_token` suppression concerns tokens handed to pipelines, and
-`ib` hands out none — but its fail-closed enforcement (§4.5) is skipped
-too; see §6.
+There is no event and no `.identity`/`.config`: the grant model has neither
+(design §13). Repo-rename protection is the JWT role's `repo_key` bound
+claim, which a human login does not pass through; see §6.
 
-## 3. Environment (branch) selection
+## 3. Selection
 
-Which branch's tiers to read is an **environment choice, not access
-control**. The checkout is local and editable; nothing in this section is
-trusted for authorization — the caller's policy is (§6).
+Which environment and target to read is a **choice, not access control**.
+The checkout and the flags are local and editable; nothing here is trusted
+for authorization — the caller's policies are (§6).
 
-**Tracked branches** are the branch directories under
-`<mount>/metadata/<B>/push/` that the caller's token can LIST (SPEC §2.4
-layout). They are matched against `T`, the short name of each
-remote-tracking branch (`origin/T` with the `origin/` remote prefix
-stripped — never the full ref), by escaping `T` with SPEC §2.2 `Esc` and
-comparing — no unescaping. `origin/T`, ref intact, is used only for the
-ancestry and freshness checks below.
+- **Environment.** `--env <name>` / `IB_ENV` (flag wins) names the
+  environment level directly; it must match the environment grammar
+  (design §4.5: `^[a-z0-9][a-z0-9_-]{0,62}$`), else exit 4. Otherwise `ib`
+  runs the level-metadata rule (design §4.5 rule 2) for the current local
+  branch, over the environment levels the caller can read: it LISTs the
+  repo level, reads each directory's level metadata (`GET` on its metadata
+  path with a trailing slash) with the caller's token, and matches the
+  branch against each `branches` list (`path.Match` patterns, bytewise,
+  design §4.5). One claimant → that environment. None → the repo level
+  only (not an error). Several → exit 4 naming them; pass `--env`. A
+  detached `HEAD` has no branch, so it selects nothing. There is **no
+  protection check**: the caller's own policies are the gate.
+- **Fail closed.** Any failure reading a level's metadata other than 404
+  (a 403 included) ends discovery with exit 5 (exit 2 if OpenBao rejects
+  the token itself): a claimant the caller cannot see must not let another
+  level win. The human policy therefore needs `read` on level metadata for
+  every environment directory (§6).
+- **Target.** `--target <path>` / `IB_TARGET` (flag wins), the target
+  grammar of design §4.6 (≤ 8 segments, no empty or dot segments), else
+  exit 4. Without it the walk stops at the environment level: `ib` never
+  derives a target from the working tree and has no `Deploy-To:`/cascade.
+  A nested target walks every segment (design §8.1). A target with no
+  environment selected is exit 4.
 
-Selection, in order; the first rule that yields one branch wins:
+**Visibility.** The choice is always printed to stderr: `ib: env staging
+(explicit)`, `ib: env staging (branch), target web/api`, or `ib: no
+environment; repo level only`.
 
-1. **Override.** `--branch <name>` or `IB_BRANCH=<name>` → that branch.
-   It must be tracked, else exit 4.
-2. **Direct match.** The checked-out branch is tracked → it.
-3. **Nearest ancestor.** For each tracked branch `T` with a remote-tracking
-   ref `origin/T`: `d(T)` = number of commits in `HEAD` not in `origin/T`
-   (`git rev-list --count origin/T..HEAD`). Branches with no common
-   ancestor with `HEAD` are dropped. Lowest `d` wins.
-4. **Tie → reflog.** If the checked-out branch's reflog creation entry
-   (`branch: Created from <ref>`) names one of the tied branches (as `T`
-   or `origin/T`), it wins. In a detached `HEAD` there is no checked-out
-   branch and therefore no branch reflog entry to consult — this rule is
-   skipped and rule 5 applies directly.
-5. **Tie → cascade.** The first tied branch in the cascade list wins.
-   Built-in list, least to most production-like, so an unresolved guess
-   lands on a lower environment: `dev`, `develop`, `development`, `test`,
-   `testing`, `qa`, `uat`, `stage`, `staging`, `preprod`, `trunk`, `main`,
-   `master`, `prod`, `production`, `live`. Exact names only. `release*` is
-   deliberately absent: release branches are temporary curation branches,
-   not environments.
-6. **Fail.** Exit 4, listing the candidates and their distances, asking
-   for `--branch`. `ib` never guesses past this point, and never falls back
-   to the default branch on its own.
+## 4. Walk
 
-**No branch tiers at all.** If the caller can see no branch directory under
-`<B>/push/` (the repository keeps its secrets only in the event and base
-tiers, which the broker serves to every push), selection is skipped: `ib`
-sweeps `<B>/push` and `<B>` only, as a CI push to a branch with no branch
-tier does, and says so on stderr (`ib: no branch tiers; event and base tiers
-only`). An override naming a branch is then an error (exit 4). If branch
-tiers exist but none shares history with `HEAD`, rule 6 applies (exit 4).
+The design §8.2 walk over the levels selected in §3, by the same code the
+broker runs (`internal/walk`), with the caller's token:
 
-**Stale refs.** Before rule 3, `ib` runs `git ls-remote origin` once and
-compares each tracked `origin/T` with the forge. Any difference → a
-warning on stderr naming the branch (`ib: origin/develop differs from the
-forge; git fetch`). The run continues. If `ls-remote` fails (offline), a
-single warning says freshness is unknown.
-
-**Visibility.** The chosen branch and the rule that chose it are always
-printed to stderr: `ib: env develop (nearest ancestor, 3 commits)`.
-
-## 4. Sweep
-
-SPEC §4.1–§4.3 and §4.6 with identity (§2) and branch (§3), made with the
-caller's token, via the **same code** the broker uses (§8) — except the
-`.identity`/`.config`/image-pin divergences noted in §6:
-
-- Tiers `<B>/push/<esc(branch)>`, `<B>/push`, `<B>`, most specific first;
-  plain keys only; dot-keys skipped; 403/404 skip that tier or entry.
-- Entry forms, naming, string-only values, most-specific-wins collisions:
+- Levels, shallow to deep: the repo level, the environment, one level per
+  target segment. Each is LISTed; 403/404 skips the level and the walk
+  continues deeper (an unreadable environment does not hide a readable
+  target). Sub-directories other than the selected environment or target
+  segment are never read. Entries are read in bytewise key order; a 403/404
+  entry is skipped.
+- Naming, string-only values, `-` → `_`, `[a-z0-9_]+`, clash rules (deepest
+  level wins; within a level the first key wins, logged): design §8.2 /
   SPEC §4.2.
-- Pointers dereferenced one level with the caller's token: SPEC §4.3,
-  including KV v2-shaped targets. A pointer entry the caller can list/read
-  but whose `$ref` target 403/404s is still skipped silently in the sweep
-  result (SPEC §4.3's partial-visibility rule, unchanged) — but named
-  afterwards on stderr: `ib: skipped N entries: no read on their targets
-  (name1, name2, …)`, so a shorter-than-expected `ib env` has a hint
-  instead of a silent gap.
-- Per-secret pins (SPEC §4.6): `ironbark_events` is applied with event
-  `push` (a secret pinned away from `push` is not returned).
-  `ironbark_images` is ignored — there is no step image locally; this is
-  the one place `ib` returns more than a CI step would, and it is bounded
-  by the caller's policy like everything else.
-- Any non-403/404 failure → exit 5, nothing written, leases created so far
-  revoked.
+- **Resolve mappings** (design §7) are read with the caller's token, so a
+  dynamic credential's lease belongs to the caller; `ib run` revokes it
+  afterwards (§1.4). One hop only. A 403/404 on the target skips the entry.
+- `ironbark_status` (reserved) and `vault_token` are **never produced**:
+  `ib` hands out no token, and the caller's own is never given to the child.
+  Both are dropped even if present. A reserved-name or invalid-name key is
+  skipped with a warning.
+- Image pins (`ironbark_images`) are ignored — there is no step image
+  locally. `ironbark_events` is not read; an entry still carrying it is
+  named on stderr as ignored.
+- Skipped entries are named once on stderr: `ib: skipped N entries: no read
+  on them or their targets (level/key, …)`. Warnings print as `ib: warning:
+  …`.
+- All levels answering 403 is checked against `auth/token/lookup-self`: a
+  rejected token is exit 2 with a hint to run `ib auth`, never an empty
+  success.
+- Any other failure → exit 5, nothing written, leases taken so far revoked.
 
 ## 5. Configuration
 
-### 5.1 Vault connection
+### 5.1 OpenBao connection
 
 Address: `BAO_ADDR`, else `VAULT_ADDR`; neither → exit 2. Token:
 `BAO_TOKEN`, else `VAULT_TOKEN`, else the token helper file
 `~/.vault-token` — the default Vault/OpenBao CLI token-helper path only;
-`ib` does not shell out to a custom `token_helper` program a CLI config
-may point at instead; none → exit 2 with a hint to run `ib auth`. CA and
-TLS settings follow the standard `VAULT_CACERT`/`BAO_CACERT` variables:
-`VAULT_CACERT` (and the other `VAULT_*` TLS vars) are picked up for free
-by the underlying Vault API client; `BAO_CACERT` and its siblings are not
-— the client library only recognizes `VAULT_*` names, so `ib` maps any set
-`BAO_*` TLS variable onto the same config fields itself (§8), the same
-precedence pattern as `BAO_ADDR`/`BAO_TOKEN`.
+`ib` does not shell out to a custom `token_helper` program; none → exit 2
+with a hint to run `ib auth`. A token is never read from the config file.
+TLS settings follow `VAULT_CACERT`/`BAO_CACERT` and siblings (`CAPATH`,
+`CLIENT_CERT`, `CLIENT_KEY`, `TLS_SERVER_NAME`, `SKIP_VERIFY`), `BAO_*`
+before `VAULT_*`.
 
-### 5.2 Layout
+### 5.2 Layout and selection
 
-`IB_KV_MOUNT` (default `kv`) and `IB_KV_PREFIX` (default `ci`) — the
-same meaning and defaults as the broker's `IRONBARK_KV_MOUNT` /
-`IRONBARK_KV_PREFIX` (SPEC §7). They must match the broker serving the
-repository.
+`ib` reads the same four settings as ironbark, under the same names
+(design §11.1): `IRONBARK_DATA_PATH` (required, no default; the template
+must be the one the broker serving the repository uses), `IRONBARK_ENV_VAR`
+(default `DEPLOY_ENV`), `IRONBARK_TARGET_VAR` (default `DEPLOY_TO`) and
+`IRONBARK_JWT_ROLE` (default `ci-{env}`). Only the data path shapes what `ib`
+reads; the other three are accepted so one file serves both. `IB_ENV` and
+`IB_TARGET` are §3's fallbacks.
 
-### 5.3 Later (not in M3)
+`IB_KV_MOUNT`, `IB_KV_PREFIX` and `IB_BRANCH` no longer exist. Setting one
+(in the environment or the file) is a configuration error (exit 2) naming
+its replacement: `IRONBARK_DATA_PATH` for the first two, `IB_ENV`
+(or `--env`) for the last.
 
-An in-repo config file for: a remote other than `origin`, a custom
-cascade (replacing the built-in list), layout overrides. Not designed
-until needed.
+### 5.3 The config file
+
+`~/.config/ib/config` is a `KEY=value` file in `ib run --env-file` syntax
+(quotes, `#` comments, blank lines) holding any of the names above, TLS
+included; unknown keys are ignored. **Environment variables win over the
+file**, per name (for the `BAO_*`/`VAULT_*` pairs, the environment's pair is
+consulted before the file's). A missing file is fine; a malformed one is
+exit 2 naming its line.
 
 ## 6. Security model
 
 - `ib` holds no credential of its own and mints nothing. Every Vault call
   uses the caller's token.
-- Access control is the caller's Vault policy: which map tiers
-  (`<prefix>/<org>/<repo>/push/<branch>/…`) and which dereference targets
-  it may read. An operator should grant a human or agent only the tiers
-  and targets of the environments they may use — typically mirroring the
-  branch policies their push access implies.
-- Branch selection (§3) reads untrusted local state; tampering with it can
-  only change which *permitted* set is returned.
+- Access control is the caller's OpenBao policy. The templated CI policies
+  key on JWT alias metadata and do nothing for a human token: people get
+  static policies (design §12.2), e.g. `read` on
+  `vs/data/pipelines/acme/+/staging/*` and `read` on
+  `vs/metadata/pipelines/acme/+/+/` for level metadata, plus `read` on the
+  dynamic-engine paths they may resolve and `update` on `sys/leases/revoke`.
+  Personal policies are the gate.
+- Policy gotcha: the most specific matching path wins and capabilities are
+  not merged. A subtree rule such as `vs/metadata/…/staging/*` shadows the
+  `+/` level-metadata rule for that environment, so it must itself carry
+  `read` (and `list`), or discovery fails closed with a 403.
+- Selection (§3) reads untrusted local state and flags; tampering with them
+  can only change which *permitted* set is returned.
 - Values never touch disk except via `ib env` redirected by the caller.
   `ib` itself writes no cache.
-- `ib` does not evaluate `.identity` (§4.4) or `.config` (§4.5) — see §2.
-  Where an operator has enabled `.identity` binding as hardening against a
-  forge repo-rename/recreate inheriting an old repo's KV tree (SPEC §4.4,
-  DESIGN §3), that hardening is CI-only: a binding mismatch that makes the
-  broker fail closed (204, no secrets) does not stop `ib` from returning
-  the full sweep to whoever holds a token scoped to that tier. Operators
-  relying on `.identity` for that protection should treat `ib` access as
-  bypassing it — the caller's Vault policy remains the only bound, the
-  same model as the `ironbark_images` divergence (§4).
-- Likewise, a malformed `.config` entry (§4.5) makes the broker fail
-  closed for every CI run against that repo (502, no secrets, until
-  fixed); `ib` never reads `.config`, so it is unaffected and keeps
-  returning secrets normally in that state. Accepted for M3 — `.config`'s
-  only fields concern the minted `vault_token` `ib` never hands out — not
-  a bug to fix silently.
+- The `repo_key` guard against a forge repo rename or recreate inheriting an
+  old repo's secrets is a JWT role bound claim, checked at CI login. A human
+  login does not pass through it: the caller's policy remains the only
+  bound, and `ib` reads `org/repo` from the local `origin` URL.
+- `ib` never returns `vault_token`, and drops `ironbark_status` (§4).
 
 ## 7. Exit codes
 
@@ -327,38 +315,33 @@ until needed.
 |---|---|
 | 0 | success (`run`: the child's status instead) |
 | 1 | usage error |
-| 2 | configuration: no git checkout, unparseable `origin`, no Vault address or token |
-| 3 | a requested secret name was not produced by the sweep |
-| 4 | environment selection failed (§3) |
-| 5 | Vault error other than 403/404 during the sweep |
+| 2 | configuration: no git checkout, unparseable `origin`, no address, token or `IRONBARK_DATA_PATH`, a removed variable, a malformed config file, a rejected token |
+| 3 | `ib get`: the requested secret name was not produced by the walk |
+| 4 | selection failed (§3): several claimants, invalid `--env`/`--target`, target without an environment |
+| 5 | OpenBao error other than 403/404 during selection or the walk |
 
 ## 8. Implementation shape
 
 - `cmd/ib` — a second binary in the same Go module.
-- Shared, not copied: the sweep, entry classification, naming, pin
-  handling and dereference in `internal/vaultx` are refactored so they
-  take a token and an address and do not depend on the broker's AppRole
-  session (`vaultx.Config` today carries `RoleID`/`SecretID`). `Sweep`
-  already reads under a caller-supplied token; the remaining gap is
-  `SweepResult`, which today reports only a `LeasesCreated bool` — `ib
-  run`'s lease revocation (§1.4) needs each deref's `lease_id` itself, so
-  `SweepResult`/`SweptSecret` gain a `LeaseID` field. The broker and `ib`
-  call the same functions; SPEC §9.2–9.3 sweep tests cover both.
-- `internal/identity` — `Esc` reused as is. Remote-URL parsing is new and
-  lives there.
-- `internal/gitenv` (new) — §2 checkout discovery and §3 selection,
-  shelling out to `git`. Unit-tested against scripted fixture repos
-  (branch, worktree, detached, orphan, tie cases).
-- A new `ib`-specific config loader for §5's env vars — distinct from
-  `internal/config`, which is the broker's own surface (SPEC §7) and
-  requires broker-only fields (`IRONBARK_WOODPECKER_PUBLIC_KEY`,
-  `IRONBARK_VAULT_ROLE_ID`/`_SECRET_ID`, …) `ib` has no reason to supply.
-  It also maps any set `BAO_*` TLS variable (§5.1) onto the `api.Config`
-  `vaultx.New` builds, since the underlying client only reads `VAULT_*`
-  names for that.
-- Integration: the SPEC §9.3 containerized Vault and OpenBao harness,
-  plus a test asserting `ib env` and a broker response agree on the same
-  layout and branch.
+- Shared, not copied: the walk, naming, pin handling, resolve mappings
+  and environment discovery are `internal/walk` (design §8.2, §4.5), over
+  a small client interface the broker and `ib` both satisfy;
+  `internal/levels` builds the level list from the data-path template,
+  `internal/selector` holds the env/target grammars and branch patterns.
+  `ib` reads through `vaultx.Conn.As(token)` with the caller's token and
+  does its own lease revocation and token check (`cmd/ib/leases.go`).
+- `internal/identity` — `Esc` and remote-URL parsing.
+- `internal/gitenv` — §2 checkout discovery (shelling out to `git`) and §3
+  selection (`gitenv.Select`).
+- `internal/ibcfg` — §5's loader (environment over `~/.config/ib/config`),
+  distinct from `internal/grantcfg`, the broker's own surface, which
+  requires broker-only fields (JWT signing key, Woodpecker public key, …).
+- `internal/mask` — §1.4 masking.
+- Integration: `test/integration/ib_grant_test.go` runs the real binary
+  against the grant-model fixture (OpenBao + voidstar) under a static human
+  policy: nested-target walk, discovery from the local branch, several
+  claimants, a level whose metadata is unreadable, lease revocation after
+  `ib run`, masking of short values, an unproduced reference.
 
 ## 9. Delivery
 
@@ -369,7 +352,4 @@ decision record at that point.
 
 ## 10. Roadmap (not M3)
 
-- Nested map entries: the sweep descends subdirectories and joins the
-  path into the secret name (e.g. `group/leaf` → `group_leaf`). A change
-  to the shared sweep, so broker and `ib` move together.
-- Configurable cascade and remote (§5.3).
+- A remote other than `origin`.

@@ -157,7 +157,7 @@ or not — not only the leases behind values actually substituted into the
 child's environment. This needs the caller's policy to grant `update` on
 `sys/leases/revoke` (or the lease's own prefix); a revoke failure is
 logged to stderr and does not change `ib run`'s exit status (best-effort,
-matching SPEC §3.4's revoke philosophy — the lease's TTL is the backstop).
+matching SPEC §3's revoke philosophy — the lease's TTL is the backstop).
 `get` and `env` leave leases to expire on their TTL, and say so on stderr.
 Applies to both modes above.
 

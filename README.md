@@ -6,7 +6,7 @@
 Per-pipeline secrets for [Woodpecker CI](https://woodpecker-ci.org) from
 [HashiCorp Vault](https://developer.hashicorp.com/vault) or
 [OpenBao](https://openbao.org): each pipeline gets exactly the secrets its
-identity — repo, event, branch — is entitled to, and nothing else.
+identity — repo, environment, target — is entitled to, and nothing else.
 
 Without something in between, connecting Woodpecker to a secrets manager
 is all-or-nothing. Woodpecker pipelines have no verifiable identity to
@@ -20,35 +20,36 @@ ironbark is the piece in between: a Woodpecker
 that brokers per-identity access.
 
 - **Scoped by identity.** A pull-request build of `acme/widgets` gets that
-  repo's read-only tier; a push to `main` also gets that repo's `main`
-  deploy tier; no pipeline ever sees another repo's secrets.
-- **Short-lived.** Credentials are minted per pipeline run and expire in
-  minutes — including dynamic credentials (e.g. AWS STS) resolved at
-  request time.
+  repo's repo-level secrets only; a push to protected `main` also gets the
+  environment `main` selects; no pipeline ever sees another repo's secrets.
+- **Short-lived.** Each pipeline logs in to OpenBao once and its token
+  expires on the role's max TTL — including dynamic credentials (e.g. AWS
+  STS) resolved at request time.
 - **Delivered natively.** Values arrive as ordinary Woodpecker secrets:
   automatically masked in logs, `from_secret`-addressable, adoptable repo
   by repo alongside Woodpecker's built-in secrets.
 - **Nothing to configure in the broker.** ironbark is stateless — no rule
   tables, no path maps. What a pipeline may read is decided entirely by
-  which Vault policies and KV entries exist; onboarding a repo is
-  Vault-side IaC.
+  OpenBao: the JWT roles and their `bound_claims`, the templated policies,
+  and which entries exist; onboarding a repo is OpenBao-side IaC.
 
 An aside for readers who know the OIDC id-token pattern from other CI
 systems: Woodpecker has no pipeline id-tokens, but the seam it does have
 turns out *stricter*, not weaker. The identity exchange is server-to-server,
 signed, and finished before the build starts — pipeline code never holds an
-identity credential it could exfiltrate — and ironbark itself can only mint
-tokens, never read secrets, so there is no standing credential at the
-broker to steal either.
+identity credential it could exfiltrate — and ironbark holds no OpenBao
+credential at all (only a JWT signing key, whose logins OpenBao gates), so
+there is no standing OpenBao credential at the broker to steal either.
 
 **How it works, in one breath:** Woodpecker calls ironbark for each
 pipeline (a signed call — RFC-9421 ed25519 — so the identity is
-verifiable); ironbark derives conventional Vault policy names from the
-pipeline's `(repo, event, branch)`, mints a short-lived token scoped to
-exactly those policies — a policy set ironbark itself does not hold, so
-the broker can never read secrets on its own — sweeps the repo's KV
-subtree (`kv/ci/<org>/<repo>/…`) under that token, and returns the values,
-plus the token itself for anything interactive. Architecture and threat
+verifiable); ironbark turns the payload into verified facts (repo, event,
+branch and whether it is protected, actor, teams), signs a JWT carrying
+them, and logs in to OpenBao with the role for the selected environment.
+OpenBao's roles and templated policies decide what that token can read;
+ironbark walks the repo, environment and target levels of the secret tree
+under it, and returns the values (plus an `ironbark_status` line, and the
+token itself where a level opts in). Architecture and threat
 model: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 > Woodpecker drills wood; ironbark is the hardwood bark that decides, per peck,
@@ -64,27 +65,27 @@ Known sharp edges, indexed so you hit them here first, not in production:
 - [ironbark down = fail-open, not
   fail-closed](#deploying-pointing-woodpecker-at-ironbark) — Woodpecker runs
   the pipeline anyway, on DB-only secrets.
-- [`token_ttl` on the role is a silent no-op](#token-role) — use
-  `token_explicit_max_ttl`.
-- [`$ref` is GET-only](#ref-dereference-limitation) — no PKI issuance via
-  pointer.
+- [Roles need `token_explicit_max_ttl`](#openbao-operator-contract-grant-model)
+  — ironbark asserts it on every login.
+- [`resolve` mappings are GET-only](docs/SPEC.md) (§4.3) — no PKI issuance
+  via a mapping.
 - [TTL must budget queue time, not just run time](#ttl-budgeting) — and one
-  mint covers every workflow of the run.
-- [policy glob `*` crosses `/`](#tier-policies-example-acmewidgets) — scope
-  each tier's paths to its own prefix, never a shared trailing wildcard.
+  login covers every workflow of the run.
+- [policy glob `*` crosses `/`](#openbao-operator-contract-grant-model) —
+  the level policies end every stanza in `/+` for this reason; keep it.
 
 ## Status
 
 M1 (the broker) and M3 (`ib`, the local client) are implemented: a Go
-service (`cmd/ironbark` + `internal/{wpsign,identity,policy,broker,vaultx,httpapi}`)
-and a CLI (`cmd/ib`), both unit-tested and integration-tested against both
-Vault 1.20 and OpenBao 2.5.5. See [`docs/SPEC.md`](docs/SPEC.md) for the
+service (`cmd/ironbark` + `internal/…`) and a CLI (`cmd/ib`), both
+unit-tested and integration-tested against OpenBao 2.7.0 with the voidstar
+plugin (Vault 1.20 over plain KV v2 is informational). See [`docs/SPEC.md`](docs/SPEC.md) for the
 broker's normative interface/behavior spec,
 [`docs/CLIENT-SPEC.md`](docs/CLIENT-SPEC.md) for `ib`'s,
 [`docs/DESIGN.md`](docs/DESIGN.md) for architecture and threat model, and
 the decision log in [`docs/decisionlog/`](docs/decisionlog/). Still future:
 the M2 Terraform module and `ironbark doctor` — onboarding a repo today
-means hand-writing the Vault-side IaC described below.
+means hand-writing the OpenBao-side IaC described below.
 
 ## Install
 
@@ -100,10 +101,9 @@ go install github.com/navistau/ironbark/cmd/ironbark@latest
 
 ## `ib`: the local client
 
-`ib` gives a local run — your shell, an agent, a script — the same
-repo/event/branch-tier secrets a CI run on the same repo and branch would
-get (never attribute secrets, which need a signed pipeline payload), read from the same KV
-layout the broker sweeps. It mints nothing and holds no credential of its
+`ib` gives a local run — your shell, an agent, a script — the secrets a
+CI run on the same repo and branch would select, read from the same secret
+tree the broker walks. It logs in to nothing and holds no credential of its
 own: every read is made with your own Vault/OpenBao token, the one `ib
 auth` (or `vault login`/`bao login` directly) already left at
 `~/.vault-token`. Full behavior: [`docs/CLIENT-SPEC.md`](docs/CLIENT-SPEC.md).
@@ -135,14 +135,14 @@ DB_PASSWORD=ironbark://db_password
 DEBUG=true
 ```
 
-`ironbark://<name>` is replaced by that secret's value from the sweep; any
+`ironbark://<name>` is replaced by that secret's value from the walk; any
 other value (like `DEBUG=true` above) passes through unchanged.
 
 **Security note:** `ib` reads exactly what your own Vault/OpenBao token can
-read — since it never mints a token of its own, your policy is the only
-bound on what comes back. `.identity` binding and `ironbark_images` pins
-(SPEC §4.4, §4.6) are CI-only divergences: `ib` doesn't check `.identity`
-(there's no forge-verified request to compare it against) and ignores image
+read — since it never logs in as a pipeline, your policy is the only
+bound on what comes back. The role `bound_claims` (branch protection,
+`repo_key`, event) and `ironbark_images` pins (SPEC §4.6) are CI-only
+divergences: `ib` has no forge-verified request to bind and ignores image
 pins (there's no step image locally). If you rely on either as hardening,
 treat `ib` access as bypassing it — see
 [CLIENT-SPEC.md §6](docs/CLIENT-SPEC.md#6-security-model).
@@ -150,9 +150,9 @@ treat `ib` access as bypassing it — see
 ## Why not just…
 
 - **…a broker with its own read-everything credential?** A standing, silent
-  decryption oracle. ironbark's Vault identity can only *create* tokens;
-  every read chain starts with a per-role, audit-logged mint under the
-  pipeline's own scoped token.
+  decryption oracle. ironbark holds no OpenBao credential; every read chain
+  starts with a per-role, audit-logged JWT login under the pipeline's own
+  scoped token.
 - **…Vault's Kubernetes auth?** Woodpecker lets a pipeline choose its own pod
   `serviceAccountName`, so k8s-SA identity is not a per-repo boundary.
 - **…Woodpecker's native k8s secret refs?** Instance-wide: any repo's pipeline
@@ -174,8 +174,8 @@ WOODPECKER_EXTENSIONS_ALLOWED_HOSTS=<see gotcha below>
 Point `WOODPECKER_SECRET_EXTENSION_ENDPOINT` at ironbark's `/` route (the
 only route Woodpecker calls; `/healthz`, `/readyz`, `/metrics` are for you).
 The extension is *additive* to Woodpecker's own DB secrets — adoption can be
-incremental, repo by repo, driven entirely by which Vault policies/KV paths
-exist for a given repo.
+incremental, repo by repo, driven entirely by which OpenBao roles and
+secret-tree entries exist for a given repo.
 
 **Gotcha — `WOODPECKER_EXTENSIONS_ALLOWED_HOSTS` (the #1 deployment
 footgun):** it defaults to `MatchBuiltinExternal`, which *blocks*
@@ -246,7 +246,7 @@ so it must be sized to cover **queue time + run time**, not just run time.
 The token is obtained once, at pipeline *compile* time — which is pipeline
 creation, approval, or restart, not job start. A pipeline that sits queued
 behind other work arrives at its first step with less TTL already spent.
-Gated pipelines are the favourable case: they mint at *approval*, so
+Gated pipelines are the favourable case: they log in at *approval*, so
 queue-delay TTL erosion only starts counting from the human approval click,
 not from submission.
 

@@ -185,3 +185,27 @@ func TestReadListLevelMetadata(t *testing.T) {
 		t.Fatalf("500 err = %v", err)
 	}
 }
+
+func TestHealthy(t *testing.T) {
+	for code, want := range map[int]bool{200: true, 503: false, 501: false} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/sys/health" {
+				t.Errorf("path = %s", r.URL.Path)
+			}
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		c, err := NewConn(srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := c.Healthy(context.Background()); got != want {
+			t.Errorf("code %d: Healthy = %v, want %v", code, got, want)
+		}
+		srv.Close()
+	}
+	c, _ := NewConn("http://127.0.0.1:1", nil)
+	if c.Healthy(context.Background()) {
+		t.Error("unreachable must not be healthy")
+	}
+}

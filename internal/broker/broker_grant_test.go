@@ -469,8 +469,10 @@ func TestErrorRows(t *testing.T) {
 		"openbao unreachable": func(r *rig) { r.v.loginErr["ci-prod"] = errors.New("dial tcp: refused") },
 		"jwt rejected":        func(r *rig) { r.v.loginErr["ci-prod"] = errors.New("400 signature is invalid") },
 		"slash claim 400":     func(r *rig) { r.v.loginErr["ci-prod"] = errors.New("400 claim contains /") },
-		"assertion":           func(r *rig) { r.v.loginErr["ci-prod"] = &vaultx.AssertionError{Role: "ci-prod", Reason: "token_type is batch"} },
-		"sign failure":        func(r *rig) { r.s.err = errors.New("no key") },
+		"assertion": func(r *rig) {
+			r.v.loginErr["ci-prod"] = &vaultx.AssertionError{Role: "ci-prod", Reason: "token_type is batch"}
+		},
+		"sign failure": func(r *rig) { r.s.err = errors.New("no key") },
 	}
 	for name, set := range cases {
 		t.Run(name, func(t *testing.T) {

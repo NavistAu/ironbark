@@ -149,3 +149,22 @@ func (c *Conn) RevokeSelf(ctx context.Context, token string) error {
 	}
 	return resp.Body.Close()
 }
+
+// Healthy reports whether OpenBao answers sys/health as initialised and
+// unsealed (200; standbyok makes a standby answer 200 too). It is /readyz's
+// only signal: ironbark holds no session to keep alive. No retries: a probe
+// must answer promptly.
+func (c *Conn) Healthy(ctx context.Context) bool {
+	cl, err := c.api.Clone()
+	if err != nil {
+		return false
+	}
+	cl.SetMaxRetries(0)
+	req := cl.NewRequest(http.MethodGet, "/v1/sys/health")
+	req.Params.Set("standbyok", "true")
+	resp, err := cl.RawRequestWithContext(ctx, req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	return err == nil && resp.StatusCode == http.StatusOK
+}

@@ -314,7 +314,7 @@ cascade (first match wins):
 
 ironbark does not derive a target from `changed_files`. A job that needs
 that works it out in an earlier pipeline and passes the result forward as a
-variable (a manual run or a promote with `DEPLOY_TO` / `deploy_to`).
+variable (`DEPLOY_TO` on a manual run, the `deploy_to` field on a promote).
 
 Grammar (as today): split on `/`, every segment non-empty, at
 most 8 segments and 256 bytes; case, `.` and `..` are kept. Each segment
@@ -806,7 +806,8 @@ returns the pipeline token as `vault_token` only when a walked level holds a
 **metadata-only mapping** named `vault_token` (for example
 `vs/data/pipelines/acme/mono/vault_token`, with no upstream target), and
 attaches that mapping's image pins. No mapping, or a mapping the token cannot
-read, → no `vault_token`. Default off. A `vault_token` entry that carries
+read, → no `vault_token`. Default off. On a plain KV v2 mount the marker is
+an empty entry of that name (§3.1). A `vault_token` entry that carries
 data is skipped with a warning, so nobody stores a real token there.
 
 The token never widens access beyond the login's policies, and its TTL is
@@ -1159,7 +1160,7 @@ AppRole and `kv/ci/...` tree stay untouched until the last repo has moved.
 6. **Pipelines:** manual runs from a branch no level claims set
    `DEPLOY_ENV`. Merges that deploy one part add a `Deploy-To:` trailer.
    Workflows that chose a part from changed files compute it in an earlier
-   pipeline and pass `DEPLOY_TO` / `deploy_to` forward. Steps that must
+   pipeline and pass it forward (`DEPLOY_TO` for a manual run, `deploy_to` for a promote). Steps that must
    decide for themselves read `ironbark_status` and reference no secret that
    can be absent (§9.2).
 7. **Cut over** the repo's endpoint and run its acceptance cases (§18.3).
@@ -1345,9 +1346,8 @@ pipeline outcome or its stated intent changes.
 | S1 | static: manual-matching workflows evaluate `DEPLOY_TO == ""` | same, extended to `DEPLOY_ENV` | same |
 | S2 | static: repo settings | same, plus the per-repo extension endpoint | same |
 
-Summary: 30 cases keep their expectation and 15 change: 2 in **outcome**
-(M20, still refused but at compile; U9, the promote-has-no-actor limit now
-enforced) and 13 in **intent or trigger** (M1, M2, M17, D1, P1, P2, P3, R1,
+Summary: 31 cases keep their expectation and 14 change: 1 in **outcome**
+(U9, the promote-has-no-actor limit now enforced) and 13 in **intent or trigger** (M1, M2, M17, D1, P1, P2, P3, R1,
 C1, U4, U5, U6, U8). Against the first draft of this spec, nested-target
 inheritance returns M3 and M7 to **same** and M17 to intent-only; C1 loses
 its fallback; U5 now needs a `Deploy-To:` trailer because `changed_files`

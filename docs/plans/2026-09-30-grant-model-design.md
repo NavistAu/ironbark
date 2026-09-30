@@ -1387,7 +1387,7 @@ Each case asserts less or nothing, never more, and always an
 
 | Fault | Expect |
 |---|---|
-| forge down / slow (> timeout) | no discovery, no teams: repo level; explicit env → `refused` |
+| forge down / slow (> timeout) | no discovery, no teams: repo level; explicit env → `refused` (for a role that binds `branch_protected`) |
 | OpenBao down | `error`, status only |
 | JWT signed with a key not in `jwt_validation_pubkeys` | `error`, status only |
 | JWT clock skew beyond leeway | `error`, status only |
@@ -1395,7 +1395,8 @@ Each case asserts less or nothing, never more, and always an
 | role with `token_type=batch` or no explicit max TTL | revoke, `error`, status only |
 | level metadata unreadable during discovery | revoke, `error`, status only |
 | view absent (no mapping, 403/404) | entry skipped |
-| view mapped but its upstream target missing or unreadable | revoke, `error`, status only (§9.3) |
+| static voidstar view whose upstream target is missing or unreadable | revoke, `error`, status only (§9.3) |
+| `resolve` mapping whose engine path returns 403/404 | entry skipped (§8.2) |
 | view quarantined / voidstar loopback broken | revoke, `error`, status only |
 | resolved engine path erroring | revoke (leases cascade), `error`, status only |
 | group alias deleted mid-run | gated level skipped on the next login |

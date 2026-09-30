@@ -11,7 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
+
+	"github.com/hashicorp/vault/api"
 
 	"github.com/navistau/ironbark/internal/gitenv"
 	"github.com/navistau/ironbark/internal/identity"
@@ -83,6 +86,18 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 		return nil, nil, gitenv.Selection{}, fmt.Errorf("%w: list branch tiers: %v", errVault, err)
 	}
 
+	// A 403 on the tier LIST reads as "nothing visible" — which a stale
+	// token also produces. With nothing listed, ask Vault about the token
+	// itself so an expired one is an error, not an empty success.
+	if len(tiers) == 0 {
+		if err := opts.Vault.CheckToken(ctx, opts.Token); err != nil {
+			if errors.Is(err, vaultx.ErrTokenRejected) {
+				return nil, nil, gitenv.Selection{}, fmt.Errorf("%w: Vault rejected the token (expired or invalid); run `ib auth`", errConfig)
+			}
+			return nil, nil, gitenv.Selection{}, fmt.Errorf("%w: check token: %v", errVault, err)
+		}
+	}
+
 	tracked := gitenv.TrackedBranches(opts.Runner, info.Branch, tiers)
 
 	// M1 / CLIENT-SPEC §3: the staleness check (ls-remote) runs "before
@@ -121,9 +136,7 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 	sweep, err := opts.Vault.Sweep(ctx, opts.Token, id, branchful)
 	if err != nil {
 		if len(sweep.LeaseIDs) > 0 {
-			for _, revokeErr := range opts.Vault.RevokeLeases(ctx, opts.Token, sweep.LeaseIDs) {
-				fmt.Fprintf(opts.Stderr, "ib: revoke lease failed: %v\n", revokeErr)
-			}
+			reportRevokeErrors(opts.Stderr, opts.Vault.RevokeLeases(ctx, opts.Token, sweep.LeaseIDs))
 		}
 		return nil, nil, sel, fmt.Errorf("%w: sweep: %v", errVault, err)
 	}
@@ -145,6 +158,25 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 	}
 
 	return secrets, sweep.LeaseIDs, sel, nil
+}
+
+// reportRevokeErrors writes one line per failed lease revoke, except that
+// 403s (the caller's token may not revoke leases at all — the leases just
+// expire on their TTL) collapse into a single line rather than one per
+// lease on every run.
+func reportRevokeErrors(w io.Writer, errs []error) {
+	denied := 0
+	for _, err := range errs {
+		var respErr *api.ResponseError
+		if errors.As(err, &respErr) && respErr.StatusCode == http.StatusForbidden {
+			denied++
+			continue
+		}
+		fmt.Fprintf(w, "ib: revoke lease failed: %v\n", err)
+	}
+	if denied > 0 {
+		fmt.Fprintf(w, "ib: %d lease(s) not revocable with this token (403); they expire on TTL\n", denied)
+	}
 }
 
 func containsString(list []string, s string) bool {

@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/hashicorp/vault/api"
 
 	"github.com/navistau/ironbark/internal/gitenv"
 	"github.com/navistau/ironbark/internal/vaultx"
@@ -381,5 +384,53 @@ func TestResolve_SweepFailureRevokesPartialLeases(t *testing.T) {
 	revoked := fv.revokedIDs()
 	if len(revoked) != 1 || revoked[0] != "database/creds/readonly/lease-1" {
 		t.Errorf("revoked leases = %v, want [database/creds/readonly/lease-1]", revoked)
+	}
+}
+
+// TestResolve_StaleTokenIsAnError: a token Vault rejects (403 on the tier
+// LIST, and on lookup-self) must not resolve to an empty success.
+func TestResolve_StaleTokenIsAnError(t *testing.T) {
+	fx := newIBFixture(t, nil)
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 403, `{"errors":["permission denied"]}`)
+	fv.set("/v1/auth/token/lookup-self", 403, `{"errors":["permission denied"]}`)
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err == nil {
+		t.Fatal("resolve succeeded with a rejected token")
+	}
+	if got := exitCode(err); got != 2 {
+		t.Errorf("exit code = %d, want 2 (err: %v)", got, err)
+	}
+	if !strings.Contains(err.Error(), "ib auth") {
+		t.Errorf("error %q does not point at `ib auth`", err)
+	}
+}
+
+func TestReportRevokeErrors(t *testing.T) {
+	denied := func() error {
+		return fmt.Errorf("vaultx: revoke lease x: %w", &api.ResponseError{StatusCode: 403})
+	}
+	var buf bytes.Buffer
+	reportRevokeErrors(&buf, []error{denied(), denied(), fmt.Errorf("vaultx: revoke lease y: boom")})
+	out := buf.String()
+	if strings.Count(out, "revoke lease failed") != 1 || !strings.Contains(out, "boom") {
+		t.Errorf("non-403 error not reported once: %q", out)
+	}
+	if !strings.Contains(out, "2 lease(s) not revocable") || strings.Count(out, "\n") != 2 {
+		t.Errorf("403s not collapsed to one line: %q", out)
+	}
+
+	buf.Reset()
+	reportRevokeErrors(&buf, nil)
+	if buf.Len() != 0 {
+		t.Errorf("no errors, got output %q", buf.String())
 	}
 }

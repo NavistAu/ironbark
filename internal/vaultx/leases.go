@@ -6,8 +6,11 @@ package vaultx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/hashicorp/vault/api"
 )
 
 // RevokeLeases revokes each lease in ids via PUT sys/leases/revoke
@@ -35,4 +38,32 @@ func (c *Client) RevokeLeases(ctx context.Context, token string, ids []string) [
 		resp.Body.Close()
 	}
 	return errs
+}
+
+// ErrTokenRejected is returned by CheckToken when Vault answers 403 to the
+// token's own lookup-self: the token is expired, revoked or invalid.
+var ErrTokenRejected = errors.New("vaultx: token rejected by Vault")
+
+// CheckToken asks Vault to look up token itself (auth/token/lookup-self,
+// which every token may call). A 403 means the token is no good
+// (ErrTokenRejected); 404 is treated as fine (a Vault without the route
+// cannot tell us otherwise), and any other failure is a plain error.
+func (c *Client) CheckToken(ctx context.Context, token string) error {
+	req := c.api.NewRequest(http.MethodGet, "/v1/auth/token/lookup-self")
+	req.ClientToken = token
+	resp, err := c.api.RawRequestWithContext(ctx, req)
+	if err != nil {
+		var respErr *api.ResponseError
+		if errors.As(err, &respErr) {
+			switch respErr.StatusCode {
+			case http.StatusForbidden:
+				return ErrTokenRejected
+			case http.StatusNotFound:
+				return nil
+			}
+		}
+		return fmt.Errorf("vaultx: lookup-self: %w", err)
+	}
+	resp.Body.Close()
+	return nil
 }

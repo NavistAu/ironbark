@@ -199,9 +199,7 @@ func cmdRun(ctx context.Context, opts runOpts, cmdArgs []string, buildOpts func(
 			// runs on every exit path below — an unresolved reference, a
 			// cmd.Start failure, or the child actually running.
 			defer func() {
-				for _, revokeErr := range ropts.Vault.RevokeLeases(ctx, ropts.Token, leaseIDs) {
-					fmt.Fprintf(stderr, "ib: revoke lease failed: %v\n", revokeErr)
-				}
+				reportRevokeErrors(stderr, ropts.Vault.RevokeLeases(ctx, ropts.Token, leaseIDs))
 			}()
 		}
 	}

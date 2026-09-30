@@ -276,9 +276,21 @@ func TestWalkResolveHook(t *testing.T) {
 	if _, err := Walk(context.Background(), f, lvls()[:1], opt); err == nil {
 		t.Fatal("resolve error must fail the walk")
 	}
-	// no resolver: warned and skipped
+	// default resolver: a plain read with the client's token, one hop only
+	f.reads["aws/creds/prod"] = &vaultx.Secret{Data: map[string]json.RawMessage{
+		"access_key": raw("AK2"), "$ref": raw("other/path")}}
+	f.reads["aws/creds/none"] = vaultx.ErrNotFound
 	r, err = Walk(context.Background(), f, lvls()[:1], Options{})
-	if err != nil || len(r.Secrets) != 0 || !warned(r, "no resolver") {
-		t.Fatalf("r = %+v err %v", r, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g = byName(r)
+	if g["aws_access_key"].Value != "AK2" || g["aws_$ref"].Name != "" || !reflect.DeepEqual(r.SkippedEntries, []string{"./gone"}) {
+		t.Fatalf("default resolver: %+v skipped %v", r.Secrets, r.SkippedEntries)
+	}
+	for _, rd := range f.order {
+		if rd == "other/path" {
+			t.Fatal("the resolved response was followed as a pointer")
+		}
 	}
 }

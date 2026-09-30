@@ -47,18 +47,24 @@ type Result struct {
 	Warnings      []string
 }
 
-// Resolver reads the engine path a resolve mapping points at (§7). The walk's
-// default is a plain read with the pipeline token, so the lease parents to it.
+// Resolver reads the engine path a resolve mapping points at (§7).
 type Resolver func(ctx context.Context, path string) (*vaultx.Secret, error)
 
 // Options tunes a walk.
 type Options struct {
-	Resolve Resolver // nil: resolve mappings are skipped with a warning
+	// Resolve overrides how a resolve mapping's target is read. Nil is the
+	// intended behaviour: a plain read with the pipeline token, so the lease
+	// parents to that token and is revoked with it. One hop only: the
+	// response is never itself treated as a pointer.
+	Resolve Resolver
 }
 
 // Walk is the §8.2 walk over lv (shallow to deep) as the client's token.
 func Walk(ctx context.Context, c Client, lv []levels.Level, opt Options) (Result, error) {
 	res := Result{Levels: map[string]string{}}
+	if opt.Resolve == nil {
+		opt.Resolve = c.Read
+	}
 	best := map[string]int{} // name -> level index of the value held
 	held := map[string]Secret{}
 
@@ -126,10 +132,6 @@ func Walk(ctx context.Context, c Client, lv []levels.Level, opt Options) (Result
 
 			payload, flat := v.data, false
 			if v.mode == "resolve" {
-				if opt.Resolve == nil {
-					res.Warnings = append(res.Warnings, entry+": resolve mapping but no resolver, skipped")
-					continue
-				}
 				rs, err := opt.Resolve(ctx, v.path)
 				if errors.Is(err, vaultx.ErrForbidden) || errors.Is(err, vaultx.ErrNotFound) {
 					res.SkippedEntries = append(res.SkippedEntries, entry)

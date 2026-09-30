@@ -138,3 +138,50 @@ func TestRevokeSelf(t *testing.T) {
 		t.Fatalf("revoked = %v", f.revoked)
 	}
 }
+
+func TestReadListLevelMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Vault-Token") != "T" {
+			w.WriteHeader(403)
+			return
+		}
+		switch {
+		case r.Method == "LIST" || r.URL.Query().Get("list") == "true":
+			_, _ = w.Write([]byte(`{"data":{"keys":["a","d/"]}}`))
+		case strings.HasSuffix(r.URL.Path, "/lvl/"):
+			_, _ = w.Write([]byte(`{"data":{"custom_metadata":{"branches":"main"}}}`))
+		case strings.HasSuffix(r.URL.Path, "/none/"):
+			w.WriteHeader(404)
+		case strings.HasSuffix(r.URL.Path, "/boom"):
+			w.WriteHeader(500)
+		default:
+			_, _ = w.Write([]byte(`{"lease_id":"L","data":{"k":"v"}}`))
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewConn(srv.URL, nil)
+	ctx := context.Background()
+	s := c.As("T")
+	sec, err := s.Read(ctx, "x/y")
+	if err != nil || sec.LeaseID != "L" || string(sec.Data["k"]) != `"v"` {
+		t.Fatalf("read = %+v, %v", sec, err)
+	}
+	if keys, err := s.List(ctx, "x/"); err != nil || len(keys) != 2 {
+		t.Fatalf("list = %v, %v", keys, err)
+	}
+	if md, ok, err := s.LevelMetadata(ctx, "x/lvl/"); err != nil || !ok || md["branches"] != "main" {
+		t.Fatalf("level = %v %v %v", md, ok, err)
+	}
+	if _, ok, err := s.LevelMetadata(ctx, "x/none/"); err != nil || ok {
+		t.Fatalf("404 level = %v %v", ok, err)
+	}
+	if _, _, err := c.As("bad").LevelMetadata(ctx, "x/lvl/"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("403 err = %v", err)
+	}
+	if _, err := c.As("bad").Read(ctx, "x/y"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("403 read err = %v", err)
+	}
+	if _, err := s.Read(ctx, "x/boom"); err == nil || errors.Is(err, ErrForbidden) || errors.Is(err, ErrNotFound) {
+		t.Fatalf("500 err = %v", err)
+	}
+}

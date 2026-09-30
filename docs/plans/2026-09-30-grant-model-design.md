@@ -257,8 +257,10 @@ Two changes:
   strings. Group aliases are therefore created with the escaped name, and
   the IaC derives it with the same `esc()`.
 
-A failed lookup (timeout, transport error, unexpected status) emits no
-`teams` claim. Every team-gated level is then unreadable: less, never more.
+A failed lookup (timeout, transport error, unexpected status) emits an
+empty `teams` claim (`[]`). Every team-gated level is then unreadable: less,
+never more. The claim is never omitted: OpenBao refuses a login on a role
+with `groups_claim` when the claim is missing (lab, 2026-10-01).
 
 ### 4.5 Environment selection
 
@@ -404,7 +406,7 @@ credential.
 | `ref` | `esc(ref)` | absent per §4.1 |
 | `branch_protected` | `"true"` / `"false"` | absent when `branch` is |
 | `actor` | `esc(actor)` | absent when none |
-| `teams` | list of `esc(org)/esc(team)` | absent when not resolved or none |
+| `teams` | list of `esc(org)/esc(team)` | always present; `[]` when not resolved or none |
 | `env` | selected env | absent when none |
 | `env_source` | `variable` / `branch` | absent when no env |
 | `target` | escaped segments joined by `/` | audit and `bound_claims` only; never mapped (it contains `/`) |
@@ -956,7 +958,7 @@ Two Woodpecker behaviours bound this:
 |---|---|
 | signature invalid | 401, nothing (unchanged) |
 | forge down or slow, protection lookup | `branch_protected=false`: no discovery, repo level only; an explicit env is refused by a role that binds `branch_protected` → `refused` |
-| forge down or slow, team lookup | no `teams` claim: team-gated levels skipped |
+| forge down or slow, team lookup | `teams: []`: team-gated levels skipped |
 | OpenBao unreachable | `error`, nothing else |
 | JWT rejected (bad key, expired, wrong audience) | `error`, nothing else, error log (a config fault, not a policy outcome) |
 | role missing or claims refused | `refused`, nothing else |

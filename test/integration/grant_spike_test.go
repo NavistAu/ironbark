@@ -119,24 +119,22 @@ func (s *spike) groups(t *testing.T) {
 	other := s.login(t, "sp-grp", s.req("staging", "", s.org+"/"+uniq("nobody")))
 	s.want(t, other, "staging/gated/x", 403)
 
-	// FINDING: a role with groups_claim set refuses a JWT that has no `teams`
-	// claim at all, as a plain login error (not a bound-claims refusal). Spec
-	// §5.2 omits `teams` when there are none, so a teamless actor cannot log
-	// in to a role that sets groups_claim. Fail closed, but a different class.
-	_, err := s.c.LoginJWT(context.Background(), "jwt", "sp-grp", s.g.JWT(t, s.req("staging", "")))
+	// FINDING (fixed in jwtsign, 404eeae): a role with groups_claim set refuses
+	// a JWT with no `teams` claim at all, as a plain login error. jwtsign now
+	// always sends `teams`, as [] when there are none, and that logs in with no
+	// groups. Both halves are checked here.
+	tok := s.login(t, "sp-grp", s.req("staging", ""))
+	s.want(t, tok, "staging/gated/x", 403)
+	c := s.g.Claims(s.req("staging", ""))
+	if ts, ok := c["teams"].([]string); !ok || len(ts) != 0 {
+		t.Errorf("jwtsign teams claim with no teams = %#v, want an empty list", c["teams"])
+	}
+	delete(c, "teams")
+	j, _ := s.g.Signer.Sign(c)
+	_, err := s.c.LoginJWT(context.Background(), "jwt", "sp-grp", j)
 	var ref *vaultx.RefusedError
 	if err == nil || errors.As(err, &ref) || !strings.Contains(err.Error(), `"teams" claim not found`) {
-		t.Errorf("no teams claim: err = %v", err)
-	}
-	// an explicit empty list is a present claim and logs in with no groups
-	c := s.g.Claims(s.req("staging", ""))
-	c["teams"] = []string{}
-	j, _ := s.g.Signer.Sign(c)
-	if tok, err := s.c.LoginJWT(context.Background(), "jwt", "sp-grp", j); err != nil {
-		t.Logf("empty teams list also refused: %v", err)
-	} else {
-		s.want(t, tok.Value, "staging/gated/x", 403)
-		t.Log("an empty `teams: []` logs in with no groups")
+		t.Errorf("absent teams claim: err = %v, want a plain login error", err)
 	}
 }
 

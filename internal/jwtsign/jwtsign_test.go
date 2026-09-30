@@ -204,7 +204,7 @@ func TestClaimsJTIUnique(t *testing.T) {
 func TestClaimsAbsentMeansOmitted(t *testing.T) {
 	f := facts.Facts{Org: "acme", Repo: "mono", RepoKey: "acme/mono#4711", Event: "pull_request", Pipeline: "3"}
 	c := Claims(f, "", "", selector.Target{}, nil, now)
-	for _, k := range []string{"branch", "ref", "branch_protected", "actor", "teams", "env", "env_source", "target", "t1", "t2", "t3"} {
+	for _, k := range []string{"branch", "ref", "branch_protected", "actor", "env", "env_source", "target", "t1", "t2", "t3"} {
 		if _, ok := c[k]; ok {
 			t.Errorf("claim %s present: %#v", k, c[k])
 		}
@@ -214,11 +214,11 @@ func TestClaimsAbsentMeansOmitted(t *testing.T) {
 			t.Errorf("claim %s missing", k)
 		}
 	}
-	// Empty teams slice is omitted, never sent empty.
-	f.Actor = "x"
-	if _, ok := Claims(f, "prod", "variable", selector.Target{}, []string{}, now)["teams"]; ok {
-		t.Error("empty teams sent")
+	// teams is always sent, [] when there are none (groups_claim needs it).
+	if tm, ok := c["teams"].([]string); !ok || len(tm) != 0 {
+		t.Errorf("teams = %#v, want []", c["teams"])
 	}
+	f.Actor = "x"
 	// env without target: no target claims.
 	c = Claims(f, "prod", "branch", selector.Target{}, nil, now)
 	if c["env"] != "prod" || c["env_source"] != "branch" {
@@ -317,7 +317,10 @@ func TestSub(t *testing.T) {
 
 func TestDiscoveryClaims(t *testing.T) {
 	c := DiscoveryClaims(fullFacts(), now)
-	for _, k := range []string{"env", "env_source", "target", "t1", "teams"} {
+	if tm, ok := c["teams"].([]string); !ok || len(tm) != 0 {
+		t.Errorf("discovery teams = %#v, want []", c["teams"])
+	}
+	for _, k := range []string{"env", "env_source", "target", "t1"} {
 		if _, ok := c[k]; ok {
 			t.Errorf("discovery claim %s present", k)
 		}
@@ -329,5 +332,15 @@ func TestDiscoveryClaims(t *testing.T) {
 	}
 	if c["sub"] != Sub("acme", "mono", "", selector.Target{}, nil) {
 		t.Error("discovery sub is not the env-less sub")
+	}
+}
+
+func TestClaimsEmptyTeamsEncodesAsArray(t *testing.T) {
+	b, err := json.Marshal(DiscoveryClaims(fullFacts(), now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"teams":[]`) {
+		t.Errorf("teams not encoded as []: %s", b)
 	}
 }

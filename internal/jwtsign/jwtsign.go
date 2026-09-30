@@ -100,8 +100,10 @@ func (s *Signer) Sign(claims map[string]any) (string, error) {
 }
 
 // Claims builds the claim set of design §5.2. Absent facts are omitted, never
-// sent empty. teams are already esc(org)/esc(team) (forge.QualifiedTeams) and
-// are sent as given, sorted. env "" means no environment (and then no
+// sent empty, except teams: it is always sent (possibly []), because OpenBao
+// refuses a login on a role with groups_claim when the claim is missing.
+// teams are already esc(org)/esc(team) (forge.QualifiedTeams) and are sent as
+// given, sorted. env "" means no environment (and then no
 // env_source, target or t1..t8).
 func Claims(f facts.Facts, env, envSource string, t selector.Target, teams []string, now time.Time) map[string]any {
 	org, repo := identity.Esc(f.Org), identity.Esc(f.Repo)
@@ -130,9 +132,7 @@ func Claims(f facts.Facts, env, envSource string, t selector.Target, teams []str
 	if f.Actor != "" {
 		c["actor"] = identity.Esc(f.Actor)
 	}
-	if len(teams) > 0 {
-		c["teams"] = sortedCopy(teams)
-	}
+	c["teams"] = sortedCopy(teams)
 	if env != "" {
 		c["env"] = env
 		set("env_source", envSource)
@@ -147,7 +147,7 @@ func Claims(f facts.Facts, env, envSource string, t selector.Target, teams []str
 }
 
 // DiscoveryClaims is the reduced claim set of the discovery login (§9.1
-// step 4): no env, no target, no teams.
+// step 4): no env, no target, teams [].
 func DiscoveryClaims(f facts.Facts, now time.Time) map[string]any {
 	return Claims(f, "", "", selector.Target{}, nil, now)
 }
@@ -167,7 +167,7 @@ func Sub(org, repo, env string, t selector.Target, teams []string) string {
 }
 
 func sortedCopy(s []string) []string {
-	out := append([]string(nil), s...)
+	out := append([]string{}, s...)
 	sort.Strings(out)
 	return out
 }

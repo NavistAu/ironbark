@@ -1,191 +1,155 @@
 package gitenv
 
 import (
+	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/navistau/ironbark/internal/grantcfg"
+	"github.com/navistau/ironbark/internal/vaultx"
 )
 
-// defaultTracked is "Tracked = main, develop unless stated" per the plan's
-// table (docs/plans/2026-09-28-m3-ib-client.md, Task 5).
-var defaultTracked = []string{"main", "develop"}
+const rp = "vs/metadata/pipelines/acme/mono/"
 
-func TestCascade(t *testing.T) {
-	want := []string{
-		"dev", "develop", "development", "test", "testing", "qa", "uat",
-		"stage", "staging", "preprod", "trunk", "main", "master", "prod",
-		"production", "live",
+// fake is a walk.Client over maps; a path absent from md has no level
+// metadata (404) and one listed in deny answers 403.
+type fake struct {
+	lists map[string][]string
+	md    map[string]map[string]string
+	deny  map[string]bool
+}
+
+func (f *fake) Token() string { return "T" }
+func (f *fake) List(_ context.Context, p string) ([]string, error) {
+	if f.deny[p] {
+		return nil, vaultx.ErrForbidden
 	}
-	if !reflect.DeepEqual(Cascade, want) {
-		t.Errorf("Cascade = %v, want %v", Cascade, want)
+	k, ok := f.lists[p]
+	if !ok {
+		return nil, vaultx.ErrNotFound
+	}
+	return k, nil
+}
+func (f *fake) Read(context.Context, string) (*vaultx.Secret, error) { return nil, vaultx.ErrNotFound }
+func (f *fake) LevelMetadata(_ context.Context, p string) (map[string]string, bool, error) {
+	if f.deny[p] {
+		return nil, false, vaultx.ErrForbidden
+	}
+	m, ok := f.md[p]
+	return m, ok, nil
+}
+
+func tmpl(t *testing.T) grantcfg.Template {
+	t.Helper()
+	tm, err := grantcfg.ParseTemplate("vs/data/pipelines/{repo}/{env}/{target...}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tm
+}
+
+func envs() *fake {
+	return &fake{
+		lists: map[string][]string{rp: {"db", "prod/", "staging/", "dev/"}},
+		md: map[string]map[string]string{
+			rp + "prod/":    {"branches": "main"},
+			rp + "staging/": {"branches": "release/*"},
+			rp + "dev/":     {"branches": "main,feat/*"},
+		},
 	}
 }
 
-func TestSelect(t *testing.T) {
-	cases := []struct {
-		name       string
-		in         SelectInput
-		wantBranch string
-		wantRule   string
-		wantErr    *SelectError
-	}{
-		{
-			name:       "override hit",
-			in:         SelectInput{Override: "develop", Tracked: defaultTracked},
-			wantBranch: "develop",
-			wantRule:   "override",
-		},
-		{
-			name:    "override miss",
-			in:      SelectInput{Override: "stage", Tracked: defaultTracked},
-			wantErr: &SelectError{Kind: "not-tracked"},
-		},
-		{
-			name:       "direct",
-			in:         SelectInput{Current: "main", Tracked: defaultTracked},
-			wantBranch: "main",
-			wantRule:   "direct",
-		},
-		{
-			name: "nearest",
-			in: SelectInput{
-				Current:  "feat/x",
-				Tracked:  defaultTracked,
-				Distance: map[string]int{"develop": 3, "main": 13},
-			},
-			wantBranch: "develop",
-			wantRule:   "nearest",
-		},
-		{
-			name: "tie to cascade",
-			in: SelectInput{
-				Current:  "fix/y",
-				Tracked:  defaultTracked,
-				Distance: map[string]int{"develop": 2, "main": 2},
-			},
-			wantBranch: "develop",
-			wantRule:   "cascade",
-		},
-		{
-			name: "tie to reflog",
-			in: SelectInput{
-				Current:    "fix/y",
-				Tracked:    defaultTracked,
-				Distance:   map[string]int{"develop": 2, "main": 2},
-				ReflogFrom: "main",
-			},
-			wantBranch: "main",
-			wantRule:   "reflog",
-		},
-		{
-			name: "detached tie skips reflog",
-			in: SelectInput{
-				Detached:   true,
-				Tracked:    defaultTracked,
-				Distance:   map[string]int{"develop": 0, "main": 0},
-				ReflogFrom: "main",
-			},
-			wantBranch: "develop",
-			wantRule:   "cascade",
-		},
-		{
-			name: "tie off cascade list is ambiguous",
-			in: SelectInput{
-				Tracked:  []string{"alpha", "beta"},
-				Distance: map[string]int{"alpha": 1, "beta": 1},
-			},
-			wantErr: &SelectError{Kind: "ambiguous", Candidates: map[string]int{"alpha": 1, "beta": 1}},
-		},
-		{
-			name: "no ancestor",
-			in: SelectInput{
-				Current: "orphan",
-				Tracked: defaultTracked,
-			},
-			wantErr: &SelectError{Kind: "no-ancestor"},
-		},
-		{
-			name:       "no branch tiers at all",
-			in:         SelectInput{Tracked: nil},
-			wantBranch: "",
-			wantRule:   "no-branch-tiers",
-		},
-		{
-			name:    "no branch tiers with override",
-			in:      SelectInput{Tracked: nil, Override: "main"},
-			wantErr: &SelectError{Kind: "override-without-tiers"},
-		},
+func sel(t *testing.T, c *fake, in SelectInput) (Selection, error) {
+	t.Helper()
+	in.Org, in.Repo = "acme", "mono"
+	return Select(context.Background(), c, tmpl(t), in)
+}
+
+func TestSelectExplicitEnvNeedsNoDiscovery(t *testing.T) {
+	// the fake would 403 any listing: an explicit env must not touch it
+	c := &fake{deny: map[string]bool{rp: true}}
+	got, err := sel(t, c, SelectInput{Env: "staging", Branch: "main"})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if got.Env != "staging" || got.Rule != RuleExplicit {
+		t.Errorf("got %+v", got)
+	}
+}
 
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := Select(c.in)
-
-			if c.wantErr != nil {
-				if err == nil {
-					t.Fatalf("Select(%+v) = %+v, nil; want error %+v", c.in, got, c.wantErr)
-				}
-				serr, ok := err.(*SelectError)
-				if !ok {
-					t.Fatalf("Select(%+v) error type = %T, want *SelectError", c.in, err)
-				}
-				if serr.Kind != c.wantErr.Kind {
-					t.Errorf("Select(%+v) error Kind = %q, want %q", c.in, serr.Kind, c.wantErr.Kind)
-				}
-				if c.wantErr.Candidates != nil && !reflect.DeepEqual(serr.Candidates, c.wantErr.Candidates) {
-					t.Errorf("Select(%+v) error Candidates = %v, want %v", c.in, serr.Candidates, c.wantErr.Candidates)
-				}
-				return
-			}
-
+func TestSelectDiscovery(t *testing.T) {
+	cases := []struct {
+		name, branch, wantEnv, wantRule string
+	}{
+		{"one claimant", "release/1", "staging", RuleBranch},
+		{"none: repo level only", "hotfix/none-here", "", RuleNone},
+		{"detached: no branch", "", "", RuleNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := sel(t, envs(), SelectInput{Branch: tc.branch})
 			if err != nil {
-				t.Fatalf("Select(%+v) unexpected error: %v", c.in, err)
+				t.Fatal(err)
 			}
-			if got.Branch != c.wantBranch {
-				t.Errorf("Select(%+v).Branch = %q, want %q", c.in, got.Branch, c.wantBranch)
-			}
-			if got.Rule != c.wantRule {
-				t.Errorf("Select(%+v).Rule = %q, want %q", c.in, got.Rule, c.wantRule)
+			if got.Env != tc.wantEnv || got.Rule != tc.wantRule {
+				t.Errorf("got %+v, want env %q rule %q", got, tc.wantEnv, tc.wantRule)
 			}
 		})
 	}
 }
 
-// TestNeedsAncestry proves rule 1 (override) and rule 2 (direct match) —
-// and the no-branch-tiers case — never need ancestry facts, while
-// anything that would fall through to rule 3 does (M1: this is what lets
-// resolve() skip the ls-remote staleness check when it isn't needed).
-func TestNeedsAncestry(t *testing.T) {
+func TestSelectSeveralClaimantsNamedInError(t *testing.T) {
+	_, err := sel(t, envs(), SelectInput{Branch: "main"})
+	var se *SelectError
+	if !errors.As(err, &se) || se.Kind != "ambiguous" {
+		t.Fatalf("err = %v, want ambiguous SelectError", err)
+	}
+	if !reflect.DeepEqual(se.Claimants, []string{"dev", "prod"}) {
+		t.Errorf("Claimants = %v", se.Claimants)
+	}
+	if !strings.Contains(err.Error(), "dev") || !strings.Contains(err.Error(), "prod") || !strings.Contains(err.Error(), "--env") {
+		t.Errorf("message %q must name the levels and point at --env", err)
+	}
+}
+
+func TestSelectUnreadableLevelIsAnError(t *testing.T) {
+	c := envs()
+	c.deny = map[string]bool{rp + "prod/": true}
+	_, err := sel(t, c, SelectInput{Branch: "release/1"})
+	if !errors.Is(err, vaultx.ErrForbidden) {
+		t.Fatalf("err = %v, want the 403 (a hidden claimant must not let another level win)", err)
+	}
+}
+
+func TestSelectTarget(t *testing.T) {
+	got, err := sel(t, envs(), SelectInput{Env: "prod", Target: "web/api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Target.Escaped, []string{"web", "api"}) {
+		t.Errorf("Target = %+v", got.Target)
+	}
+}
+
+func TestSelectInvalid(t *testing.T) {
 	cases := []struct {
-		name              string
-		override, current string
-		tracked           []string
-		want              bool
+		name string
+		in   SelectInput
+		kind string
 	}{
-		{"no branch tiers at all", "", "", nil, false},
-		{"no branch tiers even with override", "stage", "", nil, false},
-		{"override present", "develop", "main", defaultTracked, false},
-		{"override absent (still no ancestry needed: rule 1 fails fast)", "nope", "main", defaultTracked, false},
-		{"direct match", "", "main", defaultTracked, false},
-		{"no override, no direct match: needs rule 3+", "", "feature/x", defaultTracked, true},
-		{"detached, no override: needs rule 3+", "", "", defaultTracked, true},
+		{"env grammar", SelectInput{Env: "Prod!"}, "invalid-env"},
+		{"target grammar", SelectInput{Env: "prod", Target: "a//b"}, "invalid-target"},
+		{"target without an environment", SelectInput{Branch: "hotfix/none-here", Target: "web"}, "target-without-env"},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := NeedsAncestry(c.override, c.current, c.tracked); got != c.want {
-				t.Errorf("NeedsAncestry(%q, %q, %v) = %v, want %v", c.override, c.current, c.tracked, got, c.want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := sel(t, envs(), tc.in)
+			var se *SelectError
+			if !errors.As(err, &se) || se.Kind != tc.kind {
+				t.Fatalf("err = %v, want SelectError kind %s", err, tc.kind)
 			}
 		})
-	}
-}
-
-// TestSelectErrorImplementsError just documents/asserts SelectError
-// satisfies the error interface with a non-empty message for every Kind.
-func TestSelectErrorImplementsError(t *testing.T) {
-	kinds := []string{"not-tracked", "ambiguous", "no-ancestor", "override-without-tiers"}
-	for _, k := range kinds {
-		e := &SelectError{Kind: k, Candidates: map[string]int{"a": 1}}
-		if e.Error() == "" {
-			t.Errorf("SelectError{Kind:%q}.Error() is empty", k)
-		}
 	}
 }

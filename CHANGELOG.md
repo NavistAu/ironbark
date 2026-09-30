@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [CLIENT-SPEC.md](docs/CLIENT-SPEC.md). Not published as a release artifact
   yet — install from source (`go install ./cmd/ib`); see DEC-260723140246.
 
+### Fixed
+
+- README tier-policy example for `pull_request` also read the `push/main`
+  tier; examples now scope each tier with `+` and an exact metadata path.
+
 ## [0.1.2] - 2026-08-19
 
 ### Fixed

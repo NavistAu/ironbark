@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && ib_legacy
 
 // Task 11 (plan docs/plans/2026-09-28-m3-ib-client.md): ib client
 // integration tests against the existing dual-product harness

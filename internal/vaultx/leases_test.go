@@ -3,6 +3,7 @@ package vaultx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -140,5 +141,43 @@ func TestRevokeLeases_NeverCallsRevokeSelf(t *testing.T) {
 	c.RevokeLeases(context.Background(), "caller-token", []string{"lease-1"})
 	if revokeSelfCalled {
 		t.Errorf("RevokeLeases called auth/token/revoke-self, must never do so")
+	}
+}
+
+func TestCheckToken(t *testing.T) {
+	cases := []struct {
+		status  int
+		wantErr string // "", "rejected" or "other"
+	}{
+		{200, ""}, {404, ""}, {403, "rejected"}, {500, "other"},
+	}
+	for _, tc := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/auth/token/lookup-self" || r.Header.Get("X-Vault-Token") != "tok" {
+				t.Errorf("unexpected request %s token=%q", r.URL.Path, r.Header.Get("X-Vault-Token"))
+			}
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(`{"errors":[]}`))
+		}))
+		c, err := New(Config{Addr: srv.URL, KVMount: "kv", KVPrefix: "ci"})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		err = c.CheckToken(context.Background(), "tok")
+		srv.Close()
+		switch tc.wantErr {
+		case "":
+			if err != nil {
+				t.Errorf("status %d: err = %v, want nil", tc.status, err)
+			}
+		case "rejected":
+			if !errors.Is(err, ErrTokenRejected) {
+				t.Errorf("status %d: err = %v, want ErrTokenRejected", tc.status, err)
+			}
+		default:
+			if err == nil || errors.Is(err, ErrTokenRejected) {
+				t.Errorf("status %d: err = %v, want a plain error", tc.status, err)
+			}
+		}
 	}
 }

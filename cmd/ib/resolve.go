@@ -83,6 +83,18 @@ func resolve(ctx context.Context, opts resolveOpts) (map[string]vaultx.SweptSecr
 		return nil, nil, gitenv.Selection{}, fmt.Errorf("%w: list branch tiers: %v", errVault, err)
 	}
 
+	// A 403 on the tier LIST reads as "nothing visible" — which a stale
+	// token also produces. With nothing listed, ask Vault about the token
+	// itself so an expired one is an error, not an empty success.
+	if len(tiers) == 0 {
+		if err := opts.Vault.CheckToken(ctx, opts.Token); err != nil {
+			if errors.Is(err, vaultx.ErrTokenRejected) {
+				return nil, nil, gitenv.Selection{}, fmt.Errorf("%w: Vault rejected the token (expired or invalid); run `ib auth`", errConfig)
+			}
+			return nil, nil, gitenv.Selection{}, fmt.Errorf("%w: check token: %v", errVault, err)
+		}
+	}
+
 	tracked := gitenv.TrackedBranches(opts.Runner, info.Branch, tiers)
 
 	// M1 / CLIENT-SPEC §3: the staleness check (ls-remote) runs "before

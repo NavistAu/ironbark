@@ -383,3 +383,30 @@ func TestResolve_SweepFailureRevokesPartialLeases(t *testing.T) {
 		t.Errorf("revoked leases = %v, want [database/creds/readonly/lease-1]", revoked)
 	}
 }
+
+// TestResolve_StaleTokenIsAnError: a token Vault rejects (403 on the tier
+// LIST, and on lookup-self) must not resolve to an empty success.
+func TestResolve_StaleTokenIsAnError(t *testing.T) {
+	fx := newIBFixture(t, nil)
+	fv := newFakeVault()
+	fv.set("/v1/kv/metadata/"+rtEvent, 403, `{"errors":["permission denied"]}`)
+	fv.set("/v1/auth/token/lookup-self", 403, `{"errors":["permission denied"]}`)
+
+	vc := newTestVault(t, fv)
+	var stderr bytes.Buffer
+	_, _, _, err := resolve(context.Background(), resolveOpts{
+		Runner: gitenv.ExecRunner{Dir: fx.clone},
+		Vault:  vc,
+		Token:  rtToken,
+		Stderr: &stderr,
+	})
+	if err == nil {
+		t.Fatal("resolve succeeded with a rejected token")
+	}
+	if got := exitCode(err); got != 2 {
+		t.Errorf("exit code = %d, want 2 (err: %v)", got, err)
+	}
+	if !strings.Contains(err.Error(), "ib auth") {
+		t.Errorf("error %q does not point at `ib auth`", err)
+	}
+}

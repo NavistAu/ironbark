@@ -243,11 +243,13 @@ Two changes:
   `acme/deployers`, and reach OpenBao through `groups_claim`. Qualifying by
   org stops a team named `deployers` in one org from satisfying a gate meant
   for another org's `deployers`.
-- **Team names that differ only in case collide.** OpenBao matches
+- **Team case is safe because the claim is escaped.** OpenBao matches
   group-alias names case-insensitively (lab, Q11): alias `uat-approvers`
-  matched claims `uat-approvers`, `UAT-Approvers` and `Uat-approvers`.
-  Teams `Deployers` and `deployers` in one org would be one group. Stated
-  as a limit (§14); the IaC should refuse to create such a pair.
+  matched claims `uat-approvers`, `UAT-Approvers` and `Uat-approvers`. But
+  `esc()` encodes every uppercase byte (`Deployers` becomes `%44eployers`,
+  lowercase hex), so `Deployers` and `deployers` reach OpenBao as different
+  strings. Group aliases are therefore created with the escaped name, and
+  the IaC derives it with the same `esc()`.
 
 A failed lookup (timeout, transport error, unexpected status) emits no
 `teams` claim. Every team-gated level is then unreadable: less, never more.
@@ -314,12 +316,12 @@ ironbark does not derive a target from `changed_files`. A job that needs
 that works it out in an earlier pipeline and passes the result forward as a
 variable (a manual run or a promote with `DEPLOY_TO` / `deploy_to`).
 
-Grammar (as today, plus one rule): split on `/`, every segment non-empty, at
-most 8 segments and 256 bytes, and **no `.` or `..` segment**. Each segment
+Grammar (as today): split on `/`, every segment non-empty, at
+most 8 segments and 256 bytes; case, `.` and `..` are kept. Each segment
 is escaped on its own (`esc()`, §5.3) and **each segment is a level**:
 `srv.talos/svc/gear` walks `prod/srv.talos/`, `prod/srv.talos/svc/` and
 `prod/srv.talos/svc/gear/`, deepest wins, so a nested target inherits its
-parents' secrets. An explicit value violating the grammar is refused like
+parents' secrets. An explicit value violating the grammar is (proposed, §17.4) refused like
 an invalid environment: only `ironbark_status` (`outcome=invalid`,
 `target_invalid`), never a silent walk that stops at the environment.
 
@@ -557,29 +559,35 @@ path "vs/metadata/pipelines/M(org)/M(repo)/+/" { capabilities = ["read"] }
 # ci-env
 path "vs/data/pipelines/M(org)/M(repo)/M(env)/+"    { capabilities = ["read"] }
 path "vs/metadata/pipelines/M(org)/M(repo)/M(env)/" { capabilities = ["list"] }
+path "vs/metadata/pipelines/M(org)/M(repo)/M(env)/+" { capabilities = ["read"] }
 
-# ci-target: one pair per target depth, 1 to 8
+# ci-target: one triple per target depth, 1 to 8
 path "vs/data/pipelines/M(org)/M(repo)/M(env)/M(t1)/+"          { capabilities = ["read"] }
 path "vs/metadata/pipelines/M(org)/M(repo)/M(env)/M(t1)/"       { capabilities = ["list"] }
+path "vs/metadata/pipelines/M(org)/M(repo)/M(env)/M(t1)/+"      { capabilities = ["read"] }
 path "vs/data/pipelines/M(org)/M(repo)/M(env)/M(t1)/M(t2)/+"    { capabilities = ["read"] }
 path "vs/metadata/pipelines/M(org)/M(repo)/M(env)/M(t1)/M(t2)/" { capabilities = ["list"] }
+path "vs/metadata/pipelines/M(org)/M(repo)/M(env)/M(t1)/M(t2)/+" { capabilities = ["read"] }
 # ... and so on through M(t8)
 ```
 
 The lab (spike 5, OpenBao 2.7.0 with voidstar) proved this shape. Claims
-`org`, `name`, `env`, `t1`..`t8` are mapped through `claim_mappings`; each
+`org`, `repo`, `env`, `t1`..`t8` are mapped through `claim_mappings`; each
 level gets one stanza triple whose data path ends in `/+`. For the target
 `srv.talos/svc/gear`, with views
 `est/acme/mono/{db, prod/db, prod/srv.talos/db, prod/srv.talos/svc/db, prod/srv.talos/svc/gear/db}`
 (mount `vs/`, path `est/{org}/{name}/{env}/{t1}/...`), the level-2 triple is:
 
 ```hcl
-path "vs/data/est/{{...metadata.org}}/{{...metadata.name}}/{{...metadata.env}}/{{...metadata.t1}}/{{...metadata.t2}}/+" { capabilities = ["read"] }
-path "vs/metadata/est/{{...metadata.org}}/{{...metadata.name}}/{{...metadata.env}}/{{...metadata.t1}}/{{...metadata.t2}}/"  { capabilities = ["list"] }
-path "vs/metadata/est/{{...metadata.org}}/{{...metadata.name}}/{{...metadata.env}}/{{...metadata.t1}}/{{...metadata.t2}}/+" { capabilities = ["read"] }
+path "vs/data/est/{{...metadata.org}}/{{...metadata.repo}}/{{...metadata.env}}/{{...metadata.t1}}/{{...metadata.t2}}/+" { capabilities = ["read"] }
+path "vs/metadata/est/{{...metadata.org}}/{{...metadata.repo}}/{{...metadata.env}}/{{...metadata.t1}}/{{...metadata.t2}}/"  { capabilities = ["list"] }
+path "vs/metadata/est/{{...metadata.org}}/{{...metadata.repo}}/{{...metadata.env}}/{{...metadata.t1}}/{{...metadata.t2}}/+" { capabilities = ["read"] }
 ```
 
-(`{{...metadata.x}}` abbreviates `{{identity.entity.aliases.ACC.metadata.x}}`.)
+(`{{...metadata.x}}` abbreviates `{{identity.entity.aliases.ACC.metadata.x}}`.
+The lab named the repo claim `name`; this design calls it `repo`. Group
+policies below use the same triple per level; the third stanza is omitted
+there for brevity.)
 Results: the token for `srv.talos/svc/gear` read all five levels and could
 list each; sibling `svc/other`, another environment and another repo got
 403. A token whose JWT lacked `t2` and `t3` had those stanzas silently
@@ -857,7 +865,7 @@ ironbark/v1 outcome=refused env=prod env_source=variable target=web role=ci-prod
 | `ok` | walk ran (levels may have been skipped; `skipped=` lists them) | the walk's |
 | `refused` | OpenBao refused the login (role missing or claims not met) | none |
 | `invalid` | an explicit selector failed its grammar | none |
-| `config_error` | two environment levels claim the branch (`levels=` names them) | none |
+| `config_error` | two environment levels claim the branch (`levels=` names them; proposed, §17.3) | none |
 | `error` | anything else: OpenBao or voidstar unreachable, JWT rejected, a per-login assertion, a broken view (`reason=` says which) | none |
 
 Values never appear in it, only names, levels and reasons. A pipeline
@@ -1096,8 +1104,8 @@ nothing to print.
   sign any claims and log in to any role. This is the same bound as today's
   token-create capability, and every login is audited with its claims.
 - **Team names are case-insensitive to OpenBao.** Group aliases match
-  regardless of case, so two teams whose names differ only in case cannot
-  be told apart (§4.4).
+  regardless of case; escaping the claim (§4.4) keeps teams that differ only
+  in case apart, so the alias must be written escaped.
 - **Proven on OpenBao 2.7 only.** Vault has the same JWT auth and templating
   features, but nothing here has been run against it yet. The integration
   suite must prove both before ironbark claims both.
@@ -1208,8 +1216,8 @@ Resolved by the operator's rulings and folded in above: refused login
 level metadata, §4.5), one role per run (§5.5), overrides (documented, no
 lint or logging, §8.2), image and event pins (§6.2, §8.4), `vault_token`
 (§8.5), repo rename (§6.2), target inheritance (§4.6), entity clean-up
-(§20), `changed_files` (removed, §4.6). Group-alias case (case-insensitive, a
-limit, §4.4) and `%xx` view names (accepted, §16) are closed by the lab. Still open:
+(§20), `changed_files` (removed, §4.6). Group-alias case (case-insensitive at OpenBao,
+moot after `esc()`, §4.4) and `%xx` view names (accepted, §16) are closed by the lab. Still open:
 
 1. **The discovery login.** An environment chosen by level metadata needs a
    token before the environment is known, so such pushes log in twice: to
@@ -1218,22 +1226,15 @@ limit, §4.4) and `%xx` view names (accepted, §16) are closed by the lab. Still
    read another way (for example a separate discovery role granting only
    metadata reads)?
 2. **`ironbark_status` masking. Answered (Woodpecker v3.18.0 source): no,
-   it cannot be unmasked.** The extension response is
-   `{"secrets": [model.Secret]}` (`server/services/secret/http.go:38-40`)
-   and `model.Secret` has only `name`, `value`, `images`, `events`, `note`
-   (`server/model/secret.go:47-56`): no mask flag. `server/pipeline/items.go:63-68`
-   copies each secret into the compiler with no such flag either, and
-   `pipeline/frontend/yaml/compiler/compiler.go:142-147` adds every
-   compiler secret to `config.Secrets` "for mask". The agent takes every
-   `Config.Secrets` value as a masking string (`agent/logger.go:38-41`) and
-   the line writer replaces each occurrence before a log line is sent
-   (`agent/log/line_writer.go:47,53-56`). So every returned secret is
-   masked, including `ironbark_status`. The design stands: the job reads
-   the variable normally and decides from it; logs show the whole line
-   masked, which is acceptable because it holds only names and reasons; to
-   see it, print it through a transform (`echo "$STATUS" | tr ' ' '\n'`),
-   since masking replaces the exact full value (§9.2). No other channel is
-   needed.
+   it cannot be unmasked.** An extension secret carries only `name`,
+   `value`, `images`, `events` and `note`, with no mask flag, and the
+   pipeline compiler and agent treat every returned secret value as a
+   masking string. So every returned secret is masked, including
+   `ironbark_status`. The design stands: the job reads the variable normally
+   and decides from it; logs show the whole line masked, which is acceptable
+   because it holds only names and reasons; to see it, print it through a
+   transform (`echo "$STATUS" | tr ' ' '\n'`), since masking replaces the
+   exact full value (§9.2). No other channel is needed.
 3. **Two claimants.** Proposed: status only, no secrets, like a refusal
    (§4.5). The alternative is the repo level plus `config_error`.
 4. **Invalid explicit target.** Proposed: status only, like an invalid
@@ -1321,7 +1322,7 @@ pipeline outcome or its stated intent changes.
 | M16 | `svc.gamma/sub` rogue marker: guard refuses | `sub`'s rogue marker overrides `svc.gamma`'s (deepest wins), guard refuses | same |
 | M17 | 8 segments: 17 team conjunctions dropped by the cap, success | no cap exists; all 8 levels walked, marker inherited, success. The case now proves the depth-8 stanzas; a many-teams case (G8) takes over the cap's role | **changed** (intent) |
 | M18, M19 | guard refuses task missing / invalid | same | same |
-| M20 | `svc.alpha/../svc.gamma`: guard refuses | `..` segment → `invalid`, status only → marker missing → **error** at compile | **changed** (outcome, still refused) |
+| M20 | `svc.alpha/../svc.gamma`: guard refuses | `..` escaped to `%2e.` (leading dot encoded), no such level, cannot traverse; marker missing → error, as M15 | same |
 | D1 | promote push to `svc.alpha`: deployment tier, no actor | env `prod` from the inherited verified branch; project + `prod` + target; no event tier | **changed** (intent) |
 | D2 | promote to `grp/beta`: guard reads deployment fields | target from `deploy_to`, variables ignored on deployment; success | same |
 | D3, D4 | locked / invalid target: error | same | same |
@@ -1373,10 +1374,8 @@ New cases the model needs:
 | G14 | resolve mapping to a dynamic engine | lease owned by the pipeline token, revoked with it |
 | G15 | repo L recreated under the same name (new forge id) | login refused by `repo_key`, status only |
 
-Lab checks (factual, not decisions): whether OpenBao group-alias names
-match case-sensitively for external groups (`esc()` makes it moot for
-uppercase, but confirm), and whether voidstar accepts `%xx` in view names
-(`part%41`) and lists them unchanged.
+Lab check (factual, not a decision): voidstar accepts `%xx` in view names
+(`part%41`) and lists them unchanged. Group-alias case is settled (§4.4).
 
 ### 18.4 Failure-mode stack
 

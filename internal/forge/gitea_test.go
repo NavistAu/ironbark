@@ -99,13 +99,26 @@ func TestGiteaTeams_ZeroTeams(t *testing.T) {
 	}
 }
 
+func TestGiteaTeams_UserOwnedRepo405IsNoTeams(t *testing.T) {
+	g, f := newFake(t, &fakeGitea{status: map[string]int{"/api/v1/repos/acme/widgets/teams": 405}})
+	got, err := g.Teams(context.Background(), "acme", "widgets", "alice")
+	if err != nil || got == nil || len(got) != 0 {
+		t.Errorf("Teams = %#v, %v; want empty non-nil, nil", got, err)
+	}
+	if len(f.paths) != 1 {
+		t.Errorf("paths = %v, want only the repo-teams call", f.paths)
+	}
+}
+
 func TestGiteaTeams_Errors(t *testing.T) {
 	cases := []struct {
 		name string
 		f    *fakeGitea
 	}{
 		{"repo teams 404", &fakeGitea{status: map[string]int{"/api/v1/repos/acme/widgets/teams": 404}}},
-		{"repo teams 500", &fakeGitea{status: map[string]int{"/api/v1/repos/acme/widgets/teams": 500}}},
+		{"repo teams 401", &fakeGitea{status: map[string]int{"/api/v1/repos/acme/widgets/teams": 401}}},
+		{"repo teams 403", &fakeGitea{status: map[string]int{"/api/v1/repos/acme/widgets/teams": 403}}},
+		{"repo teams 500",&fakeGitea{status: map[string]int{"/api/v1/repos/acme/widgets/teams": 500}}},
 		{"malformed json", &fakeGitea{teamsJSON: `[{"id":`}},
 		{"membership 500", &fakeGitea{teamsJSON: twoTeams, members: map[string][]string{"1": {"alice"}},
 			status: map[string]int{"/api/v1/teams/2/members/alice": 500}}},

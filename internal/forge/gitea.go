@@ -34,8 +34,8 @@ func NewGitea(baseURL, token string, timeout time.Duration, hc *http.Client) *Gi
 	return &Gitea{base: strings.TrimRight(baseURL, "/"), token: token, timeout: timeout, hc: hc}
 }
 
-// Teams implements TeamResolver. Repo-teams non-200 (including 404 for a
-// user-owned repo, D6) and any membership status other than 200/404 fail
+// Teams implements TeamResolver. A 405 on repo-teams (a user-owned repo has
+// no org teams) yields no teams; any other repo-teams non-200 and any membership status other than 200/404 fail
 // the whole lookup; it never returns a partial list. The repo-teams
 // endpoint is unpaginated in Gitea and Forgejo.
 func (g *Gitea) Teams(ctx context.Context, org, repo, login string) ([]string, error) {
@@ -45,6 +45,11 @@ func (g *Gitea) Teams(ctx context.Context, org, repo, login string) ([]string, e
 	status, body, err := g.get(ctx, "/api/v1/repos/"+url.PathEscape(org)+"/"+url.PathEscape(repo)+"/teams")
 	if err != nil {
 		return nil, fmt.Errorf("forge: GET repos/{org}/{repo}/teams: %w", err)
+	}
+	// 405: Gitea/Forgejo answer a user-owned repo's teams endpoint with
+	// "method not allowed" — a user has no org teams, so there are none.
+	if status == http.StatusMethodNotAllowed {
+		return []string{}, nil
 	}
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("forge: GET repos/{org}/{repo}/teams: status %d", status)

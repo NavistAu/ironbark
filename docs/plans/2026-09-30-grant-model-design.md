@@ -316,14 +316,22 @@ ironbark does not derive a target from `changed_files`. A job that needs
 that works it out in an earlier pipeline and passes the result forward as a
 variable (`DEPLOY_TO` on a manual run, the `deploy_to` field on a promote).
 
-Grammar (as today): split on `/`, every segment non-empty, at
-most 8 segments and 256 bytes; case, `.` and `..` are kept. Each segment
+Grammar: split on `/`, every segment non-empty, at most 8 segments and
+256 bytes; case is kept. **A segment that is exactly `.` or `..` is
+refused** (operator ruling; there is no reasonable use for relative paths;
+dotted names such as `srv.talos` or `.hidden` are ordinary segments, and
+only the exact segments `.` and `..` are refused). Each segment
 is escaped on its own (`esc()`, §5.3) and **each segment is a level**:
 `srv.talos/svc/gear` walks `prod/srv.talos/`, `prod/srv.talos/svc/` and
 `prod/srv.talos/svc/gear/`, deepest wins, so a nested target inherits its
-parents' secrets. An explicit value violating the grammar is (proposed, §17.4) refused like
-an invalid environment: only `ironbark_status` (`outcome=invalid`,
-`target_invalid`), never a silent walk that stops at the environment.
+parents' secrets. An explicit value violating the grammar, `.` and `..` segments included,
+is refused like an invalid environment (`.`/`..` by ruling; the rest
+proposed, §17.4): no secrets, only `ironbark_status` (`outcome=invalid`,
+`target_invalid`) saying why, never a silent walk that stops at the
+environment. This is in addition to the job's own kit guard, which stays.
+The refusal is not a rewrite: ironbark does not normalise or escape a dot
+segment into a level name (today's SPEC escapes a leading dot and walks the
+resulting level; that behaviour is removed, §15.3).
 
 A target without an environment is recorded and ignored: the walk has no
 environment to hang it under.
@@ -1167,6 +1175,15 @@ AppRole and `kv/ci/...` tree stay untouched until the last repo has moved.
 8. **After a soak**, delete the repo's `kv/ci/...` subtree and its tier
    policies.
 
+### 15.3 Behaviour changes from today's SPEC
+
+- **`.` and `..` target segments are refused.** Today `esc()` encodes a
+  leading dot, so `svc.alpha/../svc.gamma` walks the escaped level
+  `%2e.` and merely finds nothing. Now the whole run gets no secrets and
+  `ironbark_status` reports `target_invalid`. A pipeline that passed such a
+  value (none has a legitimate reason to) now fails at the status, not at a
+  missing marker. Dotted names (`srv.talos`) are unaffected.
+
 ## 16. Required voidstar changes
 
 The model treats a voidstar mapping as a record in its own right. voidstar
@@ -1253,10 +1270,11 @@ moot after `esc()`, §4.4) and `%xx` view names (accepted, §16) are closed by t
   every `IRONBARK_ACTOR_FORGE` value.
 - Environment selection: explicit variable; level metadata with no, one and
   two claimants; unreadable metadata; a level name outside the grammar.
-- Target cascade: every rule, precedence, the grammar (including `.`/`..`
-  segments), trailer parsing (none, one, two), per-segment escaping.
+- Target cascade: every rule, precedence, the grammar (`.` and `..`
+  segments refused with `target_invalid`, `srv.talos` and `.hidden`
+  accepted, `a/../b` and a trailing `/.` refused), trailer parsing (none, one, two), per-segment escaping.
 - JWT claims: omission of absent claims, `repo_key`, `t1`…`t8`, escaping of
-  hostile values (`/`, `*`, `+`, `%`, `.`, `..`, uppercase), `sub`
+  hostile values (`/`, `*`, `+`, `%`, leading `.`, uppercase) in branch, actor and team claims (a `.`/`..` target is refused before any claim exists), `sub`
   determinism and sensitivity (changes with env, target or team set; not
   with actor, event or pipeline).
 - Role rendering (`ci-{env}` → `ci`), path-template validation, the level
@@ -1323,7 +1341,7 @@ pipeline outcome or its stated intent changes.
 | M16 | `svc.gamma/sub` rogue marker: guard refuses | `sub`'s rogue marker overrides `svc.gamma`'s (deepest wins), guard refuses | same |
 | M17 | 8 segments: 17 team conjunctions dropped by the cap, success | no cap exists; all 8 levels walked, marker inherited, success. The case now proves the depth-8 stanzas; a many-teams case (G8) takes over the cap's role | **changed** (intent) |
 | M18, M19 | guard refuses task missing / invalid | same | same |
-| M20 | `svc.alpha/../svc.gamma`: guard refuses | `..` escaped to `%2e.` (leading dot encoded), no such level, cannot traverse; marker missing → error, as M15 | same |
+| M20 | `svc.alpha/../svc.gamma`: guard refuses | ironbark refuses the `..` segment: `invalid`, status only naming `target_invalid`; no secrets, so the marker is missing and the job errors (the kit guard stays as a second line) | **changed** (intent) |
 | D1 | promote push to `svc.alpha`: deployment tier, no actor | env `prod` from the inherited verified branch; project + `prod` + target; no event tier | **changed** (intent) |
 | D2 | promote to `grp/beta`: guard reads deployment fields | target from `deploy_to`, variables ignored on deployment; success | same |
 | D3, D4 | locked / invalid target: error | same | same |
@@ -1346,8 +1364,8 @@ pipeline outcome or its stated intent changes.
 | S1 | static: manual-matching workflows evaluate `DEPLOY_TO == ""` | same, extended to `DEPLOY_ENV` | same |
 | S2 | static: repo settings | same, plus the per-repo extension endpoint | same |
 
-Summary: 31 cases keep their expectation and 14 change: 1 in **outcome**
-(U9, the promote-has-no-actor limit now enforced) and 13 in **intent or trigger** (M1, M2, M17, D1, P1, P2, P3, R1,
+Summary: 30 cases keep their expectation and 15 change: 1 in **outcome**
+(U9, the promote-has-no-actor limit now enforced) and 14 in **intent or trigger** (M1, M2, M17, M20, D1, P1, P2, P3, R1,
 C1, U4, U5, U6, U8). Against the first draft of this spec, nested-target
 inheritance returns M3 and M7 to **same** and M17 to intent-only; C1 loses
 its fallback; U5 now needs a `Deploy-To:` trailer because `changed_files`
@@ -1373,6 +1391,7 @@ New cases the model needs:
 | G13 | image pin on a mapping whose upstream carries other metadata | the mapping's pins only |
 | G14 | resolve mapping to a dynamic engine | lease owned by the pipeline token, revoked with it |
 | G15 | repo L recreated under the same name (new forge id) | login refused by `repo_key`, status only |
+| G16 | manual `DEPLOY_TO=.` or `svc.alpha/..` (M20 is the kit-guard variant) | `invalid`, status only naming `target_invalid`; no discovery, no secrets; `srv.alpha` style dotted names still walk |
 
 Lab check (factual, not a decision): voidstar accepts `%xx` in view names
 (`part%41`) and lists them unchanged. Group-alias case is settled (§4.4).
@@ -1400,7 +1419,7 @@ Each case asserts less or nothing, never more, and always an
 | view quarantined / voidstar loopback broken | revoke, `error`, status only |
 | resolved engine path erroring | revoke (leases cascade), `error`, status only |
 | group alias deleted mid-run | gated level skipped on the next login |
-| hostile values (`/`, `*`, `+`, `..`, uppercase) in branch, target, actor, team | escaped; no ACL failure; nothing extra |
+| hostile values (`/`, `*`, `+`, uppercase) in branch, target, actor, team; a `.` or `..` target segment | escaped, no ACL failure, nothing extra; the dot segment is refused (`invalid`) |
 
 ## 19. Proposed decisions
 

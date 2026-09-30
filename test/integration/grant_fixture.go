@@ -31,10 +31,19 @@ import (
 	"github.com/navistau/ironbark/internal/selector"
 )
 
-const (
-	grantAddr = "http://127.0.0.1:8300" // OpenBao 2.7.0 + voidstar
-	vaultAddr = "http://127.0.0.1:8200" // Vault 1.20, plain KV v2 only
+// Addresses default to the compose ports; GRANT_ADDR and VAULT_ADDR_TEST
+// point a run at a stack published elsewhere (two stacks on one host).
+var (
+	grantAddr = envOr("GRANT_ADDR", "http://127.0.0.1:8300")      // OpenBao 2.7.0 + voidstar
+	vaultAddr = envOr("VAULT_ADDR_TEST", "http://127.0.0.1:8200") // Vault 1.20, plain KV v2 only
 )
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
 
 // Grant is the shared grant-model fixture.
 type Grant struct {

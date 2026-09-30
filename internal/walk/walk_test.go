@@ -242,8 +242,8 @@ func TestWalkResolveHook(t *testing.T) {
 	f := &tree{
 		lists: map[string]any{"m/r/": []string{"aws", "gone"}},
 		reads: map[string]any{
-			"d/r/aws":   kv(map[string]any{}, map[string]string{pinsKey: "x/deploy"}, "resolve", "aws/creds/prod"),
-			"d/r/gone":  kv(map[string]any{}, nil, "resolve", "aws/creds/none"),
+			"d/r/aws":  kv(map[string]any{}, map[string]string{pinsKey: "x/deploy"}, "resolve", "aws/creds/prod"),
+			"d/r/gone": kv(map[string]any{}, nil, "resolve", "aws/creds/none"),
 		},
 	}
 	var asked []string

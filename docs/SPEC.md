@@ -242,7 +242,10 @@ with it. Response `.data` fields flatten as `E_f` per §4.2 (string-only
 rule applies). `403`/`404` on the resolve target: skip entry, log. Any
 other failure (5xx, timeout, malformed response): the walk fails, the
 request is `outcome=error reason=walk`, the token is revoked and the
-cascade revokes leases already taken. Leases only survive when the response
+cascade revokes leases already taken. A view that cannot be read (a
+voidstar quarantine or loopback `502`, or an undecodable answer) is the
+same failure but names the entry: `outcome=error reason=view:<level>/<key>`,
+and the audit line carries `entry`. Leases only survive when the response
 carries secrets. The hop is one level: a resolved response is never itself
 treated as a pointer or view (no chains, no cycles). Which paths a mapping
 may name is the voidstar mount's concern, and which it may read is the
@@ -386,11 +389,15 @@ never appear in the refused-signature line):
   discovery_login, role, sub, jti, levels (label →
   read|skipped_403|skipped_404), secrets_returned (names only),
   images_relayed (names), vault_token_issued, token_accessor, token_ttl,
+  entry (the entry whose view broke, `error` only),
   outcome (ok|refused|invalid|config_error|error)`; fields with no value
   are omitted. Payload values that are not facts (variables other than the
   two selectors, message text) are never logged. Warnings from the walk,
   an error line for a config or availability fault, and a failed
-  best-effort revoke each log a separate line.
+  best-effort revoke each log a separate line. At debug level a
+  `payload attributes` line lists the pipeline facts behind the audit
+  fields (event, sender, author, actor, branch) and the variable *names*,
+  never their values or the message text.
 
 NEVER log: secret values, the token itself, netrc. The token *accessor*
 is safe and correlates with Vault's own audit log (DESIGN §13 audit

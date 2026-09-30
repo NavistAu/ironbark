@@ -243,6 +243,11 @@ Two changes:
   `acme/deployers`, and reach OpenBao through `groups_claim`. Qualifying by
   org stops a team named `deployers` in one org from satisfying a gate meant
   for another org's `deployers`.
+- **Team names that differ only in case collide.** OpenBao matches
+  group-alias names case-insensitively (lab, Q11): alias `uat-approvers`
+  matched claims `uat-approvers`, `UAT-Approvers` and `Uat-approvers`.
+  Teams `Deployers` and `deployers` in one org would be one group. Stated
+  as a limit (§14); the IaC should refuse to create such a pair.
 
 A failed lookup (timeout, transport error, unexpected status) emits no
 `teams` claim. Every team-gated level is then unreadable: less, never more.
@@ -514,6 +519,12 @@ Notes:
   in) or `acme/other#*` (named, not pinned). Never an org-wide
   (`acme/*`) or catch-all glob: the list is an OR, so a wider entry
   silently undoes every pin beside it. IaC appends the entry at onboarding.
+  Lab result (OpenBao 2.7.0): with `["acme/mono#4711", "acme/other#*"]`,
+  `acme/mono#4711` and `acme/other#9999` log in; `acme/mono#9999`,
+  `acme/mono#47110` and a bare `acme/mono` are refused
+  (`claim "repo_key" does not match any associated bound claim values`).
+  Adding `acme/*#*` lets `acme/mono#9999` in: the wide glob demonstrably
+  undoes the pin.
   OpenBao parameter constraints cannot do this job: they restrict writes,
   not KV v2 reads, and login happens before any policy applies.
 - `bound_claims_type` is per role. With `glob`, the exact values above are
@@ -522,7 +533,10 @@ Notes:
 - **Event pins are per role.** An environment that only manual runs and
   promotes may act for lists exactly `["manual", "deployment"]`. A secret
   that needs a narrower event set than its level's role lives at a level
-  whose role has that set.
+  whose role has that set. Lab result: with `event: ["manual", "deployment"]`
+  bound, `manual` and `deployment` log in; `push` and `pull_request` are
+  refused (`claim "event" does not match...`), and a JWT with no `event`
+  claim is refused too (`claim "event" is missing`).
 - `ci-prod` deliberately omits `ci-target` from `token_policies`: its target
   levels are team-gated (§6.4).
 - `pull_request` in `ci`'s event list is a choice. Leave it out and PR
@@ -551,6 +565,31 @@ path "vs/data/pipelines/M(org)/M(repo)/M(env)/M(t1)/M(t2)/+"    { capabilities =
 path "vs/metadata/pipelines/M(org)/M(repo)/M(env)/M(t1)/M(t2)/" { capabilities = ["list"] }
 # ... and so on through M(t8)
 ```
+
+The lab (spike 5, OpenBao 2.7.0 with voidstar) proved this shape. Claims
+`org`, `name`, `env`, `t1`..`t8` are mapped through `claim_mappings`; each
+level gets one stanza triple whose data path ends in `/+`. For the target
+`srv.talos/svc/gear`, with views
+`est/acme/mono/{db, prod/db, prod/srv.talos/db, prod/srv.talos/svc/db, prod/srv.talos/svc/gear/db}`
+(mount `vs/`, path `est/{org}/{name}/{env}/{t1}/...`), the level-2 triple is:
+
+```hcl
+path "vs/data/est/{{...metadata.org}}/{{...metadata.name}}/{{...metadata.env}}/{{...metadata.t1}}/{{...metadata.t2}}/+" { capabilities = ["read"] }
+path "vs/metadata/est/{{...metadata.org}}/{{...metadata.name}}/{{...metadata.env}}/{{...metadata.t1}}/{{...metadata.t2}}/"  { capabilities = ["list"] }
+path "vs/metadata/est/{{...metadata.org}}/{{...metadata.name}}/{{...metadata.env}}/{{...metadata.t1}}/{{...metadata.t2}}/+" { capabilities = ["read"] }
+```
+
+(`{{...metadata.x}}` abbreviates `{{identity.entity.aliases.ACC.metadata.x}}`.)
+Results: the token for `srv.talos/svc/gear` read all five levels and could
+list each; sibling `svc/other`, another environment and another repo got
+403. A token whose JWT lacked `t2` and `t3` had those stanzas silently
+skipped, the rest still applied, and nothing extra was granted. A target
+segment with a literal `%2f` matched its wire path (`%252f`).
+
+**Pitfall: never end a level stanza with `*`.** A trailing `*` in an
+OpenBao policy path is a prefix match, so `.../{{t1}}/*` grants every level
+below `t1` as well and destroys the level separation. `+` is exactly one
+segment and is the only correct terminator.
 
 Three policies serve every repo, environment and target. `+` is exactly one
 segment, so no level's grant reaches the level below it, and a target
@@ -845,7 +884,8 @@ Two Woodpecker behaviours bound this:
 - **`ironbark_status` is masked like any secret.** Woodpecker replaces its
   exact value in logs. The `ironbark/v1` prefix makes the whole line
   unlikely to occur elsewhere; printing it needs a transform (for example
-  `echo "$STATUS" | tr ' ' '\n'`). Open question 2 (§17).
+  `echo "$STATUS" | tr ' ' '\n'`). Confirmed against Woodpecker v3.18.0: a
+  secret extension cannot mark a secret as unmasked (§17 item 2).
 
 ### 9.3 Fail closed everywhere
 
@@ -1055,6 +1095,9 @@ nothing to print.
 - **ironbark's signing key is the CI secret estate.** Whoever holds it can
   sign any claims and log in to any role. This is the same bound as today's
   token-create capability, and every login is audited with its claims.
+- **Team names are case-insensitive to OpenBao.** Group aliases match
+  regardless of case, so two teams whose names differ only in case cannot
+  be told apart (§4.4).
 - **Proven on OpenBao 2.7 only.** Vault has the same JWT auth and templating
   features, but nothing here has been run against it yet. The integration
   suite must prove both before ironbark claims both.
@@ -1118,7 +1161,7 @@ AppRole and `kv/ci/...` tree stay untouched until the last repo has moved.
 ## 16. Required voidstar changes
 
 The model treats a voidstar mapping as a record in its own right. voidstar
-needs four features, and should close any similar KV v2 feature gap views
+needs five changes, and should close any similar KV v2 feature gap views
 turn out to need.
 
 1. **Mapping `custom_metadata`.** A string map set when the mapping is
@@ -1141,8 +1184,22 @@ turn out to need.
    slash; 404 when none). `LIST` is unaffected. ironbark reads `branches`
    from it (§4.5).
 
-The lab also confirms that voidstar accepts `%xx` in view names (`part%41`)
-and lists them unchanged (§18.3).
+5. **Reject unknown fields, then support `custom_metadata`.** Today a
+   mapping write (`admin/map/<view>`) accepts only `target` and `adapter`,
+   and a posted `custom_metadata` is accepted and silently ignored (lab,
+   2.7.0: read back shows none). An IaC that writes it today gets no error
+   and no metadata. voidstar should reject unknown fields on mapping
+   writes until item 1 ships, then support `custom_metadata`.
+
+Today a view's synthetic metadata is `custom_metadata: {}` (or
+`{voidstar_target}` with `expose_targets`), and writing to a prefix
+(`.../prod/`) is an error. No level or prefix metadata exists, hence items 1
+to 4.
+
+The lab also confirms (Q12 closed) that voidstar accepts `%xx` in view names
+(`grp%2fbeta`, wire `%252f`): data and metadata reads return 200, `LIST`
+shows `grp%2fbeta/` unchanged, and the decoded `grp/beta` is a different
+view (404) (§18.3).
 
 ## 17. Open questions
 
@@ -1151,8 +1208,8 @@ Resolved by the operator's rulings and folded in above: refused login
 level metadata, §4.5), one role per run (§5.5), overrides (documented, no
 lint or logging, §8.2), image and event pins (§6.2, §8.4), `vault_token`
 (§8.5), repo rename (§6.2), target inheritance (§4.6), entity clean-up
-(§20), `changed_files` (removed, §4.6). Group-alias case and `%xx` view
-names are lab checks, not questions (§18.3). Still open:
+(§20), `changed_files` (removed, §4.6). Group-alias case (case-insensitive, a
+limit, §4.4) and `%xx` view names (accepted, §16) are closed by the lab. Still open:
 
 1. **The discovery login.** An environment chosen by level metadata needs a
    token before the environment is known, so such pushes log in twice: to
@@ -1160,9 +1217,23 @@ names are lab checks, not questions (§18.3). Still open:
    compatible with "one login role per run", or should level metadata be
    read another way (for example a separate discovery role granting only
    metadata reads)?
-2. **`ironbark_status` masking.** Can the Woodpecker extension response
-   mark a secret as unmasked? If not, the prefixed line and a transform to
-   print it stand (§9.2). A factual check against Woodpecker first.
+2. **`ironbark_status` masking. Answered (Woodpecker v3.18.0 source): no,
+   it cannot be unmasked.** The extension response is
+   `{"secrets": [model.Secret]}` (`server/services/secret/http.go:38-40`)
+   and `model.Secret` has only `name`, `value`, `images`, `events`, `note`
+   (`server/model/secret.go:47-56`): no mask flag. `server/pipeline/items.go:63-68`
+   copies each secret into the compiler with no such flag either, and
+   `pipeline/frontend/yaml/compiler/compiler.go:142-147` adds every
+   compiler secret to `config.Secrets` "for mask". The agent takes every
+   `Config.Secrets` value as a masking string (`agent/logger.go:38-41`) and
+   the line writer replaces each occurrence before a log line is sent
+   (`agent/log/line_writer.go:47,53-56`). So every returned secret is
+   masked, including `ironbark_status`. The design stands: the job reads
+   the variable normally and decides from it; logs show the whole line
+   masked, which is acceptable because it holds only names and reasons; to
+   see it, print it through a transform (`echo "$STATUS" | tr ' ' '\n'`),
+   since masking replaces the exact full value (§9.2). No other channel is
+   needed.
 3. **Two claimants.** Proposed: status only, no secrets, like a refusal
    (§4.5). The alternative is the repo level plus `config_error`.
 4. **Invalid explicit target.** Proposed: status only, like an invalid

@@ -30,6 +30,7 @@ func main() {
 	env := flag.String("env", "", "environment")
 	source := flag.String("env-source", "branch", "env_source when -env is set")
 	target := flag.String("target", "", "deploy target")
+	emptyTeams := flag.Bool("empty-teams", false, "send teams as an empty list when there are none (OpenBao rejects a login on a role with groups_claim when the claim is absent)")
 	flag.Parse()
 
 	pem, err := os.ReadFile(*key)
@@ -65,7 +66,11 @@ func main() {
 	if *env != "" {
 		src = *source
 	}
-	jwt, err := s.Sign(jwtsign.Claims(f, *env, src, t, tm, time.Now()))
+	claims := jwtsign.Claims(f, *env, src, t, tm, time.Now())
+	if _, ok := claims["teams"]; !ok && *emptyTeams {
+		claims["teams"] = []string{}
+	}
+	jwt, err := s.Sign(claims)
 	if err != nil {
 		fail(err)
 	}

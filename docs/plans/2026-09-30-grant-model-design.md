@@ -1073,7 +1073,8 @@ Each case asserts less or nothing, never more:
 | JWT clock skew beyond leeway | 502, nothing |
 | role missing (explicit / implicit) | nothing / project only |
 | role with `token_type=batch` or no explicit max TTL | revoke, 502 |
-| view missing | entry skipped |
+| view absent (no mapping, 403/404) | entry skipped |
+| view mapped but its upstream target missing or unreadable | 502, nothing (§9.3) |
 | view quarantined / voidstar loopback broken | 502, nothing |
 | group alias deleted mid-run | gated level unreadable on the next login |
 | hostile values (`/`, `*`, `+`, `..`, uppercase) in branch, target, actor, team | escaped; no ACL failure; nothing extra |

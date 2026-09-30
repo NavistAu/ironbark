@@ -13,16 +13,6 @@ import (
 // errors.Unwrap (or the error's message) for detail.
 var ErrMalformed = errors.New("malformed identity payload")
 
-// Identity is the minimal repo/event/branch identity that ib's legacy sweep
-// (internal/vaultx) still takes. ironbark itself no longer builds one: its
-// facts are internal/facts. Removed with the legacy sweep in phase 5.
-type Identity struct {
-	Org    string
-	Repo   string
-	Event  string
-	Branch string
-}
-
 // Esc percent-encodes s per SPEC §2.2, applied bytewise to the original
 // input bytes: every byte outside [a-z0-9._-] is encoded as "%" plus two
 // lowercase hex digits; "%" itself is always encoded; and a leading "."

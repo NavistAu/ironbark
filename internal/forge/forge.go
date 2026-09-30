@@ -10,3 +10,13 @@ import "context"
 type TeamResolver interface {
 	Teams(ctx context.Context, org, repo, login string) ([]string, error)
 }
+
+// Lookups are the two forge lookups the grant model needs (design §4.2,
+// §4.4). Each is bounded by IRONBARK_FORGE_TIMEOUT; any error means the
+// lookup failed and the caller fails closed.
+type Lookups interface {
+	// BranchProtected reports the forge's `protected` flag for the branch.
+	BranchProtected(ctx context.Context, org, repo, branch string) (bool, error)
+	// QualifiedTeams returns login's teams of org/repo as esc(org)/esc(team).
+	QualifiedTeams(ctx context.Context, org, repo, login string) ([]string, error)
+}

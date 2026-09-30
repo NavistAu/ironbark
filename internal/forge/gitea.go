@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/navistau/ironbark/internal/identity"
 )
 
 // maxBody bounds every forge response body read.
@@ -23,7 +25,10 @@ type Gitea struct {
 	hc      *http.Client
 }
 
-var _ TeamResolver = (*Gitea)(nil)
+var (
+	_ TeamResolver = (*Gitea)(nil)
+	_ Lookups      = (*Gitea)(nil)
+)
 
 // NewGitea returns a resolver for the forge at baseURL. timeout bounds a
 // whole Teams lookup, not each call. hc nil uses a default client.
@@ -96,4 +101,42 @@ func (g *Gitea) get(ctx context.Context, path string) (int, []byte, error) {
 		return 0, nil, err
 	}
 	return resp.StatusCode, body, nil
+}
+
+// BranchProtected implements Lookups: GET repos/{org}/{repo}/branches/{branch}
+// (branch path-escaped, so "/" travels as %2F) and the `protected` field.
+// Any non-200 status, including 404, is an error.
+func (g *Gitea) BranchProtected(ctx context.Context, org, repo, branch string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, g.timeout)
+	defer cancel()
+
+	status, body, err := g.get(ctx, "/api/v1/repos/"+url.PathEscape(org)+"/"+url.PathEscape(repo)+"/branches/"+url.PathEscape(branch))
+	if err != nil {
+		return false, fmt.Errorf("forge: GET repos/{org}/{repo}/branches/{branch}: %w", err)
+	}
+	if status != http.StatusOK {
+		return false, fmt.Errorf("forge: GET repos/{org}/{repo}/branches/{branch}: status %d", status)
+	}
+	var b struct {
+		Protected bool `json:"protected"`
+	}
+	if err := json.Unmarshal(body, &b); err != nil {
+		return false, fmt.Errorf("forge: GET repos/{org}/{repo}/branches/{branch}: decode: %w", err)
+	}
+	return b.Protected, nil
+}
+
+// QualifiedTeams implements Lookups on top of Teams: each team becomes
+// esc(org)/esc(team), so a team in one org can never satisfy another org's
+// gate (design §4.4).
+func (g *Gitea) QualifiedTeams(ctx context.Context, org, repo, login string) ([]string, error) {
+	teams, err := g.Teams(ctx, org, repo, login)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(teams))
+	for i, t := range teams {
+		out[i] = identity.Esc(org) + "/" + identity.Esc(t)
+	}
+	return out, nil
 }

@@ -22,6 +22,7 @@ type fakeGitea struct {
 	teamsJSON string
 	members   map[string][]string
 	status    map[string]int
+	bodies    map[string]string // escaped path -> JSON body (branch endpoint)
 	delay     time.Duration
 
 	mu       sync.Mutex
@@ -44,6 +45,10 @@ func (f *fakeGitea) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if st, ok := f.status[p]; ok {
 		w.WriteHeader(st)
+		return
+	}
+	if b, ok := f.bodies[p]; ok {
+		_, _ = w.Write([]byte(b))
 		return
 	}
 	if strings.HasSuffix(p, "/teams") {
@@ -154,5 +159,92 @@ func TestGiteaTeams_Timeout(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), testToken) {
 		t.Errorf("error %q contains the token", err)
+	}
+}
+
+func TestGiteaBranchProtected(t *testing.T) {
+	cases := []struct {
+		name   string
+		branch string
+		path   string
+		body   string
+		want   bool
+	}{
+		{"protected", "main", "/api/v1/repos/acme/widgets/branches/main", `{"name":"main","protected":true}`, true},
+		{"unprotected", "dev", "/api/v1/repos/acme/widgets/branches/dev", `{"name":"dev","protected":false}`, false},
+		{"slash escaped on the wire", "release/1", "/api/v1/repos/acme/widgets/branches/release%2F1", `{"protected":true}`, true},
+		{"space and percent escaped", "a b%", "/api/v1/repos/acme/widgets/branches/a%20b%25", `{"protected":true}`, true},
+		{"missing field is false", "main", "/api/v1/repos/acme/widgets/branches/main", `{"name":"main"}`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g, f := newFake(t, &fakeGitea{bodies: map[string]string{c.path: c.body}})
+			got, err := g.BranchProtected(context.Background(), "acme", "widgets", c.branch)
+			if err != nil || got != c.want {
+				t.Fatalf("BranchProtected = %v, %v; want %v", got, err, c.want)
+			}
+			if !reflect.DeepEqual(f.paths, []string{c.path}) {
+				t.Errorf("paths = %v, want [%s]", f.paths, c.path)
+			}
+			if f.authHdrs[0] != "token "+testToken {
+				t.Errorf("Authorization = %q", f.authHdrs[0])
+			}
+		})
+	}
+}
+
+func TestGiteaBranchProtected_Errors(t *testing.T) {
+	const p = "/api/v1/repos/acme/widgets/branches/main"
+	cases := map[string]*fakeGitea{
+		"404":            {},
+		"500":            {status: map[string]int{p: 500}},
+		"401":            {status: map[string]int{p: 401}},
+		"malformed json": {bodies: map[string]string{p: `{"protected":`}},
+	}
+	for name, f := range cases {
+		t.Run(name, func(t *testing.T) {
+			g, _ := newFake(t, f)
+			got, err := g.BranchProtected(context.Background(), "acme", "widgets", "main")
+			if err == nil || got {
+				t.Fatalf("BranchProtected = %v, %v; want false, error", got, err)
+			}
+			if strings.Contains(err.Error(), testToken) {
+				t.Errorf("error %q contains the token", err)
+			}
+		})
+	}
+}
+
+func TestGiteaBranchProtected_Timeout(t *testing.T) {
+	srv := httptest.NewServer(&fakeGitea{delay: 2 * time.Second})
+	t.Cleanup(srv.Close)
+	g := NewGitea(srv.URL, testToken, 50*time.Millisecond, nil)
+	start := time.Now()
+	got, err := g.BranchProtected(context.Background(), "acme", "widgets", "main")
+	if !errors.Is(err, context.DeadlineExceeded) || got {
+		t.Fatalf("got %v, err %v; want false, DeadlineExceeded", got, err)
+	}
+	if time.Since(start) >= time.Second {
+		t.Error("lookup not bounded by the timeout")
+	}
+}
+
+func TestGiteaQualifiedTeams(t *testing.T) {
+	g, _ := newFake(t, &fakeGitea{
+		teamsJSON: `[{"id":1,"name":"Deployers"},{"id":2,"name":"dev"},{"id":3,"name":"a/b"}]`,
+		members:   map[string][]string{"1": {"alice"}, "3": {"alice"}},
+	})
+	got, err := g.QualifiedTeams(context.Background(), "Acme", "widgets", "alice")
+	want := []string{"%41cme/%44eployers", "%41cme/a%2fb"}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("QualifiedTeams = %v, %v; want %v", got, err, want)
+	}
+}
+
+func TestGiteaQualifiedTeams_Error(t *testing.T) {
+	g, _ := newFake(t, &fakeGitea{status: map[string]int{"/api/v1/repos/acme/widgets/teams": 500}})
+	got, err := g.QualifiedTeams(context.Background(), "acme", "widgets", "alice")
+	if err == nil || got != nil {
+		t.Errorf("got %v, %v; want nil, error", got, err)
 	}
 }

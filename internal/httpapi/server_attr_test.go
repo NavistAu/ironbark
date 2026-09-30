@@ -133,3 +133,42 @@ func TestAttr_RefusedSignatureHasNoAttributeFields(t *testing.T) {
 		}
 	}
 }
+
+func TestUnonboardedLoggedOncePerPipeline(t *testing.T) {
+	priv, _ := loadTestKeys(t)
+	s, buf := newAttrServer(t, &mockHandler{result: broker.Result{Status: 204, Outcome: broker.OutcomeUnonboarded}}, slog.LevelInfo)
+	for i := 0; i < 3; i++ {
+		s.ServeHTTP(httptest.NewRecorder(), signedRequest(t, priv, manualPayload(t)))
+	}
+	n := 0
+	for _, l := range buf.logLines(t) {
+		if l["msg"] == "request" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("request lines = %d, want 1", n)
+	}
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(rec.Body.String(), `outcome="unonboarded"} 3`) {
+		t.Errorf("metrics do not count all 3 unonboarded requests:\n%s", rec.Body.String())
+	}
+}
+
+func TestOkRequestsAlwaysLogged(t *testing.T) {
+	priv, _ := loadTestKeys(t)
+	s, buf := newAttrServer(t, &mockHandler{result: attrResult()}, slog.LevelInfo)
+	for i := 0; i < 2; i++ {
+		s.ServeHTTP(httptest.NewRecorder(), signedRequest(t, priv, manualPayload(t)))
+	}
+	n := 0
+	for _, l := range buf.logLines(t) {
+		if l["msg"] == "request" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("request lines = %d, want 2", n)
+	}
+}

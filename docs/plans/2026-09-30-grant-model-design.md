@@ -287,7 +287,9 @@ names and `release/*` matches `release/1` but not `release/1/rc` or
 `release`. `**` is not supported; it behaves as `*` and never crosses `/`,
 so a nested family needs one pattern per depth (`release/*,release/*/*`).
 Git refuses `*`, `?`, `[` and `\` in branch names, so no branch name ever
-needs escaping.
+needs escaping. A comma is legal in a Git branch name but is the list
+separator here, so a branch whose name contains `,` cannot be claimed by
+level metadata; it can still be selected with `DEPLOY_ENV`.
 
 Matching is done on the verified branch name exactly as the forge spells it,
 without `refs/heads/`, bytewise: never case-folded, never normalised
@@ -425,8 +427,15 @@ not folded (`Main` → `%4dain`), so case variants of a protected branch stay
 distinct.
 
 `bound_claims` compare escaped values (unlike level `branches`, §4.5, which
-match raw branch names): a role binding `release/*` branches
-writes the glob `release%2f*`. `repo_key` is built from escaped parts, so
+match raw branch names, with `/`-aware `*`): a role binding `release/*` branches
+writes the glob `release%2f*`. OpenBao's `*` is not `/`-aware: after
+escaping `/` is `%2f`, so that glob also admits `release/1/rc`, which a
+level pattern `release/*` does not claim. The two are deliberately not
+mirrored: the role glob is the gate and may be looser than the selector, so
+an explicit `DEPLOY_ENV` from `release/1/rc` can pass a `release%2f*` role
+that no level claims by branch. A role that must stay narrow lists exact
+escaped names, or one glob per depth it accepts, and the IaC that writes
+both from one declaration (§14) states which. `repo_key` is built from escaped parts, so
 its `/` and `#` are always the separators.
 
 ### 5.4 `sub` derivation

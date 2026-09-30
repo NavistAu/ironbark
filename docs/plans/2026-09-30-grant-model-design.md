@@ -671,7 +671,9 @@ should not be broken because its branch is not an environment.
 An explicit request is a statement of intent, and refusing it must be
 loud. An implicit one is ironbark's guess from the branch name, and a wrong
 guess must not break ordinary pushes. Every fallback is recorded in the
-audit line (`env_refused`, with the OpenBao error). Telling "role missing"
+audit line (`env_refused`, with the OpenBao error). A fallback login is a
+fresh JWT with `env`, `target` and `teams` absent, so its `sub` (§5.4) hashes
+those as empty and can never collide with the refused env-scoped login. Telling "role missing"
 from "claims refused" relies on OpenBao's error text. That distinction is
 not needed by the table above (both columns agree per row), and ironbark
 does not depend on it.
@@ -988,10 +990,10 @@ data with no reason to live anywhere else. Fixture shape:
 - repo L: project level; environments `main` and `uat` (both protected;
   `uat` merge-only with an approvers whitelist); targets under `main`
   (`svc.alpha`, `grp%2fbeta`, `grp2`, `svc.gamma%2fsub`, …) with their
-  `ci_deploy_root` markers; targets `partA`, `partB` under `uat`;
+  deploy-root markers; targets `partA`, `partB` under `uat`;
 - repo O: project and `main`, for isolation;
 - roles `ci`, `ci-main`, `ci-uat`; the `uat` target levels gated by group
-  (Owners and uat-approvers per target, §6.4); teams via the fake or real
+  (approver groups per target, §6.4); teams via the fake or real
   forge.
 
 In every rendered case, `delivered`/`denied` are re-derived for the new
@@ -1002,12 +1004,12 @@ flagged **changed** when its pipeline outcome or its stated intent changes.
 | Case | Today | Under the grant model | Flag |
 |---|---|---|---|
 | M1 | manual, no target: manual tier + actor + team data | project + `main` (env from verified branch); actor/team deliver nothing, they only gate | **changed** (intent) |
-| M2 | manual `svc.alpha`: target, target-actor, target-team prefixes | project + `main` + `main/svc.alpha`; conjunctions become group gates; kit-deploy success | **changed** (intent) |
+| M2 | manual `svc.alpha`: target, target-actor, target-team prefixes | project + `main` + `main/svc.alpha`; conjunctions become group gates; deploy success | **changed** (intent) |
 | M3 | `svc.alpha/svc/gear`: inherits `svc.alpha` marker, success | opaque target, no level at `svc.alpha%2fsvc%2fgear` → marker missing → pipeline **error** (unless fixture adds the level) | **changed** (outcome) |
 | M4 | `grp/beta`: success | `main/grp%2fbeta` marker, success | same |
 | M5 | `grp`: no marker, error | no level, error | same |
 | M6 | `grp2` rogue marker: guard refuses group | same | same |
-| M7 | `svc.alpha/grouping`: inherited marker, guard refuses "no kit.yaml" | no level → marker missing → **error** at compile, before the guard | **changed** (outcome, still refused) |
+| M7 | `svc.alpha/grouping`: inherited marker, guard refuses "no deploy marker" | no level → marker missing → **error** at compile, before the guard | **changed** (outcome, still refused) |
 | M8 | `svc.locked`: error | same | same |
 | M9 | typo: error | same | same |
 | M10–M14 | invalid target: error | `target_invalid`, walk stops at env, error | same (5 cases) |
@@ -1033,7 +1035,7 @@ flagged **changed** when its pipeline outcome or its stated intent changes.
 | U5 | merge push to `uat`: whole `push/uat` tier incl. partB (pinned leak) | env `uat`, target `partA` from `changed_files` (or a trailer) → project + `uat` + `uat/partA`; **partB not delivered**, leak closed | **changed** (intent) |
 | U6 | direct push to `uat`, trigger file only: whole `push/uat` tier | project + `uat`; target `trigger` has no level; no part secrets | **changed** (intent) |
 | U7 | push `uat-next`: nothing of `uat` | unprotected → project only | same |
-| U8 | manual `uat/partA`, Owners: target + Owners conjunction | trigger becomes `DEPLOY_ENV=uat`, `DEPLOY_TO=partA`, branch `uat`; Owners group grants `uat/partA`; success | **changed** (trigger shape) |
+| U8 | manual `uat/partA`, approver group: target + group conjunction | trigger becomes `DEPLOY_ENV=uat`, `DEPLOY_TO=partA`, branch `uat`; approver group grants `uat/partA`; success | **changed** (trigger shape) |
 | U9 | promote U8 to `uat/partA`: deployment tier + marker, success | no actor → no teams → gated `uat/partA` unreadable → marker missing → **error** | **changed** (outcome) |
 | S1 | static: manual-matching workflows evaluate `DEPLOY_TO == ""` | same, extended to `DEPLOY_ENV` | same |
 | S2 | static: repo settings | same, plus the per-repo extension endpoint | same |

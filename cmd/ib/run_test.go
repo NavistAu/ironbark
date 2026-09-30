@@ -10,13 +10,11 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/navistau/ironbark/internal/gitenv"
 )
 
 func TestParseRunArgs(t *testing.T) {
 	t.Run("missing --", func(t *testing.T) {
-		_, _, _, err := parseRunArgs([]string{"echo", "hi"})
+		_, _, err := parseRunArgs([]string{"echo", "hi"})
 		if err == nil {
 			t.Fatal("parseRunArgs: expected an error for a missing '--', got nil")
 		}
@@ -26,7 +24,7 @@ func TestParseRunArgs(t *testing.T) {
 	})
 
 	t.Run("no command after --", func(t *testing.T) {
-		_, _, _, err := parseRunArgs([]string{"--no-masking", "--"})
+		_, _, err := parseRunArgs([]string{"--no-masking", "--"})
 		if err == nil {
 			t.Fatal("parseRunArgs: expected an error for no command, got nil")
 		}
@@ -36,8 +34,8 @@ func TestParseRunArgs(t *testing.T) {
 	})
 
 	t.Run("flags and command parsed", func(t *testing.T) {
-		opts, branch, cmdArgs, err := parseRunArgs([]string{
-			"--env-file", "a.env", "--env-file", "b.env", "--no-masking", "--branch", "develop",
+		opts, cmdArgs, err := parseRunArgs([]string{
+			"--env-file", "a.env", "--env-file", "b.env", "--no-masking", "--env", "develop", "--target", "web/api",
 			"--", "echo", "--flag", "hi",
 		})
 		if err != nil {
@@ -49,8 +47,8 @@ func TestParseRunArgs(t *testing.T) {
 		if !opts.NoMasking {
 			t.Error("NoMasking = false, want true")
 		}
-		if branch != "develop" {
-			t.Errorf("branch = %q, want develop", branch)
+		if opts.Env != "develop" || opts.Target != "web/api" {
+			t.Errorf("Env, Target = %q, %q, want develop, web/api", opts.Env, opts.Target)
 		}
 		want := []string{"echo", "--flag", "hi"}
 		if len(cmdArgs) != len(want) {
@@ -89,7 +87,7 @@ func writeEnvFile(t *testing.T, dir, name, content string) string {
 func TestCmdRun_RefResolvedAndLiteralPassedThrough(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	dir := t.TempDir()
 	envFile := writeEnvFile(t, dir, "a.env", "SECRET_VAL=ironbark://shared\nLITERAL_VAL=plain-value\n")
@@ -116,25 +114,28 @@ func TestCmdRun_RefResolvedAndLiteralPassedThrough(t *testing.T) {
 	}
 }
 
-// TestCmdRun_UnresolvedRef proves a reference the sweep didn't produce
-// exits 3 before the child ever starts.
+// TestCmdRun_UnresolvedRef proves a reference the walk didn't produce leaves
+// its variable unset (even one the caller's environment already had), with
+// one stderr line naming it, and the child still runs (design §12.4).
 func TestCmdRun_UnresolvedRef(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	dir := t.TempDir()
-	marker := filepath.Join(dir, "ran.marker")
 	envFile := writeEnvFile(t, dir, "a.env", "SECRET_VAL=ironbark://does_not_exist\n")
 
-	cmdArgs := helperArgs("marker", marker)
+	cmdArgs := helperArgs("printenv", "SECRET_VAL")
 	var stdout, stderr bytes.Buffer
-	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
-	if code != 3 {
-		t.Errorf("cmdRun exit = %d, want 3 (stderr: %s)", code, stderr.String())
+	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, buildOptsFunc(ropts), append(os.Environ(), "SECRET_VAL=stale"), nil, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("cmdRun exit = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Error("child ran (marker file exists), want it never started")
+	if stdout.String() != "" {
+		t.Errorf("child saw SECRET_VAL = %q, want it unset", stdout.String())
+	}
+	if n := strings.Count(stderr.String(), "SECRET_VAL left unset"); n != 1 || !strings.Contains(stderr.String(), "does_not_exist") {
+		t.Errorf("stderr = %q, want one line naming SECRET_VAL and does_not_exist", stderr.String())
 	}
 }
 
@@ -144,7 +145,7 @@ func TestCmdRun_UnresolvedRef(t *testing.T) {
 func TestCmdRun_Masking(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	dir := t.TempDir()
 	envFile := writeEnvFile(t, dir, "a.env", "SECRET_VAL=ironbark://shared\n")
@@ -179,7 +180,7 @@ func TestCmdRun_Masking(t *testing.T) {
 func TestCmdRun_RevokesAllSweptLeases(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	dir := t.TempDir()
 	envFile := writeEnvFile(t, dir, "a.env", "SECRET_VAL=ironbark://shared\n")
@@ -197,32 +198,25 @@ func TestCmdRun_RevokesAllSweptLeases(t *testing.T) {
 	}
 }
 
-// TestCmdRun_UnresolvedRefStillRevokesLeases proves an unresolved
-// reference (exit 3, before the child starts) still revokes every lease
-// the sweep created (I2): the deferred revoke is armed as soon as resolve
-// succeeds, not only once the child has started and exited.
+// TestCmdRun_UnresolvedRefStillRevokesLeases proves a run with an unresolved
+// reference still revokes every lease the walk took (I2).
 func TestCmdRun_UnresolvedRefStillRevokesLeases(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	dir := t.TempDir()
-	marker := filepath.Join(dir, "ran.marker")
 	envFile := writeEnvFile(t, dir, "a.env", "A=ironbark://shared\nB=ironbark://does_not_exist\n")
 
-	cmdArgs := helperArgs("marker", marker)
 	var stdout, stderr bytes.Buffer
-	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, cmdArgs, buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
-	if code != 3 {
-		t.Errorf("cmdRun exit = %d, want 3 (stderr: %s)", code, stderr.String())
-	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Error("child ran (marker file exists), want it never started")
+	code := cmdRun(context.Background(), runOpts{EnvFiles: []string{envFile}}, helperArgs("exit", "0"), buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("cmdRun exit = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
 
 	revoked := fv.revokedIDs()
 	if len(revoked) != 1 || revoked[0] != "database/creds/readonly/abc" {
-		t.Errorf("revoked leases = %v, want [database/creds/readonly/abc] even though resolution failed after the sweep", revoked)
+		t.Errorf("revoked leases = %v, want [database/creds/readonly/abc]", revoked)
 	}
 }
 
@@ -232,7 +226,7 @@ func TestCmdRun_UnresolvedRefStillRevokesLeases(t *testing.T) {
 func TestCmdRun_StartFailureStillRevokesLeases(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	dir := t.TempDir()
 	envFile := writeEnvFile(t, dir, "a.env", "SECRET_VAL=ironbark://shared\n")
@@ -303,7 +297,7 @@ func TestDispatchRun_EnvFileNoRefDoesNotNeedVaultConfig(t *testing.T) {
 func TestCmdRun_NoFileMode_InjectsAllSweptSecrets(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	var stdout, stderr bytes.Buffer
 	code := cmdRun(context.Background(), runOpts{NoMasking: true}, helperArgs("printenv", "SECRET_SHARED"), buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
@@ -330,7 +324,7 @@ func TestCmdRun_NoFileMode_InjectsAllSweptSecrets(t *testing.T) {
 func TestCmdRun_NoFileMode_OverwritesExistingSecretEnvVar(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	environ := append(os.Environ(), "SECRET_SHARED=stale-value")
 
@@ -350,7 +344,7 @@ func TestCmdRun_NoFileMode_OverwritesExistingSecretEnvVar(t *testing.T) {
 func TestCmdRun_NoFileMode_Masking(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	cmdArgs := helperArgs("splitwrite", "shared-value")
 	var stdout, stderr bytes.Buffer
@@ -372,7 +366,7 @@ func TestCmdRun_NoFileMode_Masking(t *testing.T) {
 func TestCmdRun_NoFileMode_RevokesAllSweptLeases(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 
 	var stdout, stderr bytes.Buffer
 	code := cmdRun(context.Background(), runOpts{}, helperArgs("exit", "0"), buildOptsFunc(ropts), os.Environ(), nil, &stdout, &stderr)
@@ -392,7 +386,7 @@ func TestCmdRun_NoFileMode_RevokesAllSweptLeases(t *testing.T) {
 func TestCmdRun_ChildExitCode(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
-	ropts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: new(bytes.Buffer)}
+	ropts := vc.opts(t, fx, new(bytes.Buffer))
 	cmdArgs := helperArgs("exit", "7")
 
 	var stdout, stderr bytes.Buffer

@@ -44,39 +44,39 @@ func TestDispatchGet_UsageErrors(t *testing.T) {
 	}
 }
 
-// TestDispatchGet_BranchFlagAfterPositionalArg reproduces M8: `ib get NAME
-// --branch x` must work the same as `ib get --branch x NAME` — Go's flag
+// TestDispatchGet_EnvFlagAfterPositionalArg reproduces M8: `ib get NAME
+// --env x` must work the same as `ib get --env x NAME` — Go's flag
 // package alone stops parsing at the first non-flag argument, so putting
-// --branch after NAME used to leave both as unrecognized positional args
+// --env after NAME used to leave both as unrecognized positional args
 // and fail with a usage error. Chdir'd into an empty (non-git) temp dir so
 // the deterministic failure mode is exit 2 ("not a git checkout"), proving
 // the flag WAS recognized and argument parsing proceeded — a usage error
 // (exit 1) is exactly the old, wrong outcome.
-func TestDispatchGet_BranchFlagAfterPositionalArg(t *testing.T) {
+func TestDispatchGet_EnvFlagAfterPositionalArg(t *testing.T) {
 	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
 	t.Setenv("BAO_TOKEN", "test-token")
 	chdirTemp(t)
 
 	var stdout, stderr bytes.Buffer
-	code := dispatchGet([]string{"myname", "--branch", "develop"}, &stdout, &stderr)
+	code := dispatchGet([]string{"myname", "--env", "develop"}, &stdout, &stderr)
 	if code != 2 {
-		t.Errorf("dispatchGet(myname, --branch, develop) = %d, want 2 (not a git checkout) — the flag after the positional name must still be recognized, not treated as a usage error", code)
+		t.Errorf("dispatchGet(myname, --env, develop) = %d, want 2 (not a git checkout) — the flag after the positional name must still be recognized, not treated as a usage error", code)
 	}
 }
 
-// TestDispatchEnv_BranchFlagAfterOtherArgs mirrors
-// TestDispatchGet_BranchFlagAfterPositionalArg for `ib env`, which takes
-// no positional args of its own but must still accept --branch wherever
+// TestDispatchEnv_EnvFlagAfterOtherArgs mirrors
+// TestDispatchGet_EnvFlagAfterPositionalArg for `ib env`, which takes
+// no positional args of its own but must still accept --env wherever
 // it appears among its (otherwise empty) argument list.
-func TestDispatchEnv_BranchFlagAfterOtherArgs(t *testing.T) {
+func TestDispatchEnv_EnvFlagAfterOtherArgs(t *testing.T) {
 	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
 	t.Setenv("BAO_TOKEN", "test-token")
 	chdirTemp(t)
 
 	var stdout, stderr bytes.Buffer
-	code := dispatchEnv([]string{"--branch", "develop"}, &stdout, &stderr)
+	code := dispatchEnv([]string{"--env", "develop"}, &stdout, &stderr)
 	if code != 2 {
-		t.Errorf("dispatchEnv(--branch, develop) = %d, want 2 (not a git checkout)", code)
+		t.Errorf("dispatchEnv(--env, develop) = %d, want 2 (not a git checkout)", code)
 	}
 }
 
@@ -107,8 +107,8 @@ func TestDispatchEnv_UnknownOutputValue(t *testing.T) {
 }
 
 // TestDispatchGet_OutputFlagAfterPositionalArg proves --output, like
-// --branch (M8), is recognized regardless of where it appears relative to
-// the positional name — it reuses splitFlag/splitBranchFlag's own
+// --env (M8), is recognized regardless of where it appears relative to
+// the positional name — it reuses splitFlag/splitEnvFlag's own
 // splitting.
 func TestDispatchGet_OutputFlagAfterPositionalArg(t *testing.T) {
 	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
@@ -122,18 +122,18 @@ func TestDispatchGet_OutputFlagAfterPositionalArg(t *testing.T) {
 	}
 }
 
-// TestDispatchGet_BranchAndOutputFlagsCombined proves --branch and
+// TestDispatchGet_EnvAndOutputFlagsCombined proves --env and
 // --output can both appear, in either order, alongside the positional
 // name.
-func TestDispatchGet_BranchAndOutputFlagsCombined(t *testing.T) {
+func TestDispatchGet_EnvAndOutputFlagsCombined(t *testing.T) {
 	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
 	t.Setenv("BAO_TOKEN", "test-token")
 	chdirTemp(t)
 
 	var stdout, stderr bytes.Buffer
-	code := dispatchGet([]string{"myname", "--output", "json", "--branch", "develop"}, &stdout, &stderr)
+	code := dispatchGet([]string{"myname", "--output", "json", "--env", "develop"}, &stdout, &stderr)
 	if code != 2 {
-		t.Errorf("dispatchGet(myname, --output, json, --branch, develop) = %d, want 2 (not a git checkout)", code)
+		t.Errorf("dispatchGet(myname, --output, json, --env, develop) = %d, want 2 (not a git checkout)", code)
 	}
 }
 
@@ -145,9 +145,9 @@ func TestDispatchEnv_OutputFlagAfterOtherArgs(t *testing.T) {
 	chdirTemp(t)
 
 	var stdout, stderr bytes.Buffer
-	code := dispatchEnv([]string{"--branch", "develop", "--output", "json"}, &stdout, &stderr)
+	code := dispatchEnv([]string{"--env", "develop", "--output", "json"}, &stdout, &stderr)
 	if code != 2 {
-		t.Errorf("dispatchEnv(--branch, develop, --output, json) = %d, want 2 (not a git checkout)", code)
+		t.Errorf("dispatchEnv(--env, develop, --output, json) = %d, want 2 (not a git checkout)", code)
 	}
 }
 
@@ -170,29 +170,30 @@ func chdirTemp(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(orig) })
 }
 
-// TestBuildResolveOpts_BranchPrecedence proves --branch (passed as
-// branchFlag) wins over IB_BRANCH, and that IB_BRANCH is used as the
-// fallback when no flag is given (CLIENT-SPEC §1).
-func TestBuildResolveOpts_BranchPrecedence(t *testing.T) {
+// TestBuildResolveOpts_SelectionPrecedence proves --env/--target win over
+// IB_ENV/IB_TARGET, which are the fallback (design §12.2).
+func TestBuildResolveOpts_SelectionPrecedence(t *testing.T) {
 	t.Setenv("BAO_ADDR", "http://127.0.0.1:1")
 	t.Setenv("BAO_TOKEN", "test-token")
-	t.Setenv("IB_BRANCH", "from-env")
+	t.Setenv("IRONBARK_DATA_PATH", "vs/data/pipelines/{repo}/{env}/{target...}")
+	t.Setenv("IB_ENV", "from-env")
+	t.Setenv("IB_TARGET", "from/env")
 
 	var stderr bytes.Buffer
-	opts, err := buildResolveOpts("from-flag", &stderr)
+	opts, err := buildResolveOpts("from-flag", "from/flag", &stderr)
 	if err != nil {
 		t.Fatalf("buildResolveOpts: %v", err)
 	}
-	if opts.Branch != "from-flag" {
-		t.Errorf("Branch = %q, want from-flag (flag wins)", opts.Branch)
+	if opts.Env != "from-flag" || opts.Target != "from/flag" {
+		t.Errorf("Env, Target = %q, %q, want the flags", opts.Env, opts.Target)
 	}
 
-	opts, err = buildResolveOpts("", &stderr)
+	opts, err = buildResolveOpts("", "", &stderr)
 	if err != nil {
 		t.Fatalf("buildResolveOpts: %v", err)
 	}
-	if opts.Branch != "from-env" {
-		t.Errorf("Branch = %q, want from-env (IB_BRANCH fallback)", opts.Branch)
+	if opts.Env != "from-env" || opts.Target != "from/env" {
+		t.Errorf("Env, Target = %q, %q, want IB_ENV/IB_TARGET", opts.Env, opts.Target)
 	}
 }
 
@@ -205,7 +206,7 @@ func TestBuildResolveOpts_MissingConfig(t *testing.T) {
 	t.Setenv("VAULT_TOKEN", "")
 
 	var stderr bytes.Buffer
-	_, err := buildResolveOpts("", &stderr)
+	_, err := buildResolveOpts("", "", &stderr)
 	if err == nil {
 		t.Fatal("buildResolveOpts: expected an error, got nil")
 	}
@@ -253,9 +254,8 @@ func TestDispatchGet_UnknownName_StderrText(t *testing.T) {
 	t.Setenv("BAO_TOKEN", rtToken)
 	t.Setenv("VAULT_ADDR", "")
 	t.Setenv("VAULT_TOKEN", "")
-	t.Setenv("IB_KV_MOUNT", "")
-	t.Setenv("IB_KV_PREFIX", "")
-	t.Setenv("IB_BRANCH", "")
+	t.Setenv("IRONBARK_DATA_PATH", "vs/data/pipelines/{repo}/{env}/{target...}")
+	t.Setenv("IB_ENV", "staging")
 
 	orig, err := os.Getwd()
 	if err != nil {

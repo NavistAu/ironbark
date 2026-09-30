@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/navistau/ironbark/internal/gitenv"
 )
 
 func setupGetEnvFixture(t *testing.T) (ibFixture, *fakeVault) {
@@ -15,11 +13,10 @@ func setupGetEnvFixture(t *testing.T) (ibFixture, *fakeVault) {
 	fx := newIBFixture(t, nil) // clone stays on "main" after clone
 
 	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
-	fv.set("/v1/kv/metadata/"+rtBase, 200, listBody([]string{"shared"}))
-	fv.set("/v1/kv/data/"+rtBase+"/shared", 200, entryBody(map[string]interface{}{"value": "shared-value"}, nil))
-	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"dbref"}))
-	fv.set("/v1/kv/data/"+rtMain+"/dbref", 200, entryBody(map[string]interface{}{"$ref": "database/creds/readonly"}, nil))
+	fv.setList(rtMeta, "shared", "staging/")
+	fv.set("/v1/"+rtData+"shared", 200, kv(val("shared-value")))
+	fv.setList(rtMeta+"staging/", "dbref")
+	fv.set("/v1/"+rtData+"staging/dbref", 200, resolveBody("database/creds/readonly", nil))
 	fv.set("/v1/database/creds/readonly", 200, derefBody(map[string]interface{}{"username": "u", "password": "p"}, "database/creds/readonly/abc"))
 
 	return fx, fv
@@ -29,7 +26,7 @@ func TestCmdGet_ValueAndTerminalNewline(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	opts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: &stderr}
+	opts := vc.opts(t, fx, &stderr)
 
 	var stdout bytes.Buffer
 	if err := cmdGet(context.Background(), "shared", opts, &stdout, false, ""); err != nil {
@@ -52,7 +49,7 @@ func TestCmdGet_LeaseNote(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
 	var stdout, stderr bytes.Buffer
-	opts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: &stderr}
+	opts := vc.opts(t, fx, &stderr)
 
 	if err := cmdGet(context.Background(), "dbref_username", opts, &stdout, false, ""); err != nil {
 		t.Fatalf("cmdGet: %v", err)
@@ -69,7 +66,7 @@ func TestCmdGet_UnknownName(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
 	var stdout, stderr bytes.Buffer
-	opts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: &stderr}
+	opts := vc.opts(t, fx, &stderr)
 
 	err := cmdGet(context.Background(), "nope", opts, &stdout, false, "")
 	if err == nil {
@@ -86,7 +83,7 @@ func TestCmdGet_JSONOutput(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
 	var stdout, stderr bytes.Buffer
-	opts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: &stderr}
+	opts := vc.opts(t, fx, &stderr)
 
 	if err := cmdGet(context.Background(), "shared", opts, &stdout, false, "json"); err != nil {
 		t.Fatalf("cmdGet: %v (stderr: %s)", err, stderr.String())
@@ -119,7 +116,7 @@ func TestCmdGet_JSONOutput_StderrUnchanged(t *testing.T) {
 	fxRaw, fvRaw := setupGetEnvFixture(t)
 	vcRaw := newTestVault(t, fvRaw)
 	var stderrRaw, stdoutRaw bytes.Buffer
-	optsRaw := resolveOpts{Runner: gitenv.ExecRunner{Dir: fxRaw.clone}, Vault: vcRaw, Token: rtToken, Stderr: &stderrRaw}
+	optsRaw := vcRaw.opts(t, fxRaw, &stderrRaw)
 	if err := cmdGet(context.Background(), "dbref_username", optsRaw, &stdoutRaw, false, ""); err != nil {
 		t.Fatalf("cmdGet (raw): %v", err)
 	}
@@ -127,7 +124,7 @@ func TestCmdGet_JSONOutput_StderrUnchanged(t *testing.T) {
 	fxJSON, fvJSON := setupGetEnvFixture(t)
 	vcJSON := newTestVault(t, fvJSON)
 	var stderrJSON, stdoutJSON bytes.Buffer
-	optsJSON := resolveOpts{Runner: gitenv.ExecRunner{Dir: fxJSON.clone}, Vault: vcJSON, Token: rtToken, Stderr: &stderrJSON}
+	optsJSON := vcJSON.opts(t, fxJSON, &stderrJSON)
 	if err := cmdGet(context.Background(), "dbref_username", optsJSON, &stdoutJSON, false, "json"); err != nil {
 		t.Fatalf("cmdGet (json): %v", err)
 	}
@@ -146,7 +143,7 @@ func TestCmdGet_JSONOutput_UnknownName_PrintsNothingOnStdout(t *testing.T) {
 	fx, fv := setupGetEnvFixture(t)
 	vc := newTestVault(t, fv)
 	var stdout, stderr bytes.Buffer
-	opts := resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Vault: vc, Token: rtToken, Stderr: &stderr}
+	opts := vc.opts(t, fx, &stderr)
 
 	err := cmdGet(context.Background(), "nope", opts, &stdout, false, "json")
 	if err == nil {

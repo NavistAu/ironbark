@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -11,398 +13,280 @@ import (
 	"github.com/hashicorp/vault/api"
 
 	"github.com/navistau/ironbark/internal/gitenv"
-	"github.com/navistau/ironbark/internal/vaultx"
+	"github.com/navistau/ironbark/internal/grantcfg"
+	"github.com/navistau/ironbark/internal/walk"
 )
 
 const (
-	rtBase  = "ci/acme/widgets"
-	rtEvent = "ci/acme/widgets/push"
-	rtMain  = "ci/acme/widgets/push/main"
+	rtMeta  = "vs/metadata/pipelines/acme/widgets/"
+	rtData  = "vs/data/pipelines/acme/widgets/"
 	rtToken = "caller-token"
 )
 
-func newTestVault(t *testing.T, fv *fakeVault) *vaultx.Client {
+// testVault is a walk client and lease API pointed at a fakeVault, built the
+// way production builds them.
+type testVault struct {
+	client walk.Client
+	leases *leaseAPI
+}
+
+func newTestVault(t *testing.T, fv *fakeVault) testVault {
 	t.Helper()
 	srv := httptest.NewServer(fv.handler())
 	t.Cleanup(srv.Close)
-
-	c, err := vaultx.New(vaultx.Config{Addr: srv.URL, KVMount: "kv", KVPrefix: "ci"})
+	c, l, err := newVault(srv.URL, nil, rtToken)
 	if err != nil {
-		t.Fatalf("vaultx.New: %v", err)
+		t.Fatalf("newVault: %v", err)
 	}
-	return c
+	return testVault{client: c, leases: l}
 }
 
-// TestResolve_ChosenTierAndPinFiltering exercises the happy path: a
-// checkout on a tracked branch ("main"), secrets swept from all three
-// tiers, and a per-secret ironbark_events pin (SPEC §4.6) applied with
-// event "push" (CLIENT-SPEC §4) — a secret pinned away from push is
-// dropped, one pinned to include push survives alongside its unpinned
-// siblings.
-func TestResolve_ChosenTierAndPinFiltering(t *testing.T) {
-	fx := newIBFixture(t, nil) // clone stays on "main" after clone
-
-	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"shared_push", "main/"}))
-	fv.set("/v1/kv/data/"+rtEvent+"/shared_push", 200, entryBody(map[string]interface{}{"value": "shared-push-value"}, nil))
-	fv.set("/v1/kv/metadata/"+rtBase, 200, listBody([]string{"shared"}))
-	fv.set("/v1/kv/data/"+rtBase+"/shared", 200, entryBody(map[string]interface{}{"value": "shared-value"}, nil))
-	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"prod_only", "pinned_cron", "pinned_push"}))
-	fv.set("/v1/kv/data/"+rtMain+"/prod_only", 200, entryBody(map[string]interface{}{"value": "prod-only-value"}, nil))
-	fv.set("/v1/kv/data/"+rtMain+"/pinned_cron", 200, entryBody(map[string]interface{}{"value": "pinned-cron-value"}, map[string]string{"ironbark_events": "cron"}))
-	fv.set("/v1/kv/data/"+rtMain+"/pinned_push", 200, entryBody(map[string]interface{}{"value": "pinned-push-value"}, map[string]string{"ironbark_events": "push,cron"}))
-
-	vc := newTestVault(t, fv)
-	var stderr bytes.Buffer
-	secrets, leaseIDs, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
+func testTmpl(t *testing.T) grantcfg.Template {
+	t.Helper()
+	tm, err := grantcfg.ParseTemplate("vs/data/pipelines/{repo}/{env}/{target...}")
 	if err != nil {
-		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+		t.Fatal(err)
 	}
-	if len(leaseIDs) != 0 {
-		t.Errorf("leaseIDs = %v, want none", leaseIDs)
-	}
-
-	want := map[string]string{
-		"shared":      "shared-value",
-		"shared_push": "shared-push-value",
-		"prod_only":   "prod-only-value",
-		"pinned_push": "pinned-push-value",
-	}
-	if len(secrets) != len(want) {
-		t.Fatalf("secrets = %v, want keys %v", secretNames(secrets), want)
-	}
-	for name, value := range want {
-		s, ok := secrets[name]
-		if !ok {
-			t.Errorf("missing secret %q", name)
-			continue
-		}
-		if s.Value != value {
-			t.Errorf("secret %q value = %q, want %q", name, s.Value, value)
-		}
-	}
-	if _, ok := secrets["pinned_cron"]; ok {
-		t.Errorf("pinned_cron should have been dropped (pinned away from push)")
-	}
-
-	if !strings.Contains(stderr.String(), "ib: env main (direct match)") {
-		t.Errorf("stderr = %q, want it to contain the direct-match visibility line", stderr.String())
-	}
+	return tm
 }
 
-func secretNames(m map[string]vaultx.SweptSecret) []string {
-	names := make([]string, 0, len(m))
-	for n := range m {
-		names = append(names, n)
-	}
-	return names
+// opts is the common test selection: the "staging" environment named
+// explicitly, no target.
+func (v testVault) opts(t *testing.T, fx ibFixture, stderr io.Writer) resolveOpts {
+	t.Helper()
+	return resolveOpts{Runner: gitenv.ExecRunner{Dir: fx.clone}, Client: v.client, Leases: v.leases, Tmpl: testTmpl(t), Env: "staging", Stderr: stderr}
 }
 
-// TestResolve_DirectMatchSkipsStaleCheck reproduces CLIENT-SPEC §3's
-// "before rule 3" ordering (M1): rules 1-2 (override, direct match) must
-// decide the branch WITHOUT paying for the ls-remote staleness check.
-// Proven here by pointing origin at an address nothing listens on (which
-// would fail ls-remote and print the "freshness unknown" warning if the
-// check ran) while the checkout sits on "main", a direct match — resolve
-// must still succeed, silently.
-func TestResolve_DirectMatchSkipsStaleCheck(t *testing.T) {
-	fx := newIBFixture(t, nil) // clone stays on "main"
-	gitRaw(t, fx.clone, "remote", "set-url", "origin", "https://127.0.0.1:1/acme/widgets.git")
+func kv(fields map[string]interface{}) string { return entryBody(fields, nil) }
 
-	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
+func val(s string) map[string]interface{} { return map[string]interface{}{"value": s} }
 
-	vc := newTestVault(t, fv)
-	var stderr bytes.Buffer
-	_, _, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
-	if err != nil {
-		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
-	}
-	if strings.Contains(stderr.String(), "freshness unknown") {
-		t.Errorf("stderr = %q, a direct match (rule 2) should skip the stale check entirely", stderr.String())
-	}
-}
-
-// TestResolve_NoBranchTiers exercises CLIENT-SPEC §3's "no branch tiers at
-// all" path: ListBranchTiers sees nothing (404), so resolve sweeps only
-// the event and base tiers and says so on stderr.
-func TestResolve_NoBranchTiers(t *testing.T) {
+// TestResolve_ExplicitEnvWalk: repo and environment levels are read, the
+// deeper level wins a clash, and neither vault_token nor ironbark_status is
+// ever returned, even from a marker or a real entry.
+func TestResolve_ExplicitEnvWalk(t *testing.T) {
 	fx := newIBFixture(t, nil)
-
 	fv := newFakeVault()
-	// No entry set for rtEvent's metadata path -> 404 -> ListBranchTiers
-	// returns (nil, nil) and sweepTier's own LIST of the same path also
-	// sees the 404 (no event-tier secrets in this test).
-	fv.set("/v1/kv/metadata/"+rtBase, 200, listBody([]string{"shared"}))
-	fv.set("/v1/kv/data/"+rtBase+"/shared", 200, entryBody(map[string]interface{}{"value": "shared-value"}, nil))
+	fv.setList(rtMeta, "shared", "clash", "vault_token", "ironbark_status", "staging/")
+	fv.set("/v1/"+rtData+"shared", 200, kv(val("shared-value")))
+	fv.set("/v1/"+rtData+"clash", 200, kv(val("from-repo")))
+	fv.set("/v1/"+rtData+"vault_token", 200, markerBody())
+	fv.set("/v1/"+rtData+"ironbark_status", 200, kv(val("spoof")))
+	fv.setList(rtMeta+"staging/", "clash", "vault_token", "only_staging")
+	fv.set("/v1/"+rtData+"staging/clash", 200, kv(val("from-staging")))
+	fv.set("/v1/"+rtData+"staging/vault_token", 200, markerBody())
+	fv.set("/v1/"+rtData+"staging/only_staging", 200, kv(val("s")))
 
-	vc := newTestVault(t, fv)
 	var stderr bytes.Buffer
-	secrets, _, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
+	secrets, leases, sel, err := resolve(context.Background(), newTestVault(t, fv).opts(t, fx, &stderr))
 	if err != nil {
 		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
 	}
-	if len(secrets) != 1 || secrets["shared"].Value != "shared-value" {
-		t.Errorf("secrets = %v, want just shared=shared-value", secrets)
+	got := map[string]string{}
+	for n, s := range secrets {
+		got[n] = s.Value
 	}
-	if !strings.Contains(stderr.String(), "ib: no branch tiers; event and base tiers only") {
-		t.Errorf("stderr = %q, want the no-branch-tiers line", stderr.String())
+	want := map[string]string{"shared": "shared-value", "clash": "from-staging", "only_staging": "s"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("secrets = %v, want %v", got, want)
+	}
+	if len(leases) != 0 {
+		t.Errorf("leases = %v, want none", leases)
+	}
+	if sel.Env != "staging" || sel.Rule != gitenv.RuleExplicit {
+		t.Errorf("selection = %+v", sel)
+	}
+	if !strings.Contains(stderr.String(), "ib: env staging (explicit)") {
+		t.Errorf("stderr = %q, want the visibility line", stderr.String())
+	}
+	if strings.Contains(stderr.String(), rtToken) {
+		t.Errorf("stderr leaks the token: %q", stderr.String())
 	}
 }
 
-// TestResolve_NearestAncestorVisibilityLine reproduces CLIENT-SPEC §3's
-// own worked example verbatim ("ib: env develop (nearest ancestor, 3
-// commits)"): a checkout on a feature branch cut from develop, with
-// develop 10 commits ahead of main, three more commits added locally —
-// the same distances (develop 3, main 13) as gitenv's own
-// TestFacts_NearestAncestorDistances.
-func TestResolve_NearestAncestorVisibilityLine(t *testing.T) {
-	fx := newIBFixture(t, func(seedDir string) {
-		pushBranch(t, seedDir, "develop", "main", 10)
-	})
-	gitRaw(t, fx.clone, "checkout", "-q", "-b", "feature", "origin/develop")
-	for i := 1; i <= 3; i++ {
-		commitFixture(t, fx.clone, "feature-"+string(rune('0'+i)), "feature-commit")
-	}
-
+func discoveryVault() *fakeVault {
 	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"develop/", "main/"}))
+	fv.setList(rtMeta, "shared", "prod/", "staging/")
+	fv.set("/v1/"+rtMeta+"prod/", 200, levelMetaBody(map[string]string{"branches": "main"}))
+	fv.set("/v1/"+rtMeta+"staging/", 200, levelMetaBody(map[string]string{"branches": "release/*"}))
+	fv.set("/v1/"+rtData+"shared", 200, kv(val("sv")))
+	fv.setList(rtMeta+"prod/", "p")
+	fv.set("/v1/"+rtData+"prod/p", 200, kv(val("pv")))
+	return fv
+}
 
-	vc := newTestVault(t, fv)
+// TestResolve_DiscoversEnvFromBranch: with no --env the local branch (main)
+// is matched against the level metadata the caller can read.
+func TestResolve_DiscoversEnvFromBranch(t *testing.T) {
+	fx := newIBFixture(t, nil) // clone is on main
 	var stderr bytes.Buffer
-	_, _, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
+	o := newTestVault(t, discoveryVault()).opts(t, fx, &stderr)
+	o.Env = ""
+	secrets, _, sel, err := resolve(context.Background(), o)
 	if err != nil {
-		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+		t.Fatalf("resolve: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "ib: env develop (nearest ancestor, 3 commits)") {
-		t.Errorf("stderr = %q, want the CLIENT-SPEC §3 worked-example visibility line", stderr.String())
+	if sel.Env != "prod" || sel.Rule != gitenv.RuleBranch {
+		t.Errorf("selection = %+v", sel)
+	}
+	if secrets["p"].Value != "pv" || secrets["shared"].Value != "sv" {
+		t.Errorf("secrets = %v", secrets)
+	}
+	if !strings.Contains(stderr.String(), "ib: env prod (branch)") {
+		t.Errorf("stderr = %q", stderr.String())
 	}
 }
 
-// TestResolve_SlashBranchDirectMatch is T2's "branch with /" case,
-// exercised end to end through resolve(): a tracked branch named
-// "release/2.0" (identity.Esc("release/2.0") == "release%2f2.0" — the
-// tier name a Vault LIST would report) must be correctly recognized and
-// selected via the Esc-match path all the way through the resolve
-// pipeline (identity, tier discovery, selection). The dedicated
-// regression test for the refname:short collision gotcha itself (M5)
-// lives at the gitenv package level
-// (TestFacts_LocalBranchNameCollisionWithRemoteShortName), where it can
-// assert on TrackedBranches directly without an unrelated ambiguous-ref
-// side effect on distance computation.
-func TestResolve_SlashBranchDirectMatch(t *testing.T) {
-	fx := newIBFixture(t, func(seedDir string) {
-		pushBranch(t, seedDir, "release/2.0", "main", 1)
-	})
-	gitRaw(t, fx.clone, "checkout", "-q", "-b", "release/2.0", "origin/release/2.0")
-
-	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"release%2f2.0/"}))
-
-	vc := newTestVault(t, fv)
+// TestResolve_NoClaimantIsRepoLevelOnly: a branch no level claims is not an
+// error; only the repo level is read.
+func TestResolve_NoClaimantIsRepoLevelOnly(t *testing.T) {
+	fx := newIBFixture(t, nil)
+	gitRaw(t, fx.clone, "checkout", "-q", "-b", "wip/thing")
 	var stderr bytes.Buffer
-	_, _, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
+	o := newTestVault(t, discoveryVault()).opts(t, fx, &stderr)
+	o.Env = ""
+	secrets, _, sel, err := resolve(context.Background(), o)
 	if err != nil {
-		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+		t.Fatalf("resolve: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "ib: env release/2.0 (direct match)") {
-		t.Errorf("stderr = %q, want release/2.0 selected via the Esc-matched direct match", stderr.String())
+	if sel.Env != "" || sel.Rule != gitenv.RuleNone {
+		t.Errorf("selection = %+v", sel)
+	}
+	if len(secrets) != 1 || secrets["shared"].Value != "sv" {
+		t.Errorf("secrets = %v, want only the repo level's", secrets)
+	}
+	if !strings.Contains(stderr.String(), "no environment; repo level only") {
+		t.Errorf("stderr = %q", stderr.String())
 	}
 }
 
-// TestResolve_Ambiguous exercises CLIENT-SPEC §3 rule 6: a tie that
-// survives both the reflog and cascade tie-breaks fails with the
-// candidates (and their distances) named on stderr, asking for --branch.
-func TestResolve_Ambiguous(t *testing.T) {
-	fx := newIBFixture(t, func(seedDir string) {
-		pushBranch(t, seedDir, "alpha", "main", 1)
-		gitRaw(t, seedDir, "checkout", "-q", "main")
-		pushBranch(t, seedDir, "beta", "main", 1)
-		gitRaw(t, seedDir, "checkout", "-q", "main")
-	})
-	// "work" is cut from main (not alpha/beta), so its reflog names
-	// "main" — neither tied candidate — and alpha/beta (lowercase,
-	// unadorned names) aren't in the built-in Cascade list either: both
-	// tie-breaks fall through to rule 6, ambiguous.
-	gitRaw(t, fx.clone, "checkout", "-q", "-b", "work", "main")
-	commitFixture(t, fx.clone, "work-1", "work-commit")
-
-	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"alpha/", "beta/"}))
-
-	vc := newTestVault(t, fv)
-	var stderr bytes.Buffer
-	_, _, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
-	if err == nil {
-		t.Fatal("resolve: expected an error, got nil")
+// TestResolve_SeveralClaimantsExit4NamesThem: two levels claim the branch.
+func TestResolve_SeveralClaimantsExit4NamesThem(t *testing.T) {
+	fx := newIBFixture(t, nil)
+	fv := discoveryVault()
+	fv.set("/v1/"+rtMeta+"staging/", 200, levelMetaBody(map[string]string{"branches": "main"}))
+	o := newTestVault(t, fv).opts(t, fx, io.Discard)
+	o.Env = ""
+	_, _, _, err := resolve(context.Background(), o)
+	var se *gitenv.SelectError
+	if !errors.As(err, &se) || se.Kind != "ambiguous" {
+		t.Fatalf("err = %v, want an ambiguous SelectError", err)
 	}
-	selErr, ok := err.(*gitenv.SelectError)
-	if !ok {
-		t.Fatalf("resolve error type = %T, want *gitenv.SelectError", err)
-	}
-	if selErr.Kind != "ambiguous" {
-		t.Errorf("SelectError.Kind = %q, want ambiguous", selErr.Kind)
-	}
-	if _, ok := selErr.Candidates["alpha"]; !ok {
-		t.Errorf("candidates = %v, want alpha present", selErr.Candidates)
-	}
-	if _, ok := selErr.Candidates["beta"]; !ok {
-		t.Errorf("candidates = %v, want beta present", selErr.Candidates)
+	if !strings.Contains(err.Error(), "prod") || !strings.Contains(err.Error(), "staging") {
+		t.Errorf("error %q must name both levels", err)
 	}
 	if exitCode(err) != 4 {
-		t.Errorf("exitCode(err) = %d, want 4", exitCode(err))
+		t.Errorf("exit = %d, want 4", exitCode(err))
 	}
 }
 
-// TestResolve_SkippedDerefsStderrLine exercises CLIENT-SPEC §4's deref-403
-// hint: the caller's token can list/read the "ptr" map entry but gets a
-// 403 dereferencing its $ref target. The sweep still silently produces no
-// secret for it (unchanged, correct per SPEC), but resolve must print one
-// stderr line naming it, so `ib env` returning fewer secrets than expected
-// has a hint instead of being silent.
-func TestResolve_SkippedDerefsStderrLine(t *testing.T) {
-	fx := newIBFixture(t, nil) // clone stays on "main"
-
+// TestResolve_NestedTarget: --target web/api walks every segment and only
+// those; a sibling is never read.
+func TestResolve_NestedTarget(t *testing.T) {
+	fx := newIBFixture(t, nil)
 	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
-	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"ptr"}))
-	fv.set("/v1/kv/data/"+rtMain+"/ptr", 200, entryBody(map[string]interface{}{"$ref": "database/creds/readonly"}, nil))
-	fv.set("/v1/database/creds/readonly", 403, `{"errors":["denied"]}`)
-
-	vc := newTestVault(t, fv)
-	var stderr bytes.Buffer
-	secrets, _, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
+	fv.setList(rtMeta, "r")
+	fv.set("/v1/"+rtData+"r", 200, kv(val("1")))
+	fv.setList(rtMeta+"staging/", "e", "web/", "cli/")
+	fv.set("/v1/"+rtData+"staging/e", 200, kv(val("2")))
+	fv.setList(rtMeta+"staging/web/", "w", "api/")
+	fv.set("/v1/"+rtData+"staging/web/w", 200, kv(val("3")))
+	fv.setList(rtMeta+"staging/web/api/", "a")
+	fv.set("/v1/"+rtData+"staging/web/api/a", 200, kv(val("4")))
+	// staging/cli/ is not programmed: reading it would 404 and show up in
+	// levels, but the secret names prove it was skipped either way.
+	o := newTestVault(t, fv).opts(t, fx, io.Discard)
+	o.Target = "web/api"
+	secrets, _, sel, err := resolve(context.Background(), o)
 	if err != nil {
-		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+		t.Fatalf("resolve: %v", err)
 	}
-	if len(secrets) != 0 {
-		t.Errorf("secrets = %v, want none (deref 403 skips the entry)", secretNames(secrets))
+	for _, n := range []string{"r", "e", "w", "a"} {
+		if secrets[n].Value == "" {
+			t.Errorf("missing %q in %v", n, secrets)
+		}
 	}
-
-	want := "ib: skipped 1 entries: no read on their targets (ptr)"
-	if !strings.Contains(stderr.String(), want) {
-		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	if len(sel.Target.Segments) != 2 {
+		t.Errorf("selection = %+v", sel)
 	}
 }
 
-// TestResolve_NoSkippedDerefsNoStderrLine proves the skipped-derefs line
-// is only ever printed when the sweep actually skipped one.
-func TestResolve_NoSkippedDerefsNoStderrLine(t *testing.T) {
-	fx := newIBFixture(t, nil) // clone stays on "main"
-
-	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
-	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"shared"}))
-	fv.set("/v1/kv/data/"+rtMain+"/shared", 200, entryBody(map[string]interface{}{"value": "shared-value"}, nil))
-
-	vc := newTestVault(t, fv)
-	var stderr bytes.Buffer
-	_, _, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
+// TestResolve_ResolveMappingLeaseIsReturned: a resolve mapping is read with
+// the caller's token and its lease id comes back for revocation.
+func TestResolve_ResolveMappingLeaseIsReturned(t *testing.T) {
+	fx, fv := setupGetEnvFixture(t)
+	secrets, leases, _, err := resolve(context.Background(), newTestVault(t, fv).opts(t, fx, io.Discard))
 	if err != nil {
-		t.Fatalf("resolve: %v (stderr: %s)", err, stderr.String())
+		t.Fatalf("resolve: %v", err)
+	}
+	if secrets["dbref_username"].Value != "u" || secrets["dbref_password"].Value != "p" {
+		t.Errorf("secrets = %v", secrets)
+	}
+	if len(leases) != 1 || leases[0] != "database/creds/readonly/abc" {
+		t.Errorf("leases = %v", leases)
+	}
+}
+
+// TestResolve_SkippedEntriesStderrLine: an entry the caller cannot read is
+// skipped and named once; with none skipped there is no such line.
+func TestResolve_SkippedEntriesStderrLine(t *testing.T) {
+	fx := newIBFixture(t, nil)
+	fv := newFakeVault()
+	fv.setList(rtMeta, "ok", "hidden")
+	fv.set("/v1/"+rtData+"ok", 200, kv(val("v")))
+	fv.set("/v1/"+rtData+"hidden", 403, `{"errors":["permission denied"]}`)
+	var stderr bytes.Buffer
+	if _, _, _, err := resolve(context.Background(), newTestVault(t, fv).opts(t, fx, &stderr)); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "skipped 1 entries") || !strings.Contains(stderr.String(), "hidden") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+
+	fv2 := newFakeVault()
+	fv2.setList(rtMeta, "ok")
+	fv2.set("/v1/"+rtData+"ok", 200, kv(val("v")))
+	stderr.Reset()
+	if _, _, _, err := resolve(context.Background(), newTestVault(t, fv2).opts(t, fx, &stderr)); err != nil {
+		t.Fatalf("resolve: %v", err)
 	}
 	if strings.Contains(stderr.String(), "skipped") {
-		t.Errorf("stderr = %q, want no skipped-derefs line (nothing was skipped)", stderr.String())
+		t.Errorf("stderr = %q, want no skipped line", stderr.String())
 	}
 }
 
-// TestResolve_SweepFailureRevokesPartialLeases exercises CLIENT-SPEC §4:
-// a lease minted by the branch tier's deref, followed by a non-403/404
-// failure listing the event tier, must revoke that lease before resolve
-// returns its (exit 5) error — "leases created so far revoked".
-func TestResolve_SweepFailureRevokesPartialLeases(t *testing.T) {
-	fx := newIBFixture(t, nil) // clone stays on "main"
-
+// TestResolve_WalkFailureRevokesPartialLeases: a hard failure after a lease
+// was taken revokes it before returning exit 5.
+func TestResolve_WalkFailureRevokesPartialLeases(t *testing.T) {
+	fx := newIBFixture(t, nil)
 	fv := newFakeVault()
-	// rtEvent's LIST serves both ListBranchTiers (branch-tier discovery,
-	// which must succeed so Select can pick "main") and Sweep's own
-	// event-tier listing (which sees no plain keys here — "main/" is a
-	// directory entry — so it's a no-op, not a failure). The failure this
-	// test needs must live at the base tier instead, which only Sweep
-	// ever LISTs.
-	fv.set("/v1/kv/metadata/"+rtEvent, 200, listBody([]string{"main/"}))
-	fv.set("/v1/kv/metadata/"+rtMain, 200, listBody([]string{"dbref"}))
-	fv.set("/v1/kv/data/"+rtMain+"/dbref", 200, entryBody(map[string]interface{}{"$ref": "database/creds/readonly"}, nil))
+	fv.setList(rtMeta, "staging/")
+	fv.setList(rtMeta+"staging/", "dbref", "z")
+	fv.set("/v1/"+rtData+"staging/dbref", 200, resolveBody("database/creds/readonly", nil))
 	fv.set("/v1/database/creds/readonly", 200, derefBody(map[string]interface{}{"username": "u"}, "database/creds/readonly/lease-1"))
-	fv.set("/v1/kv/metadata/"+rtBase, 500, `{"errors":["boom"]}`)
+	fv.set("/v1/"+rtData+"staging/z", 500, `{"errors":["boom"]}`)
 
-	vc := newTestVault(t, fv)
-	var stderr bytes.Buffer
-	_, _, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
+	_, _, _, err := resolve(context.Background(), newTestVault(t, fv).opts(t, fx, io.Discard))
 	if err == nil {
-		t.Fatal("resolve: expected an error, got nil")
+		t.Fatal("resolve: expected an error")
 	}
 	if exitCode(err) != 5 {
-		t.Errorf("exitCode(err) = %d, want 5", exitCode(err))
+		t.Errorf("exitCode = %d, want 5", exitCode(err))
 	}
-
-	revoked := fv.revokedIDs()
-	if len(revoked) != 1 || revoked[0] != "database/creds/readonly/lease-1" {
-		t.Errorf("revoked leases = %v, want [database/creds/readonly/lease-1]", revoked)
+	if got := fv.revokedIDs(); len(got) != 1 || got[0] != "database/creds/readonly/lease-1" {
+		t.Errorf("revoked = %v", got)
 	}
 }
 
-// TestResolve_StaleTokenIsAnError: a token Vault rejects (403 on the tier
-// LIST, and on lookup-self) must not resolve to an empty success.
+// TestResolve_StaleTokenIsAnError: a token OpenBao rejects (403 everywhere
+// and on lookup-self) must not resolve to an empty success.
 func TestResolve_StaleTokenIsAnError(t *testing.T) {
 	fx := newIBFixture(t, nil)
 	fv := newFakeVault()
-	fv.set("/v1/kv/metadata/"+rtEvent, 403, `{"errors":["permission denied"]}`)
+	fv.set("LIST /v1/"+rtMeta, 403, `{"errors":["permission denied"]}`)
 	fv.set("/v1/auth/token/lookup-self", 403, `{"errors":["permission denied"]}`)
 
-	vc := newTestVault(t, fv)
-	var stderr bytes.Buffer
-	_, _, _, err := resolve(context.Background(), resolveOpts{
-		Runner: gitenv.ExecRunner{Dir: fx.clone},
-		Vault:  vc,
-		Token:  rtToken,
-		Stderr: &stderr,
-	})
+	_, _, _, err := resolve(context.Background(), newTestVault(t, fv).opts(t, fx, io.Discard))
 	if err == nil {
 		t.Fatal("resolve succeeded with a rejected token")
 	}
@@ -411,6 +295,21 @@ func TestResolve_StaleTokenIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ib auth") {
 		t.Errorf("error %q does not point at `ib auth`", err)
+	}
+}
+
+// TestResolve_StaleTokenDuringDiscovery: the same, when the 403 arrives while
+// discovering the environment.
+func TestResolve_StaleTokenDuringDiscovery(t *testing.T) {
+	fx := newIBFixture(t, nil)
+	fv := newFakeVault()
+	fv.set("LIST /v1/"+rtMeta, 403, `{"errors":["permission denied"]}`)
+	fv.set("/v1/auth/token/lookup-self", 403, `{"errors":["permission denied"]}`)
+	o := newTestVault(t, fv).opts(t, fx, io.Discard)
+	o.Env = ""
+	_, _, _, err := resolve(context.Background(), o)
+	if exitCode(err) != 2 {
+		t.Errorf("exit = %d, want 2 (err: %v)", exitCode(err), err)
 	}
 }
 

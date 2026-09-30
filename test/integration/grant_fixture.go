@@ -125,7 +125,8 @@ func setupGrant() (*Grant, error) {
 		{"auth/jwt/config", map[string]any{"bound_issuer": jwtsign.Issuer, "jwt_validation_pubkeys": g.PubPEM}},
 	}
 	for _, s := range steps {
-		if _, err := c.Logical().Write(s.path, s.body); err != nil {
+		// Mounts already in use: the container outlived an earlier test binary.
+		if _, err := c.Logical().Write(s.path, s.body); err != nil && !strings.Contains(err.Error(), "already in use") {
 			return nil, fmt.Errorf("write %s: %w", s.path, err)
 		}
 	}

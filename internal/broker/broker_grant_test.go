@@ -412,6 +412,14 @@ func TestTargetWithoutEnvIgnoredAndRecorded(t *testing.T) {
 	}
 }
 
+func TestTargetAndPipelineLoggedEscaped(t *testing.T) {
+	r := newRig(t, "")
+	res := r.b.Handle(context.Background(), payload(payloadOpts{event: "manual", branch: "feature", author: "alice", vars: map[string]string{"DEPLOY_TO": "Web/api"}}))
+	if res.Audit.Target != "%57eb/api" || res.Audit.Pipeline != "3" {
+		t.Errorf("audit target=%q pipeline=%q", res.Audit.Target, res.Audit.Pipeline)
+	}
+}
+
 func TestPromoteDeployToWalksTargetLevels(t *testing.T) {
 	r := newRig(t, "")
 	r.tree("tok-ci-prod", repoMeta+"prod/", repoData+"prod/", "a", "1")

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/navistau/ironbark/internal/facts"
@@ -131,7 +130,7 @@ func (b *Broker) Handle(ctx context.Context, body []byte) Result {
 	b.logPayloadAttributes(ctx, f)
 
 	a := status.Audit{
-		TS: b.now(), Org: f.Org, Repo: f.Repo, RepoKey: f.RepoKey, Event: f.Event,
+		TS: b.now(), Org: f.Org, Repo: f.Repo, RepoKey: f.RepoKey, Event: f.Event, Pipeline: f.Pipeline,
 		Branch: f.Branch, Ref: f.Ref, BranchProtected: f.BranchProtected, Actor: f.Actor,
 	}
 	st := status.Status{}
@@ -223,11 +222,11 @@ func (b *Broker) Handle(ctx context.Context, body []byte) Result {
 		}
 	}
 
-	a.Target = strings.Join(tgt.Segments, "/") // recorded even when ignored
+	a.Target = tgt.Joined() // recorded even when ignored
 	tgt, _ = selector.IgnoreWithoutEnv(tgt, env)
 	a.Env, a.EnvSource = env, envSource
 	st.Env, st.EnvSource = env, envSource
-	st.Target = strings.Join(tgt.Segments, "/")
+	st.Target = tgt.Joined()
 
 	// Step 5: teams, only with an environment and an actor; fail closed.
 	var teams []string

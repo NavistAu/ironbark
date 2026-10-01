@@ -91,7 +91,7 @@ func TestShouldRevoke(t *testing.T) {
 func TestAuditJSON(t *testing.T) {
 	a := Audit{
 		TS:  time.Date(2026, 10, 1, 3, 4, 5, 0, time.UTC),
-		Org: "acme", Repo: "mono", RepoKey: "acme/mono#4711", Event: "push",
+		Org: "acme", Repo: "mono", RepoKey: "acme/mono#4711", Event: "push", Pipeline: "17",
 		Branch: "main", Ref: "refs%2fheads%2fmain", BranchProtected: "true", Actor: "carol",
 		Teams: []string{"acme/deployers"}, TeamsError: "timeout",
 		Env: "prod", EnvSource: "branch", EnvClaimants: []string{"prod"}, EnvInvalid: true, EnvRefused: true,
@@ -112,7 +112,7 @@ func TestAuditJSON(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"ts", "org", "repo", "repo_key", "event", "branch", "ref", "branch_protected", "actor",
+	for _, k := range []string{"ts", "org", "repo", "repo_key", "event", "pipeline", "branch", "ref", "branch_protected", "actor",
 		"teams", "teams_error", "env", "env_source", "env_claimants", "env_invalid", "env_refused",
 		"target", "target_source", "target_invalid", "discovery_login", "role", "sub", "jti", "levels",
 		"secrets_returned", "images_relayed", "vault_token_issued", "token_accessor", "token_ttl", "outcome"} {

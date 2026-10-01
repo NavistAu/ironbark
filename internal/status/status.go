@@ -114,6 +114,7 @@ type Audit struct {
 	Repo             string            `json:"repo"`
 	RepoKey          string            `json:"repo_key"`
 	Event            string            `json:"event"`
+	Pipeline         string            `json:"pipeline,omitempty"` // pipeline number; Woodpecker can reuse numbers
 	Branch           string            `json:"branch,omitempty"`
 	Ref              string            `json:"ref,omitempty"`
 	BranchProtected  string            `json:"branch_protected,omitempty"`
@@ -125,7 +126,7 @@ type Audit struct {
 	EnvClaimants     []string          `json:"env_claimants,omitempty"`
 	EnvInvalid       bool              `json:"env_invalid,omitempty"`
 	EnvRefused       bool              `json:"env_refused,omitempty"`
-	Target           string            `json:"target,omitempty"`
+	Target           string            `json:"target,omitempty"`        // escaped, as in the claim
 	TargetSource     string            `json:"target_source,omitempty"` // variable | deploy_to | trailer
 	TargetInvalid    bool              `json:"target_invalid,omitempty"`
 	DiscoveryLogin   bool              `json:"discovery_login,omitempty"`

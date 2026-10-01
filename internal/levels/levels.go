@@ -17,7 +17,7 @@ const RepoLabel = "."
 type Level struct {
 	Label    string // path relative to the repo level; RepoLabel for the repo level
 	Data     string // data path, trailing "/"
-	Metadata string // metadata path, trailing "/" (LIST and level metadata)
+	Metadata string // metadata path, trailing "/" (LIST)
 }
 
 // Levels lists the levels shallow to deep for a request (§8.1): the repo
@@ -44,7 +44,7 @@ func Levels(t grantcfg.Template, org, repo, env string, targetSegs []string) []L
 const maxTargetDepth = 8
 
 // RenderPolicies prints the three policies of §6.3 for the JWT mount accessor:
-// project (repo level plus level metadata for discovery), env, and target
+// project (repo level plus level entries for discovery), env, and target
 // (one stanza triple per target depth, 1 to 8). Every level stanza ends in
 // "/+", never "*": a trailing "*" is a prefix match and would grant every
 // level below.
@@ -60,10 +60,10 @@ func RenderPolicies(t grantcfg.Template, accessor string) (project, env, target 
 		return `path "` + path + `" { capabilities = ["` + capability + `"] }` + "\n"
 	}
 	var b strings.Builder
-	b.WriteString("# ci-project: the repo level, plus level metadata for discovery\n")
+	b.WriteString("# ci-project: the repo level, plus level entries for discovery\n")
 	b.WriteString(stanza(dataRoot+"/"+repoPath+"+", "read"))
 	b.WriteString(stanza(metaRoot+"/"+repoPath, "list"))
-	b.WriteString(stanza(metaRoot+"/"+repoPath+"+/", "read"))
+	b.WriteString(stanza(metaRoot+"/"+repoPath+"+", "read"))
 	project = b.String()
 
 	triple := func(b *strings.Builder, rel string) {

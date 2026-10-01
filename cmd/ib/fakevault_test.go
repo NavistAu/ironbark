@@ -3,8 +3,8 @@ package main
 // A minimal fake Vault HTTP server for cmd/ib's own tests. Mirrors
 // internal/vaultx/sweep_test.go's fakeKV (unexported there, so not
 // importable across the package boundary): per-path programmable
-// status/body, keyed on the literal request path (a LIST under "LIST "; a level's
-// metadata read has a trailing slash), plus a recorder for PUT sys/leases/revoke calls.
+// status/body, keyed on the literal request path (a LIST under "LIST "; a level
+// entry's metadata read has none), plus a recorder for PUT sys/leases/revoke calls.
 
 import (
 	"encoding/json"
@@ -118,8 +118,8 @@ func derefBody(fields map[string]interface{}, leaseID string) string {
 	return string(b)
 }
 
-// levelMetaBody is a level-metadata read: GET on a metadata path with a
-// trailing slash.
+// levelMetaBody is a level-entry read: GET on a metadata path (no
+// trailing slash).
 func levelMetaBody(custom map[string]string) string {
 	b, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"custom_metadata": custom}})
 	return string(b)

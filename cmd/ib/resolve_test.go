@@ -106,9 +106,9 @@ func TestResolve_ExplicitEnvWalk(t *testing.T) {
 
 func discoveryVault() *fakeVault {
 	fv := newFakeVault()
-	fv.setList(rtMeta, "shared", "prod/", "staging/")
-	fv.set("/v1/"+rtMeta+"prod/", 200, levelMetaBody(map[string]string{"branches": "main"}))
-	fv.set("/v1/"+rtMeta+"staging/", 200, levelMetaBody(map[string]string{"branches": "release/*"}))
+	fv.setList(rtMeta, "shared", "prod", "prod/", "staging")
+	fv.set("/v1/"+rtMeta+"prod", 200, levelMetaBody(map[string]string{"branches": "main"}))
+	fv.set("/v1/"+rtMeta+"staging", 200, levelMetaBody(map[string]string{"branches": "release/*"}))
 	fv.set("/v1/"+rtData+"shared", 200, kv(val("sv")))
 	fv.setList(rtMeta+"prod/", "p")
 	fv.set("/v1/"+rtData+"prod/p", 200, kv(val("pv")))
@@ -164,7 +164,7 @@ func TestResolve_NoClaimantIsRepoLevelOnly(t *testing.T) {
 func TestResolve_SeveralClaimantsExit4NamesThem(t *testing.T) {
 	fx := newIBFixture(t, nil)
 	fv := discoveryVault()
-	fv.set("/v1/"+rtMeta+"staging/", 200, levelMetaBody(map[string]string{"branches": "main"}))
+	fv.set("/v1/"+rtMeta+"staging", 200, levelMetaBody(map[string]string{"branches": "main"}))
 	o := newTestVault(t, fv).opts(t, fx, io.Discard)
 	o.Env = ""
 	_, _, _, err := resolve(context.Background(), o)

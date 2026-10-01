@@ -84,7 +84,7 @@ func TestRenderPoliciesSpecExample(t *testing.T) {
 	wantProject := []string{
 		`path "vs/data/pipelines/` + m("org") + `/` + m("repo") + `/+" { capabilities = ["read"] }`,
 		`path "vs/metadata/pipelines/` + m("org") + `/` + m("repo") + `/" { capabilities = ["list"] }`,
-		`path "vs/metadata/pipelines/` + m("org") + `/` + m("repo") + `/+/" { capabilities = ["read"] }`,
+		`path "vs/metadata/pipelines/` + m("org") + `/` + m("repo") + `/+" { capabilities = ["read"] }`,
 	}
 	assertStanzas(t, "project", project, wantProject)
 

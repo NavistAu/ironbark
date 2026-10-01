@@ -52,11 +52,12 @@ const rp = "vs/metadata/pipelines/acme/mono/"
 
 func TestDiscover(t *testing.T) {
 	f := &fake{
-		lists: map[string][]string{rp: {"db", "prod/", "staging/", "Bad/"}},
+		lists: map[string][]string{rp: {"db", "prod", "prod/", "staging", "Bad"}},
 		md: map[string]map[string]string{
-			rp + "prod/":    {"branches": "main"},
-			rp + "staging/": {"branches": "release/*,staging"},
-			rp + "Bad/":     {"branches": "main"},
+			rp + "db":      {"owner": "x"},
+			rp + "prod":    {"branches": "main"},
+			rp + "staging": {"branches": "release/*,staging"},
+			rp + "Bad":     {"branches": "main"},
 		},
 	}
 	cases := []struct {
@@ -76,16 +77,13 @@ func TestDiscover(t *testing.T) {
 		if !reflect.DeepEqual(d.Claimants, tc.want) {
 			t.Errorf("branch %q: claimants %v, want %v", tc.branch, d.Claimants, tc.want)
 		}
-		if !reflect.DeepEqual(d.OutsideGrammar, []string{"Bad"}) {
-			t.Errorf("outside grammar = %v", d.OutsideGrammar)
-		}
 	}
 }
 
 func TestDiscoverTwoClaimants(t *testing.T) {
 	f := &fake{
-		lists: map[string][]string{rp: {"a/", "b/"}},
-		md:    map[string]map[string]string{rp + "a/": {"branches": "main"}, rp + "b/": {"branches": "m*"}},
+		lists: map[string][]string{rp: {"a", "b"}},
+		md:    map[string]map[string]string{rp + "a": {"branches": "main"}, rp + "b": {"branches": "m*"}},
 	}
 	d, err := Discover(context.Background(), f, tmpl(t), "acme", "mono", "main")
 	if err != nil || !reflect.DeepEqual(d.Claimants, []string{"a", "b"}) {
@@ -102,9 +100,9 @@ func TestDiscoverNoRepoLevelIsNoEnvironments(t *testing.T) {
 
 func TestDiscoverHiddenLevelIsAnError(t *testing.T) {
 	f := &fake{
-		lists: map[string][]string{rp: {"a/", "b/"}},
-		md:    map[string]map[string]string{rp + "a/": {"branches": "main"}},
-		deny:  map[string]bool{rp + "b/": true},
+		lists: map[string][]string{rp: {"a", "b"}},
+		md:    map[string]map[string]string{rp + "a": {"branches": "main"}},
+		deny:  map[string]bool{rp + "b": true},
 	}
 	if _, err := Discover(context.Background(), f, tmpl(t), "acme", "mono", "main"); err == nil || !errors.Is(err, vaultx.ErrForbidden) {
 		t.Fatalf("err = %v", err)
@@ -116,7 +114,18 @@ func TestDiscoverHiddenLevelIsAnError(t *testing.T) {
 }
 
 func TestDiscoverLevelWithoutMetadataNeverClaims(t *testing.T) {
-	f := &fake{lists: map[string][]string{rp: {"dev/"}}}
+	f := &fake{lists: map[string][]string{rp: {"dev", "dev/"}}}
+	d, err := Discover(context.Background(), f, tmpl(t), "acme", "mono", "main")
+	if err != nil || len(d.Claimants) != 0 {
+		t.Fatalf("d = %+v, err %v", d, err)
+	}
+}
+
+func TestDiscoverReadsOnlyGrammarEntries(t *testing.T) {
+	f := &fake{
+		lists: map[string][]string{rp: {"Bad", "prod/"}},
+		deny:  map[string]bool{rp + "Bad": true, rp + "prod/": true},
+	}
 	d, err := Discover(context.Background(), f, tmpl(t), "acme", "mono", "main")
 	if err != nil || len(d.Claimants) != 0 {
 		t.Fatalf("d = %+v, err %v", d, err)

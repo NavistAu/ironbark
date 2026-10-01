@@ -323,3 +323,20 @@ func TestWalkBrokenViewNamesEntry(t *testing.T) {
 		t.Fatalf("list error: err = %v", err)
 	}
 }
+
+func TestWalkSkipsEnvironmentLevelEntries(t *testing.T) {
+	f := &tree{
+		lists: map[string]any{"m/r/": []string{"a", "prod", "prod/"}},
+		reads: map[string]any{
+			"d/r/a":    kv(map[string]any{"value": "A"}, nil),
+			"d/r/prod": kv(map[string]any{"value": "NOT A SECRET"}, map[string]string{"branches": "main"}),
+		},
+	}
+	r, err := Walk(context.Background(), f, lvls()[:1], Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := byName(r); len(g) != 1 || g["a"].Value != "A" {
+		t.Fatalf("secrets = %+v", r.Secrets)
+	}
+}

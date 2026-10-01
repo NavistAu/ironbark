@@ -28,7 +28,7 @@ type Secret struct {
 }
 
 // newReq is api.NewRequest that keeps a trailing slash: the client cleans the
-// path, but level metadata is addressed by the slash (design §8.1).
+// path, but a LIST is addressed by the slash.
 func (c *Conn) newReq(method, path string) *api.Request {
 	req := c.api.NewRequest(method, "/v1/"+path)
 	if strings.HasSuffix(path, "/") && !strings.HasSuffix(req.URL.Path, "/") {
@@ -89,9 +89,10 @@ func (c *Conn) List(ctx context.Context, token, path string) ([]string, error) {
 	return parsed.Data.Keys, nil
 }
 
-// ReadLevelMetadata reads a level's own custom_metadata: GET on its metadata
-// path with a trailing slash (design §8.1). 200 gives the map; 404 means the
-// level has none (found=false, no error); 403 or anything else is an error.
+// ReadLevelMetadata reads an entry's custom_metadata: GET on its metadata
+// path, no trailing slash (design §8.1). An environment level is such an
+// entry beside its folder. 200 gives the map; 404 means there is no entry
+// (found=false, no error); 403 or anything else is an error.
 func (c *Conn) ReadLevelMetadata(ctx context.Context, token, path string) (md map[string]string, found bool, err error) {
 	req := c.newReq(http.MethodGet, path)
 	req.ClientToken = token

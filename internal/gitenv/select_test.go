@@ -52,11 +52,11 @@ func tmpl(t *testing.T) grantcfg.Template {
 
 func envs() *fake {
 	return &fake{
-		lists: map[string][]string{rp: {"db", "prod/", "staging/", "dev/"}},
+		lists: map[string][]string{rp: {"db", "prod", "staging", "dev"}},
 		md: map[string]map[string]string{
-			rp + "prod/":    {"branches": "main"},
-			rp + "staging/": {"branches": "release/*"},
-			rp + "dev/":     {"branches": "main,feat/*"},
+			rp + "prod":    {"branches": "main"},
+			rp + "staging": {"branches": "release/*"},
+			rp + "dev":     {"branches": "main,feat/*"},
 		},
 	}
 }
@@ -116,7 +116,7 @@ func TestSelectSeveralClaimantsNamedInError(t *testing.T) {
 
 func TestSelectUnreadableLevelIsAnError(t *testing.T) {
 	c := envs()
-	c.deny = map[string]bool{rp + "prod/": true}
+	c.deny = map[string]bool{rp + "prod": true}
 	_, err := sel(t, c, SelectInput{Branch: "release/1"})
 	if !errors.Is(err, vaultx.ErrForbidden) {
 		t.Fatalf("err = %v, want the 403 (a hidden claimant must not let another level win)", err)

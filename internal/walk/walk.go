@@ -113,6 +113,9 @@ func Walk(ctx context.Context, c Client, lv []levels.Level, opt Options) (Result
 			if _, ok := v.meta[ignoredEventsKey]; ok {
 				res.IgnoredEvents = append(res.IgnoredEvents, entry)
 			}
+			if _, ok := v.meta[BranchesKey]; ok {
+				continue // an environment level entry, not a secret
+			}
 			pins := splitPins(v.meta[pinsKey])
 
 			put := func(name, value string) {

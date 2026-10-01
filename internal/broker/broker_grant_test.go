@@ -282,9 +282,9 @@ func TestTeamLookupFailsClosed(t *testing.T) {
 func TestDiscovery_OneClaimantRevokesBeforeEnvLogin(t *testing.T) {
 	r := newRig(t, "")
 	ci := r.v.sessionFor("tok-ci")
-	ci.lists[repoMeta] = []string{"prod/", "dev/"}
-	ci.md[repoMeta+"prod/"] = map[string]string{"branches": "main"}
-	ci.md[repoMeta+"dev/"] = map[string]string{"branches": "dev"}
+	ci.lists[repoMeta] = []string{"prod", "dev"}
+	ci.md[repoMeta+"prod"] = map[string]string{"branches": "main"}
+	ci.md[repoMeta+"dev"] = map[string]string{"branches": "dev"}
 	r.tree("tok-ci-prod", repoMeta+"prod/", repoData+"prod/", "db", "FAKE")
 	res := r.b.Handle(context.Background(), payload(payloadOpts{branch: "main", sender: "alice"}))
 	if res.Outcome != status.OK || res.Audit.Env != "prod" || res.Audit.EnvSource != "branch" || !res.Audit.DiscoveryLogin {
@@ -310,8 +310,8 @@ func TestDiscovery_OneClaimantRevokesBeforeEnvLogin(t *testing.T) {
 func TestDiscovery_NoClaimantKeepsDiscoveryToken(t *testing.T) {
 	r := newRig(t, "")
 	ci := r.v.sessionFor("tok-ci")
-	ci.lists[repoMeta] = []string{"prod/", "shared"}
-	ci.md[repoMeta+"prod/"] = map[string]string{"branches": "main"}
+	ci.lists[repoMeta] = []string{"prod", "shared"}
+	ci.md[repoMeta+"prod"] = map[string]string{"branches": "main"}
 	ci.reads[repoData+"shared"] = kvEntry("S")
 	res := r.b.Handle(context.Background(), payload(payloadOpts{branch: "feature", sender: "alice"}))
 	if res.Outcome != status.OK || res.Audit.Env != "" {
@@ -333,9 +333,9 @@ func TestDiscovery_NoClaimantKeepsDiscoveryToken(t *testing.T) {
 func TestDiscovery_TwoClaimantsConfigError(t *testing.T) {
 	r := newRig(t, "")
 	ci := r.v.sessionFor("tok-ci")
-	ci.lists[repoMeta] = []string{"prod/", "beta/"}
-	ci.md[repoMeta+"prod/"] = map[string]string{"branches": "main"}
-	ci.md[repoMeta+"beta/"] = map[string]string{"branches": "m*"}
+	ci.lists[repoMeta] = []string{"prod", "beta"}
+	ci.md[repoMeta+"prod"] = map[string]string{"branches": "main"}
+	ci.md[repoMeta+"beta"] = map[string]string{"branches": "m*"}
 	res := r.b.Handle(context.Background(), payload(payloadOpts{branch: "main"}))
 	if res.Outcome != status.ConfigError || !onlyStatus(res) || !r.v.revoked("tok-ci") {
 		t.Fatalf("res = %+v calls=%v", res, r.v.calls)
@@ -348,8 +348,8 @@ func TestDiscovery_TwoClaimantsConfigError(t *testing.T) {
 func TestDiscovery_MetadataUnreadableIsErrorAndRevokes(t *testing.T) {
 	r := newRig(t, "")
 	ci := r.v.sessionFor("tok-ci")
-	ci.lists[repoMeta] = []string{"prod/"}
-	ci.errs["md:"+repoMeta+"prod/"] = errors.New("boom 500")
+	ci.lists[repoMeta] = []string{"prod"}
+	ci.errs["md:"+repoMeta+"prod"] = errors.New("boom 500")
 	res := r.b.Handle(context.Background(), payload(payloadOpts{branch: "main"}))
 	if res.Outcome != status.Error || !onlyStatus(res) || !r.v.revoked("tok-ci") || res.Err == nil {
 		t.Fatalf("res = %+v", res)

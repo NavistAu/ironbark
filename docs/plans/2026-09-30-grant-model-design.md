@@ -86,13 +86,14 @@ Nested targets inherit: the target `web/api` walks `prod/web/` and then
 `prod/web/api/`.
 
 **An environment is a named level under the repo.** Its name is free (it
-need not match a branch). The level's own metadata says which branches it
-serves:
+need not match a branch). An entry named like the level, beside the level's
+folder, says which branches it serves:
 
 ```
-vs/data/pipelines/acme/mono/prod/        level metadata: branches = main
+vs/data/pipelines/acme/mono/prod         entry, custom_metadata: branches = main
+vs/data/pipelines/acme/mono/prod/        the environment's secrets
 vs/data/pipelines/acme/mono/prod/web/
-vs/data/pipelines/acme/mono/staging/     level metadata: branches = staging
+vs/data/pipelines/acme/mono/staging      entry, custom_metadata: branches = staging
 ```
 
 That one declaration is the whole branch-to-environment mapping: no alias
@@ -107,9 +108,9 @@ metadata (`vault_token`, §8.5). §16 lists the voidstar changes this needs.
 
 ironbark does not require voidstar. A plain KV v2 mount works, with less:
 entries carry pins in their own `custom_metadata`, an empty entry named
-`vault_token` is the token marker, there is no level metadata (so
-environments are selected by `DEPLOY_ENV` only) and there are no dynamic
-pointers.
+`vault_token` is the token marker, an empty entry named like the level
+carries `branches` (environment discovery works the same way), and there
+are no dynamic pointers.
 
 ### 3.2 Levels and gates
 
@@ -270,10 +271,13 @@ First match wins:
    `pipeline.variables` (`manual`, `cron`, and a `deployment`'s inherited
    parent variables). It names the environment level directly. This is an
    **explicit** selection (`env_source=variable`).
-2. The verified branch, by **level metadata**: when `branch_protected` is
-   `"true"`, ironbark lists the directories under the repo level and reads
-   each one's level metadata (§8.1). The environment is the level whose
-   `branches` matches the branch (`env_source=branch`, matching below).
+2. The verified branch, by **level entry**: when `branch_protected` is
+   `"true"`, ironbark lists the repo level and, for each entry without a
+   trailing slash whose name is in the environment grammar, reads its
+   `custom_metadata` (§8.1). An entry carrying `branches` is an environment
+   level, and the environment is the one whose `branches` matches the branch
+   (`env_source=branch`, matching below). A level with no secrets yet is
+   still found, because its entry exists.
    - No level claims the branch: no environment, the repo level only. Not an
      error; most branches are not environments.
    - Two or more levels claim it: a configuration error. ironbark returns
@@ -291,7 +295,7 @@ so a nested family needs one pattern per depth (`release/*,release/*/*`).
 Git refuses `*`, `?`, `[` and `\` in branch names, so no branch name ever
 needs escaping. A comma is legal in a Git branch name but is the list
 separator here, so a branch whose name contains `,` cannot be claimed by
-level metadata; it can still be selected with `DEPLOY_ENV`.
+level entry; it can still be selected with `DEPLOY_ENV`.
 
 Matching is done on the verified branch name exactly as the forge spells it,
 without `refs/heads/`, bytewise: never case-folded, never normalised
@@ -605,10 +609,10 @@ Notes:
 ### 6.3 Templated policies, one per level kind
 
 ```hcl
-# ci-project: the repo level, plus level metadata for discovery (§4.5)
+# ci-project: the repo level, plus level entries for discovery (§4.5)
 path "vs/data/pipelines/M(org)/M(repo)/+"      { capabilities = ["read"] }
 path "vs/metadata/pipelines/M(org)/M(repo)/"   { capabilities = ["list"] }
-path "vs/metadata/pipelines/M(org)/M(repo)/+/" { capabilities = ["read"] }
+path "vs/metadata/pipelines/M(org)/M(repo)/+"  { capabilities = ["read"] }
 
 # ci-env
 path "vs/data/pipelines/M(org)/M(repo)/M(env)/+"    { capabilities = ["read"] }
@@ -784,12 +788,14 @@ vs/data/pipelines/acme/mono/prod/web/api/     target, depth 2
 
 A level whose placeholder value is absent ends the list.
 
-**Level metadata** is read as `GET` on a level's metadata path with a
-trailing slash (`vs/metadata/pipelines/acme/mono/prod/`), which voidstar
-answers with the prefix's own `custom_metadata` (§16). 404 means the level
-has none. Only environment discovery (§4.5) reads it, and only for the
-directories directly under the repo level. Every directory there is an
-environment level.
+**Level entries** are read as `GET` on the entry's metadata path, no
+trailing slash (`vs/metadata/pipelines/acme/mono/prod`), the same call on
+voidstar and plain KV v2. The answer's `custom_metadata` carries `branches`
+for an environment level; 404 means no such entry. Only environment
+discovery (§4.5) reads them, and only for entries directly under the repo
+level with a name in the environment grammar (`^[a-z0-9][a-z0-9_-]{0,62}$`).
+An entry carrying `branches` is an environment level, not a secret: the walk
+(§8.2) skips it wherever it meets one, so it is never delivered.
 
 ### 8.2 Algorithm
 
@@ -885,8 +891,7 @@ where the whole policy union is acceptable to hand to that plugin.
 3. Select the target (§4.6) and, if `DEPLOY_ENV` is set, the environment.
    An invalid explicit selector → status only.
 4. No explicit environment, protected branch, and a backend with level
-   metadata (plain KV v2 has none, §3.1: skip to 5): discovery login to
-   `ci`, read level metadata (§4.5). No claimant → keep this token, go to 7. Two
+   level entries: discovery login to `ci`, read the level entries (§4.5). No claimant → keep this token, go to 7. Two
    claimants → revoke, status only. One claimant → revoke, go on.
 5. With an environment and an actor: the team lookup (§4.4), bounded and
    fail-closed.
@@ -1080,7 +1085,7 @@ caller's and are revoked after `ib run` as today):
 Access is the caller's own policies. The templated CI policies key on JWT
 alias metadata and do nothing for a human token. People get static
 policies (for example `read` on `vs/data/pipelines/acme/+/staging/*`, plus
-`read` on `vs/metadata/pipelines/acme/+/+/` for level metadata). Personal
+`read` on `vs/metadata/pipelines/acme/+/+` for the level entries). Personal
 policies are the gate.
 
 ### 12.3 Masking
@@ -1173,11 +1178,11 @@ If they disagree, the
   lowercase (§7).
 - **Batch tokens are refused at login** (§5.5 assertions): they cannot be
   revoked, and revocation is how the lease and the pipeline end together.
-- **A plain KV v2 tree gets less**: no environment discovery (explicit
-  `DEPLOY_ENV` only) and no dynamic pointers (§3.1).
-- **voidstar dependency.** Image pins on views, dynamic pointers,
-  `vault_token` on views and environment discovery all need the voidstar
-  changes in §16. Until they ship, only the plain-KV subset works.
+- **A plain KV v2 tree gets less**: no dynamic pointers (§3.1). Environment
+  discovery works the same on both backends.
+- **voidstar dependency.** Image pins on views, dynamic pointers and
+  `vault_token` on views need the voidstar changes in §16. Until they ship,
+  only the plain-KV subset works.
 - **ironbark's signing key is the CI secret estate.** Whoever holds it can
   sign any claims and log in to any role. This is the same bound as today's
   token-create capability, and every login is audited with its claims.
@@ -1277,10 +1282,11 @@ turn out to need.
 3. **Metadata-only mappings.** A mapping with no target. It lists like any
    view, reads as empty data plus its `custom_metadata`, and exists to carry
    metadata (the `vault_token` marker, §8.5).
-4. **Metadata on a level.** `custom_metadata` attached to a path prefix,
-   set by IaC and returned by `GET <mount>/metadata/<prefix>/` (trailing
-   slash; 404 when none). `LIST` is unaffected. ironbark reads `branches`
-   from it (§4.5).
+4. **Environment levels need no new feature.** A level's metadata is a
+   metadata-only mapping (item 3) named like the level, beside the level's
+   folder: mapping `a/prod` and mappings under `a/prod/` coexist, and `LIST a/`
+   returns both `prod` and `prod/`. ironbark reads `branches` from the entry
+   (§4.5). A level with no secrets yet is still listed.
 
 5. **Reject unknown fields, then support `custom_metadata`.** Today a
    mapping write (`admin/map/<view>`) accepts only `target` and `adapter`,

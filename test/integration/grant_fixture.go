@@ -6,7 +6,7 @@ package integration
 // voidstar plugin (mount vs/), KV v2 (kv/), the database engine on the compose
 // Postgres, a jwt auth mount trusting a keypair generated at test start, the
 // three level policies from levels.RenderPolicies, and helpers to write roles,
-// views, level metadata, groups and database roles. Everything is fake data on
+// views, level entries, groups and database roles. Everything is fake data on
 // a throwaway container.
 
 import (
@@ -198,10 +198,17 @@ func (g *Grant) View(t *testing.T, view string, m map[string]any) {
 	g.Write(t, "vs/admin/map/"+view, m)
 }
 
-// Level writes level metadata (admin/level/<prefix>).
+// Level makes prefix an environment level (ruling 8a): an entry named like the
+// level, beside the level's folder, carrying custom_metadata. On voidstar it is
+// a metadata-only mapping; on plain KV an empty entry with custom_metadata.
 func (g *Grant) Level(t *testing.T, prefix string, md map[string]string) {
 	t.Helper()
-	g.Write(t, "vs/admin/level/"+prefix, map[string]any{"custom_metadata": md})
+	if g.Mount == "kv" {
+		g.Write(t, "kv/data/"+prefix, map[string]any{"data": map[string]any{}})
+		g.Write(t, "kv/metadata/"+prefix, map[string]any{"custom_metadata": md})
+		return
+	}
+	g.Write(t, "vs/admin/map/"+prefix, map[string]any{"mode": "metadata", "custom_metadata": md})
 }
 
 // Group creates an external group carrying policies, with one alias name on

@@ -76,7 +76,7 @@ func ibRepo(t *testing.T, org, repo, branch string) string {
 }
 
 // humanToken is a token under a static personal policy for one repo: read on
-// the repo level and on env's whole subtree, level metadata under the repo
+// the repo level and on env's whole subtree, level entries under the repo
 // (env's own rule must carry "read" too: the most specific path wins, and the
 // subtree glob would otherwise shadow the `+/` read),
 // the env's dynamic role, and lease revocation. Nothing else.
@@ -92,7 +92,7 @@ path "database/creds/%[3]s"                 { capabilities = ["read"] }
 path "sys/leases/revoke"                    { capabilities = ["update"] }
 `, base, env, dbRole)
 	if levelMetadata {
-		pol += fmt.Sprintf("path \"vs/metadata/pipelines/%s/+/\" { capabilities = [\"read\"] }\n", base)
+		pol += fmt.Sprintf("path \"vs/metadata/pipelines/%s/+\" { capabilities = [\"read\"] }\n", base)
 	}
 	name := "ib-human-" + repo
 	if err := g.Root.Sys().PutPolicy(name, pol); err != nil {

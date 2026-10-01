@@ -458,7 +458,7 @@ identical (`target` is the joined path, so it covers `t1`…`t8`). Actor,
 event and branch are checked at login (`bound_claims`) and are not
 persisted, so they stay out of the hash. This bounds entity growth by the
 number of distinct `(repo, env, target, team-set)` tuples, not by pipelines
-(§14, §20).
+(§14, §19).
 
 ### 5.5 Login and token contract
 
@@ -1145,7 +1145,7 @@ If they disagree, the
   verified branch and no variables.
 - **Entity build-up.** Each distinct `sub` leaves an entity and an alias
   that OpenBao never removes. Growth is bounded by distinct
-  `(repo, env, target, team-set)` tuples. Clean-up is out of scope (§20).
+  `(repo, env, target, team-set)` tuples. Clean-up is out of scope (§19).
 - **Repo pins are IaC data.** A pinned repo that is renamed or recreated
   cannot log in until its `repo_key` entry (and its data path) is updated.
   An `org/repo#*` entry is not pinned, by choice.
@@ -1286,7 +1286,7 @@ Resolved by the operator's rulings and folded in above: refused login
 level metadata, §4.5), one role per run (§5.5), overrides (documented, no
 lint or logging, §8.2), image and event pins (§6.2, §8.4), `vault_token`
 (§8.5), repo rename (§6.2), target inheritance (§4.6), entity clean-up
-(§20), `changed_files` (removed, §4.6), the discovery login (two logins on
+(§19), `changed_files` (removed, §4.6), the discovery login (two logins on
 a push, §4.5), two claimants (no secrets, status only, §4.5), invalid
 explicit target (no secrets, status only, §4.6) and the `branches` syntax
 (globs, exact names being the plain case, §4.5). Group-alias case
@@ -1474,57 +1474,7 @@ Each case asserts less or nothing, never more, and always an
 | group alias deleted mid-run | gated level skipped on the next login |
 | hostile values (`/`, `*`, `+`, uppercase) in branch, target, actor, team; a `.` or `..` target segment | escaped, no ACL failure, nothing extra; the dot segment is refused (`invalid`) |
 
-## 19. Proposed decisions
-
-Not recorded. Each would become one entry if accepted.
-
-1. **Levels by value, gates by access.** Data is layered repo → env →
-   target segments. Team, actor, event and protected branch are OpenBao
-   conditions, never path levels.
-2. **ironbark signs facts; OpenBao decides.** Stock JWT auth, one role per
-   environment level with `bound_claims` as the branch strategy, templated
-   policies per level kind, teams as external groups via `groups_claim`.
-   No plugin. No AppRole: the signing key is ironbark's only credential.
-3. **Branch verification = forge `protected` AND `ref == refs/heads/<branch>`.**
-4. **Selectors never entitle.** Env and target come from variables, the
-   promote field, a trailer or level metadata. OpenBao refuses what the
-   facts do not allow.
-5. **Environments are named levels whose metadata lists the branches they
-   serve**, as exact names or globs (`release/*`). `DEPLOY_ENV` names a
-   level directly; an unclaimed branch gets the repo level; two claimants
-   are a configuration error.
-6. **Target cascade:** manual variable, promote `deploy_to`, `Deploy-To:`
-   trailer, none. No `changed_files`. One target per pipeline; each segment
-   is a level, so nested targets inherit.
-7. **ironbark never fails a pipeline.** A refused login returns no secrets,
-   never a fallback; `ironbark_status` is always returned and the job
-   decides. Woodpecker's compile error on a missing `from_secret` is an
-   accepted platform limit.
-8. **One login role per run**, rendered by `IRONBARK_JWT_ROLE`; no retry.
-9. **`sub` = hash of every claim that feeds metadata or groups.**
-10. **Deepest level wins; overrides are documented behaviour, not logged or
-    linted.**
-11. **Repo pins by `repo_key` in role `bound_claims`**, one entry per repo,
-    never a wide glob. **Event pins by role.** **Image pins on the voidstar
-    mapping.**
-12. **Dynamic credentials by resolve-don't-fetch mappings**, read with the
-    pipeline's token. `$ref` removed.
-13. **`vault_token` only where a metadata-only mapping declares it**, with
-    its image pins.
-14. **Four grant settings.** `IRONBARK_DATA_PATH`
-    (`vs/data/<estate>/{repo}/{env}/{target...}`), `IRONBARK_ENV_VAR`,
-    `IRONBARK_TARGET_VAR`, `IRONBARK_JWT_ROLE`, shared by `ib` through
-    `~/.config/ib/config` (env wins).
-15. **`ib` walks the same levels with the caller's login, masks every
-    value with no length threshold, and checks no names.**
-16. **Removed:** KV tier tree, attribute mount, per-tier policy names, dot
-    directives, `ironbark_events`, `$ref`, the token-store mint and canary.
-17. **Migration by per-repo extension endpoint.** Two deployments side by
-    side, no dual-mode code.
-18. **Acceptance:** the end-to-end acceptance lab applies its own fixtures, and
-    failure modes run on an ephemeral docker stack.
-
-## 20. Roadmap (someday)
+## 19. Roadmap (someday)
 
 Not planned; recorded so they are not rediscovered.
 

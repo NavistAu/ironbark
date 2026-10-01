@@ -437,7 +437,10 @@ mirrored: the role glob is the gate and may be looser than the selector, so
 an explicit `DEPLOY_ENV` from `release/1/rc` can pass a `release%2f*` role
 that no level claims by branch. A role that must stay narrow lists exact
 escaped names, or one glob per depth it accepts, and the IaC that writes
-both from one declaration (§14) states which. `repo_key` is built from escaped parts, so
+both from one declaration (§14) states which.
+
+`target` in `ironbark_status` and in the audit line is written in the escaped
+form, the same string as the `target` claim. `repo_key` is built from escaped parts, so
 its `/` and `#` are always the separators.
 
 ### 5.4 `sub` derivation
@@ -734,7 +737,9 @@ vs/data/pipelines/acme/mono/staging/web/aws   resolve -> aws/creds/staging-web
 
 The engine path is **named by convention** after the levels, so a templated
 policy grants it and a mapping can only reach what the pipeline could read
-anyway:
+anyway. Engine role names refuse `%`, so an environment or target that needs
+dynamic credentials must use a plain name (`[a-z0-9._-]`, lowercase), which
+`esc()` leaves unchanged:
 
 ```hcl
 # ci-dynamic (attached next to ci-env / ci-target)
@@ -892,6 +897,11 @@ where the whole policy union is acceptable to hand to that plugin.
 8. Walk (§8), resolving mappings (§7).
 9. Respond `200` with the walk's secrets and `ironbark_status`.
 
+Woodpecker asks ironbark twice per pipeline: once at creation, without
+manual variables, and again at start. The two requests are separate runs of
+this sequence and each writes an audit line (§10). The later line is the one
+that counts.
+
 Every verified request gets a `200` carrying `ironbark_status`. `204` and
 `502` are gone. **Revocation by outcome** (SPEC §3.4) is restated: a
 response carrying only `ironbark_status` revokes any token the request
@@ -975,13 +985,18 @@ Two Woodpecker behaviours bound this:
 ## 10. Audit line
 
 The verified-request line (SPEC §8.1) becomes:
-`ts, org, repo, repo_key, event, branch, ref, branch_protected, actor, teams |
+`ts, org, repo, repo_key, event, pipeline, branch, ref, branch_protected, actor, teams |
 teams_error, env, env_source (variable|branch), env_claimants, env_invalid,
 env_refused, target, target_source (variable|deploy_to|trailer),
 target_invalid, discovery_login, role, sub, jti, levels (label ->
 read|skipped_403|skipped_404), secrets_returned (names), images_relayed
 (names), vault_token_issued, token_accessor, token_ttl, outcome` (the same
-`outcome` as `ironbark_status`). Payload
+`outcome` as `ironbark_status`). `target` is
+the escaped form, as in the claim (§5.3). `pipeline` is the pipeline number
+(also a JWT claim, §5.2). Woodpecker asks twice per pipeline (§9.1), so a
+pipeline has two lines; the later one counts. Woodpecker can reuse pipeline
+numbers, so joins to a pipeline use event + branch + time, not the number
+alone. Payload
 values that are not facts (variables other than the two selectors, message
 text) are never logged. The debug `payload attributes` line stays.
 
@@ -1153,6 +1168,11 @@ If they disagree, the
   login. Teams therefore travel only through `groups_claim` and gate only
   through groups. No policy can template on a team. `branches` is a
   comma-separated string.
+- **Dynamic credentials need plain names.** Engine role names refuse `%`, so
+  an environment or target with dynamic credentials must be `[a-z0-9._-]`,
+  lowercase (§7).
+- **Batch tokens are refused at login** (§5.5 assertions): they cannot be
+  revoked, and revocation is how the lease and the pipeline end together.
 - **A plain KV v2 tree gets less**: no environment discovery (explicit
   `DEPLOY_ENV` only) and no dynamic pointers (§3.1).
 - **voidstar dependency.** Image pins on views, dynamic pointers,

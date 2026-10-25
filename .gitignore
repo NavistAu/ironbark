@@ -1,5 +1,8 @@
 # Go build output
 /ironbark
+/ib
+/cmd/ib/ib
+/cmd/ironbark/ironbark
 /dist/
 *.exe
 *.test

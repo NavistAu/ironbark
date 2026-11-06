@@ -1,6 +1,6 @@
 // Package walk implements the read side of the grant model: environment
 // discovery from level entries (design §4.5) and the §8.2 walk. It reads
-// through a small Client so ironbark and ib share it.
+// through a small Client bound to one token.
 package walk
 
 import (

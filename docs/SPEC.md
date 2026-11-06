@@ -486,8 +486,7 @@ results are informational.
 environment, manual and promote with targets, `resolve`, PR and tag
 (repo level only), an explicit environment refused from an unprotected
 branch, invalid selectors, two claimants, status-only revocation, the audit
-line carrying the design §10 fields and no values. `TestIBGrant` does the
-same for `ib`. Run in CI.
+line carrying the design §10 fields and no values. Run in CI.
 
 ## 10. Implementation shape (Go)
 

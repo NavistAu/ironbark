@@ -76,12 +76,11 @@ Known sharp edges, indexed so you hit them here first, not in production:
 
 ## Status
 
-M1 (the broker) and M3 (`ib`, the local client) are implemented: a Go
-service (`cmd/ironbark` + `internal/…`) and a CLI (`cmd/ib`), both
+M1 (the broker) is implemented: a Go
+service (`cmd/ironbark` + `internal/…`),
 unit-tested and integration-tested against OpenBao 2.7.0 with the voidstar
 plugin (Vault 1.20 over plain KV v2 is informational). See [`docs/SPEC.md`](docs/SPEC.md) for the
 broker's normative interface/behavior spec,
-[`docs/CLIENT-SPEC.md`](docs/CLIENT-SPEC.md) for `ib`'s,
 [`docs/DESIGN.md`](docs/DESIGN.md) for architecture and threat model, and
 the decision log in [`docs/decisionlog/`](docs/decisionlog/). Still future:
 the M2 Terraform module and `ironbark doctor` — onboarding a repo today
@@ -98,54 +97,6 @@ docker pull ghcr.io/navistau/ironbark
 ```sh
 go install github.com/navistau/ironbark/cmd/ironbark@latest
 ```
-
-## `ib`: the local client
-
-`ib` gives a local run — your shell, an agent, a script — the secrets a
-CI run on the same repo and branch would select, read from the same secret
-tree the broker walks. It logs in to nothing and holds no credential of its
-own: every read is made with your own Vault/OpenBao token, the one `ib
-auth` (or `vault login`/`bao login` directly) already left at
-`~/.vault-token`. Full behavior: [`docs/CLIENT-SPEC.md`](docs/CLIENT-SPEC.md).
-
-```sh
-go install github.com/navistau/ironbark/cmd/ib@latest
-```
-
-Four commands:
-
-- `ib auth [args…]` — sugar over `bao login`/`vault login` (whichever CLI is
-  on `PATH`, `bao` preferred); the token lands wherever that CLI's own token
-  helper puts it.
-- `ib get <name>` — one secret's value to stdout.
-- `ib env` — every secret as `SECRET_<NAME>='<value>'` lines (break-glass —
-  values land on disk if you redirect this to a file; `ib run` below is the
-  normal path).
-- `ib run -- <cmd> [args…]` — runs `<cmd>` with every secret set as
-  `SECRET_<NAME>`, masking the values in its stdout/stderr; the way to use
-  secrets without them touching disk. `--env-file <file>` instead sets only
-  the `ironbark://<name>` references in that file (a subset, or your own
-  variable names).
-
-Example env file, for `ib run --env-file`:
-
-```
-API_TOKEN=ironbark://api_token
-DB_PASSWORD=ironbark://db_password
-DEBUG=true
-```
-
-`ironbark://<name>` is replaced by that secret's value from the walk; any
-other value (like `DEBUG=true` above) passes through unchanged.
-
-**Security note:** `ib` reads exactly what your own Vault/OpenBao token can
-read — since it never logs in as a pipeline, your policy is the only
-bound on what comes back. The role `bound_claims` (branch protection,
-`repo_key`, event) and `ironbark_images` pins (SPEC §4.6) are CI-only
-divergences: `ib` has no forge-verified request to bind and ignores image
-pins (there's no step image locally). If you rely on either as hardening,
-treat `ib` access as bypassing it — see
-[CLIENT-SPEC.md §6](docs/CLIENT-SPEC.md#6-security-model).
 
 ## Why not just…
 

@@ -388,57 +388,8 @@ Terraform/OpenTofu module (policies, KV skeleton, pointer entries,
 `.identity` binding) shipping in this repo; `ironbark doctor` read-only
 convention lint (separate admin-ish credential at invocation).
 
-**M3 — the local client (`ib`)** ([CLIENT-SPEC.md](CLIENT-SPEC.md)). **Status:
-implemented** — `cmd/ib`, unit-tested and integration-tested against both
-Vault and OpenBao (`test/integration`). A separate binary that gives an
-operator's or agent's local run the same secrets a CI run on the same branch
-gets. It
-shares the broker's sweep, deref and naming code (`internal/vaultx`) — one
-implementation, never a second copy.
-
-- `ib auth` — sugar over `bao login`, falling back to `vault login` when `bao`
-  is absent; the token lands in the CLI's own token helper, shared with it.
-- `ib get <name>` — one secret, resolved across tiers as the sweep does.
-- `ib env` — every secret as `SECRET_<NAME>=<value>` lines (break-glass;
-  values on disk).
-- `ib run -- <cmd>` — runs `<cmd>` with every secret as `SECRET_<NAME>`;
-  `--env-file <file>` sets only the `ironbark://<name>` refs in that file.
-
-Identity comes from the checkout, not flags: `<org>/<repo>` from the `origin`
-remote, event fixed as `push`. The caller's own token does every read — no
-mint, no signature verification — so the caller's policy bounds the result.
-
-Which branch's tiers to read is an *environment choice*, not access control:
-the local checkout is untrusted, and the caller's policy is the only bound.
-Tracked branches are the `push/<branch>/` tiers the caller can LIST.
-
-1. Direct match: the checked-out branch is tracked → use it.
-2. Otherwise walk: for each tracked B, count commits in `HEAD` not in
-   `origin/B` (from `git merge-base`); the lowest count wins.
-3. Tie → the branch's reflog: if its creation entry (`branch: Created from
-   <B>`) names one of the tied branches, use it. Local and editable — fine for
-   an environment choice, never for access.
-4. Tie still → the cascade: an ordered branch list; the first tied branch in
-   it wins. Built-in list, least to most production-like, so a wrong guess
-   lands on a lower environment: `dev`, `develop`, `development`, `test`,
-   `testing`, `qa`, `uat`, `stage`, `staging`, `preprod`, `trunk`, `main`,
-   `master`, `prod`, `production`, `live`. Exact names only, no patterns.
-   `release*` is deliberately absent — release branches are temporary
-   curation branches, not environments.
-5. Otherwise fail, listing the tied branches and asking for `--branch`.
-   Never guess.
-
-No common ancestor with any tracked branch → fail. `--branch` / `IB_BRANCH`
-overrides the choice. The choice is always printed to stderr. Before the walk,
-`git ls-remote origin` is compared with each `origin/B`; a difference warns
-(stale refs) but does not stop the run.
-
-Later: the cascade becomes configurable, replacing the built-in list — still
-the last tie-break before failing.
-
-Later, when needed: an in-repo config file (remote disambiguation, naming);
-nested map entries — the sweep descends subdirectories and joins the path into
-the secret name — landing in the shared code so broker and client move together.
+**M3 — the local client (`ib`)** was scrapped (operator ruling, 2026-11-06); the
+broker is the only consumer of the secret tree.
 
 ## 11. Decisions
 

@@ -490,8 +490,7 @@ line carrying the design §10 fields and no values. Run in CI.
 
 ## 10. Implementation shape (Go)
 
-- Module path: decided at publishing-home decision (DESIGN §13); build as
-  `ironbark` until then. Go ≥1.22, stdlib `net/http`.
+- Module path: `github.com/navistau/ironbark`. Go ≥1.22, stdlib `net/http`.
 - Dependencies (deliberately few): `github.com/yaronf/httpsign`,
   `github.com/hashicorp/vault/api` (client; works against OpenBao),
   `github.com/prometheus/client_golang`. Logging: stdlib `log/slog`.

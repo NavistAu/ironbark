@@ -54,7 +54,7 @@ func classify(err error, what string) error {
 func (c *Conn) Read(ctx context.Context, token, path string) (*Secret, error) {
 	req := c.newReq(http.MethodGet, path)
 	req.ClientToken = token
-	resp, err := c.api.RawRequestWithContext(ctx, req)
+	resp, err := c.api.RawRequestWithContext(ctx, req) //nolint:staticcheck // needs the raw response (403/404 per level); Logical() parses them away
 	if err != nil {
 		return nil, classify(err, "GET "+path)
 	}
@@ -73,7 +73,7 @@ func (c *Conn) Read(ctx context.Context, token, path string) (*Secret, error) {
 func (c *Conn) List(ctx context.Context, token, path string) ([]string, error) {
 	req := c.newReq("LIST", path)
 	req.ClientToken = token
-	resp, err := c.api.RawRequestWithContext(ctx, req)
+	resp, err := c.api.RawRequestWithContext(ctx, req) //nolint:staticcheck // needs the raw response (403/404 per level); Logical() parses them away
 	if err != nil {
 		return nil, classify(err, "LIST "+path)
 	}
@@ -96,7 +96,7 @@ func (c *Conn) List(ctx context.Context, token, path string) ([]string, error) {
 func (c *Conn) ReadLevelMetadata(ctx context.Context, token, path string) (md map[string]string, found bool, err error) {
 	req := c.newReq(http.MethodGet, path)
 	req.ClientToken = token
-	resp, err := c.api.RawRequestWithContext(ctx, req)
+	resp, err := c.api.RawRequestWithContext(ctx, req) //nolint:staticcheck // needs the raw response (403/404 per level); Logical() parses them away
 	if err != nil {
 		if e := classify(err, "GET "+path); errors.Is(e, ErrNotFound) {
 			return nil, false, nil

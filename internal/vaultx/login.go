@@ -67,7 +67,7 @@ func (c *Conn) LoginJWT(ctx context.Context, mount, role, jwt string) (Token, er
 	if err := req.SetJSONBody(map[string]string{"role": role, "jwt": jwt}); err != nil {
 		return Token{}, err
 	}
-	resp, err := c.api.RawRequestWithContext(ctx, req)
+	resp, err := c.api.RawRequestWithContext(ctx, req) //nolint:staticcheck // needs the raw response (status codes, token body); Logical() parses them away
 	if err != nil {
 		var re *api.ResponseError
 		if errors.As(err, &re) && re.StatusCode == http.StatusBadRequest {
@@ -121,7 +121,7 @@ func (c *Conn) LoginJWT(ctx context.Context, mount, role, jwt string) (Token, er
 func (c *Conn) explicitMaxTTL(ctx context.Context, token string) (int64, error) {
 	req := c.api.NewRequest(http.MethodGet, "/v1/auth/token/lookup-self")
 	req.ClientToken = token
-	resp, err := c.api.RawRequestWithContext(ctx, req)
+	resp, err := c.api.RawRequestWithContext(ctx, req) //nolint:staticcheck // needs the raw response (status codes, token body); Logical() parses them away
 	if err != nil {
 		return 0, err
 	}
@@ -143,7 +143,7 @@ func (c *Conn) explicitMaxTTL(ctx context.Context, token string) (int64, error) 
 func (c *Conn) RevokeSelf(ctx context.Context, token string) error {
 	req := c.api.NewRequest(http.MethodPost, "/v1/auth/token/revoke-self")
 	req.ClientToken = token
-	resp, err := c.api.RawRequestWithContext(ctx, req)
+	resp, err := c.api.RawRequestWithContext(ctx, req) //nolint:staticcheck // needs the raw response (status codes, token body); Logical() parses them away
 	if err != nil {
 		return fmt.Errorf("vaultx: revoke-self: %w", err)
 	}
@@ -162,7 +162,7 @@ func (c *Conn) Healthy(ctx context.Context) bool {
 	cl.SetMaxRetries(0)
 	req := cl.NewRequest(http.MethodGet, "/v1/sys/health")
 	req.Params.Set("standbyok", "true")
-	resp, err := cl.RawRequestWithContext(ctx, req)
+	resp, err := cl.RawRequestWithContext(ctx, req) //nolint:staticcheck // needs the raw response (status codes, token body); Logical() parses them away
 	if resp != nil {
 		defer resp.Body.Close()
 	}

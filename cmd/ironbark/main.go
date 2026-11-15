@@ -56,7 +56,7 @@ func run(args []string, getenv func(string) string, readFile func(string) ([]byt
 		case "render-policies":
 			return renderPolicies(args[1:], getenv, stdout, stderr)
 		default:
-			fmt.Fprintf(stderr, "ironbark: unknown subcommand %q (only render-policies)\n", args[0])
+			_, _ = fmt.Fprintf(stderr, "ironbark: unknown subcommand %q (only render-policies)\n", args[0])
 			return 2
 		}
 	}
@@ -73,16 +73,16 @@ func renderPolicies(args []string, getenv func(string) string, stdout, stderr io
 		return 2
 	}
 	if *accessor == "" {
-		fmt.Fprintln(stderr, "ironbark: render-policies: -accessor is required")
+		_, _ = fmt.Fprintln(stderr, "ironbark: render-policies: -accessor is required")
 		return 2
 	}
 	tmpl, err := grantcfg.ParseTemplate(getenv("IRONBARK_DATA_PATH"))
 	if err != nil {
-		fmt.Fprintln(stderr, "ironbark: render-policies:", err)
+		_, _ = fmt.Fprintln(stderr, "ironbark: render-policies:", err)
 		return 1
 	}
 	project, env, target := levels.RenderPolicies(tmpl, *accessor)
-	fmt.Fprint(stdout, project+"\n"+env+"\n"+target+"\n")
+	_, _ = fmt.Fprint(stdout, project+"\n"+env+"\n"+target+"\n")
 	return 0
 }
 
@@ -92,12 +92,12 @@ func serve(getenv func(string) string, readFile func(string) ([]byte, error), st
 		// No logger exists yet (its level comes from cfg, which just
 		// failed to load) — this is the one line in the program not
 		// emitted as structured JSON.
-		fmt.Fprintln(stderr, "ironbark: config:", err)
+		_, _ = fmt.Fprintln(stderr, "ironbark: config:", err)
 		return 1
 	}
 	signer, err := jwtsign.LoadKey([]byte(cfg.JWTSigningKeyPEM))
 	if err != nil {
-		fmt.Fprintln(stderr, "ironbark: config: IRONBARK_JWT_SIGNING_KEY:", err)
+		_, _ = fmt.Fprintln(stderr, "ironbark: config: IRONBARK_JWT_SIGNING_KEY:", err)
 		return 1
 	}
 

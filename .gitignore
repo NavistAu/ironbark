@@ -1,5 +1,6 @@
 # Go build output
 /ironbark
+/cmd/ironbark/ironbark
 /dist/
 *.exe
 *.test
@@ -26,3 +27,4 @@ policy.local.*
 /.worktrees/
 /bin/
 /dist/
+/test/integration/plugins/

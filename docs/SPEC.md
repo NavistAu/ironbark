@@ -1,5 +1,11 @@
 # ironbark M1 — implementation specification
 
+**Grant model (2026-10):** this spec describes the grant model
+([design](plans/2026-09-30-grant-model-design.md)); §2.3–§2.5, §3, §4.1,
+§4.4–§4.6 and §7 are reduced to pointers at the design. Breaking; see the
+CHANGELOG. The §12 decisions and the cross-AI review record below are
+history of the pre-grant M1 spec.
+
 Status: ACCEPTED 2026-07-11, after a 4-cycle adversarial cross-AI review
 (codex + gemini, zero remaining HIGH concerns —
 [`reviews/SPEC-REVIEWS.md`](reviews/SPEC-REVIEWS.md)). The §12 decisions
@@ -29,8 +35,8 @@ DEC-260711061325), Drone compatibility, any UI.
 |---|---|---|
 | `/` | POST | The secret-extension endpoint Woodpecker calls |
 | `/healthz` | GET | Liveness: process up. Always 200 when serving. |
-| `/readyz` | GET | Readiness: Vault reachable AND AppRole session valid AND startup canary passed (§3.5). 200/503. |
-| `/metrics` | GET | Prometheus. Minimum counters: requests by outcome, mints, mint warnings, sweep reads, deref reads, signature failures by reason. |
+| `/readyz` | GET | Readiness: OpenBao answers `sys/health` initialised and unsealed (a standby counts). 200/503. |
+| `/metrics` | GET | Prometheus. Counters: requests by outcome (`ok\|refused\|invalid\|config_error\|error\|refused_signature`), mints (tokens obtained by the final login of a request), signature failures by reason. |
 
 Anything else: 404. Non-POST on `/`: 405.
 
@@ -40,55 +46,37 @@ Anything else: 404. Non-POST on `/`: 405.
 2. **Verify** (§5). Any failure → `401`, structured log with reason
    category, response body empty. No payload field may be trusted or
    logged before this step succeeds (log only remote addr + reason).
-3. **Parse** payload `{repo, pipeline, netrc?}` [WP§3]. The `netrc` field
-   is ignored entirely — never read, never logged [WP§11]. Malformed
-   JSON / missing `repo.full_name` or `pipeline.event` → `400`.
-4. **Extract and normalize identity** (§2.1). Invalid identity (e.g.
-   `full_name` without exactly one `/`) → `400`.
-5. **Derive the policy set** (§2.2).
-6. **Mint** (§3). Requires PASSING canary state (§3.5) — failed/unknown →
-   `502` without minting. Vault unreachable / login failure / mint error
-   → `502`.
-   - Assert the mint response's `token_type` is `service`; anything else →
-     revoke best-effort, `502`, error log (misconfigured role — see §3.5).
-   - If the mint response's `"Policy %q does not exist"` warnings
-     [R§7.1] cover **every** requested policy, the repo is not
-     onboarded: revoke the minted token (§3.4) and respond `204`.
-7. **Read repo directives** with the minted token (cycle-3 G3-2):
-   - `.identity` (§4.4): mismatch OR malformed → revoke, log at error
-     level with both IDs (or the malformation), respond `204`.
-     Non-403/404 read error → revoke, `502`.
-   - `.config` (§4.5): malformed OR non-403/404 read error → revoke,
-     `502`. Absent/unreadable → defaults apply.
-8. **Sweep** (§4). Vault errors other than 403/404 during sweep →
-   revoke, `502`.
-9. **Dereference pointers** (§4.3). Non-403/404 deref failure → revoke,
-   `502` (§3.4: failure paths always revoke; the cascade cleans any leases
-   already created).
-10. **Build response** (§6). If no swept/deref secrets AND `vault_token`
-    is suppressed (§4.5) → revoke, `204` — `vault_addr` never counts
-    toward "non-empty"; address-only `200` responses are forbidden.
-    Otherwise `200`.
+3. **Parse and build facts** (design §4). The `netrc` field is ignored
+   entirely — never read, never logged [WP§11]. Malformed JSON, a missing
+   `repo`, `pipeline`, `repo.forge_remote_id` or `pipeline.event`, or a
+   `repo.full_name` without exactly one `/` → `400`. The forge lookup for
+   branch protection is bounded by `IRONBARK_FORGE_TIMEOUT` and fails
+   closed (`branch_protected=false`).
+4. **Select** the environment (`IRONBARK_ENV_VAR`) and the target (design
+   §4.6). An invalid explicit selector → status only, before any login.
+5. **Discover** (design §4.5): only with no explicit environment and a
+   protected branch — the discovery login to `ci` and the level-metadata
+   read (§3). No claimant keeps the discovery token; one claimant revokes
+   it and selects that environment; two → status only (`config_error`).
+6. **Teams** (§2.5): only with an environment and an actor.
+7. **Login** (§3): sign the JWT and log in with the rendered role. A
+   refusal → status only. Per-login assertions (§3) follow.
+8. **Walk** (§4.1): read the levels as the login's token.
+9. **Build response** (§6): `200` with the walk's secrets and
+   `ironbark_status`. If nothing but `ironbark_status` (and `vault_addr`)
+   is returned, the token the request obtained is revoked.
 
-Woodpecker treats any non-200/204 as "no extension secrets" and proceeds
-fail-open [WP§5]; ironbark's status codes are therefore for operators and
-logs, not flow control on the CI side. Target: complete within 5s under
-normal conditions; hard request timeout 30s → `502`.
+Every verified request is `200`; only steps 1–3 answer otherwise. A
+non-200 makes Woodpecker proceed fail-open without extension secrets
+[WP§5]; the job reads `ironbark_status` to decide what to do. Target:
+complete within 5s under normal conditions; hard request timeout 30s →
+`200` with `outcome=error reason=timeout`.
 
-### 1.3 Vault session (ironbark's own)
+### 1.3 OpenBao session
 
-- AppRole login at startup (`role_id` + `secret_id` from config/files).
-- Renew own token at ~half TTL; on renewal failure, re-login; on re-login
-  failure, `/readyz` goes 503 and mints fail `502`.
-- **AppRole token contract** (cycle-3 C3-1): the AppRole's token must be
-  renewable and retain the `default` policy (renew-self and lookup-self
-  power the session management above). Its ONE attached ACL policy grants
-  exactly `create` (update) on `auth/token/create/<TOKEN_ROLE>` — no KV
-  read, no policy read, no arbitrary revoke (DESIGN §8). If an operator
-  strips `default`, ironbark degrades safely: renewal fails → re-login
-  path takes over (login is always possible with valid AppRole creds). All KV/deref reads use the minted
-  pipeline token; revocation uses `auth/token/revoke-self` *as* the
-  minted token (§3.4).
+ironbark holds no OpenBao credential and keeps no session: no AppRole, no
+renewal, no startup login. Each request's own login yields the token every
+read and the revoke-self use (§3).
 
 ## 2. Identity and naming (normative encodings)
 
@@ -113,11 +101,35 @@ would collapse a branch literally named `Main` onto the protected
 `main`'s tier — a privilege escalation. Case is preserved injectively
 through `esc()` instead.
 
+**Facts per event** (design §4.1). `forge_remote_id` is required and
+reaches the JWT only inside `repo_key`
+(`esc(org)/esc(repo)#esc(forge_remote_id)`). Three more facts, filled per
+event:
+
+| Event | `branch` / `ref` | `actor` | `target` from |
+|---|---|---|---|
+| `push` | payload | `pipeline.sender` iff `IRONBARK_ACTOR_FORGE` ≠ `none` | `Deploy-To:` trailer of the head commit message |
+| `pull_request`, `tag`, `release` | absent | as `push` | — |
+| `manual` | payload | `pipeline.author` | `pipeline.variables[IRONBARK_TARGET_VAR]` (exact key) |
+| `deployment` | payload (the parent's) | empty | `pipeline.deploy_to` |
+| `cron` | payload | empty | — |
+| any other event | absent | empty | — |
+
+`actor` is verbatim (never case-folded). A deployment has no actor: a
+Woodpecker promotion carries the parent pipeline's `sender`, a GitHub
+deployment webhook its creator's, and the payload cannot tell which.
+`target` grammar: split on `/`; every segment non-empty (no leading,
+trailing or doubled `/`); at most 8 segments and 256 bytes; case kept;
+segments exactly `.` or `..` refused; every segment is escaped with `esc()`
+(§2.2). A value violating the grammar is no target and the request is
+`outcome=invalid` (`target_invalid` in the audit line). `Variables` are read
+for `manual`, `deployment` and `cron` only.
+
 Known events (Woodpecker v3.15.0): `push`, `pull_request`,
 `pull_request_closed`, `tag`, `release`, `deployment`, `cron`, `manual`.
-Event values outside this set are accepted (forward compatibility): they
-are lowercased, derive P1 only (never branchful), are echoed unchanged in
-the response's `events` pins, and are logged at info.
+Event values outside the ones in the table above, `pull_request_closed`
+included, are accepted (forward compatibility) and lowercased, but carry no
+branch and no actor, so they match only roles that list them in `event`.
 
 ### 2.2 Escape function
 
@@ -136,281 +148,143 @@ property-tested (§9.2).
 
 ### 2.3 Policy names
 
-Base prefix `POLICY_PREFIX` (default `ci`). For every request derive:
+**Replaced by the grant model** ([grant-model design](plans/2026-09-30-grant-model-design.md) §6.3). ironbark requests no policies
+and derives no policy names. Access is three OpenBao-side templated policies
+(`ci-project`, `ci-env`, `ci-target`, printed by `ironbark render-policies`)
+attached to JWT roles; the login's claims decide which paths a token can
+read. The tier/attribute policy derivation, `IRONBARK_POLICY_PREFIX` and
+`IRONBARK_MAX_POLICIES` are gone.
 
-- `P1 = <prefix>/<org>/<repo>/<event>`
-- `P2 = <prefix>/<org>/<repo>/<event>/<esc(branch)>` — only for
-  **branchful events**: `push`, `pull_request`, `pull_request_closed`,
-  `release`, `cron`, and only when branch is non-empty.
+### 2.5 Teams
 
-`manual` and `deployment` are NEVER branchful — their branch fields are
-caller-supplied or inherited, not forge-verified [WP§6]; they get P1
-only. `tag` has no branch [WP§6]; P1 only.
-
-`/` in policy names is legal in both products [R§7.2]. Both policies are
-requested explicitly on every mint (never an empty list) [R§7.6];
-nonexistent ones warn and grant nothing [R§7.1].
+**Changed** ([grant-model design](plans/2026-09-30-grant-model-design.md) §4.4). Teams are still resolved on the forge, fail closed,
+and only when an actor exists **and** an environment is selected. They reach
+OpenBao as the JWT `teams` claim (always sent, `[]` when none), each entry
+`esc(org)/esc(team)`, through the mount's `groups_claim` to external groups.
+They no longer produce policy names.
 
 ### 2.4 KV layout
 
-Mount `KV_MOUNT` (default `kv`, KV v2), prefix `KV_PREFIX` (default
-`ci`), base `B = <KV_PREFIX>/<org>/<repo>`:
+**Replaced** ([grant-model design](plans/2026-09-30-grant-model-design.md) §8.1). The secret tree is addressed by
+`IRONBARK_DATA_PATH`, for example `vs/data/pipelines/{repo}/{env}/{target...}`:
+a repo level, an environment level, and one level per target segment. There
+are no event or branch tiers, no `.identity`/`.config` directives and no
+attribute mount.
 
-```
-B/<key>                      # all events of the repo
-B/<event>/<key>              # event tier
-B/<event>/<esc(branch)>/<key># branch tier (branchful events only)
-B/.identity                  # reserved: identity binding (§4.4)
-B/.config                    # reserved: repo directives (§4.5)
-```
+## 3. Login (was: Minting)
 
-Entries whose name begins with `.` are directives, never returned as
-secrets, and only recognized at the base level.
+**Replaced** ([grant-model design](plans/2026-09-30-grant-model-design.md) §5, §9). ironbark holds no OpenBao credential, mints no
+token and runs no startup canary.
 
-## 3. Minting
-
-### 3.1 Token role contract (documented prerequisite, enforced by tests)
-
-The Vault/OpenBao operator provides token role `TOKEN_ROLE` (default
-`ci`) with, at minimum:
-
-```
-allowed_policies_glob   = ["<POLICY_PREFIX>/*"]   # must cover §2.3 output space
-token_type              = "service"               # hard requirement, R§7.4; batch
-                                                  # leases would parent to ironbark's
-                                                  # own token (research §4)
-token_explicit_max_ttl  = <operator choice, e.g. 15m>  # THE lifetime bound — see note
-orphan                  = true                    # see §3.3
-renewable               = false                   # TTL is the lifetime, full stop:
-                                                  # default policy grants renew-self,
-                                                  # so a renewable token could outlive
-                                                  # the threat model's "dies in minutes"
-token_no_default_policy = false                   # default policy is load-bearing:
-                                                  # revoke-self powers §3.4
-```
-
-**Note on the lifetime bound (integration-verified, 2026-07-16, Vault
-1.20 + OpenBao 2.5.5):** the token-store role endpoint
-(`auth/token/roles/:name`) does **not** honor a `token_ttl` field — it is
-silently dropped (no warning), and a token minted with no request TTL then
-inherits the token auth mount's `default_lease_ttl` (32 days by default).
-So `token_ttl` on the role is a NO-OP and would leave CI tokens alive for
-32 days, defeating the threat model's "dies in minutes." The field that
-actually bounds a role-minted token's lifetime is
-`token_explicit_max_ttl` (a hard, unrenewable expiry cap the role backend
-does honor on both products). ironbark still sends no `ttl` at mint (§3.2);
-`token_explicit_max_ttl` is what makes "TTL is the bound" (DEC-260711114102) real.
-Operators MUST set it; the M1 integration suite asserts a minted token's
-TTL is bounded by it on both products. (Alternatively/additionally the
-operator may lower the token mount's `default_lease_ttl` via
-`sys/auth/token/tune`, but that is instance-wide; the per-role
-`token_explicit_max_ttl` is the correct, scoped control.)
-
-Note on the glob: `allowed_policies_glob` uses plain substring globbing
-(`ryanuber/go-glob` — `*` matches ANY characters including `/`; there are
-no path-segment semantics) [R§7.6], so the single pattern
-`<POLICY_PREFIX>/*` covers every multi-level name §2.3 can derive.
-
-A requested policy outside the glob ERRORS the mint [R§7.6] — the glob is
-availability-critical. (M2's doctor verifies template ⊆ glob; M1
-documents it and integration-tests it.)
-
-### 3.2 Mint call
-
-`POST auth/token/create/<TOKEN_ROLE>` with:
-
-| Param | Value |
-|---|---|
-| `policies` | `[P1, P2?]` — always explicit (§2.3) |
-| `meta` | `org`, `repo`, `event`, `branch`, `pipeline_number`, `commit` — lands in Vault's audit log |
-| `display_name` | `ironbark-<org>-<repo>` |
-| `ttl`, `num_uses`, `type` | NOT sent — role config governs; `num_uses` is deliberately unused [R§7.4] |
-
-The `default` policy remains attached (lookup-self, renew-self,
-revoke-self — the last is load-bearing for §3.4) [R§7.6].
-
-### 3.3 Orphan vs child
-
-Decision: tokens are minted against the role with `orphan = true` set on
-the role, so pipeline tokens do NOT die when ironbark's own AppRole token
-rotates or is revoked mid-pipeline. TTL is then the only lifetime bound.
-(Without orphan, ironbark's routine re-login could cascade-revoke live
-pipeline tokens and their STS leases.)
-
-### 3.4 Revocation
-
-Where this spec says "revoke": call `auth/token/revoke-self`
-authenticated as the *minted* token (powered by the `default` policy —
-§3.1). The rule is by outcome:
-
-- **Every path that does not return a `200`** — un-onboarded `204`,
-  identity mismatch, empty-and-suppressed `204`, and ALL failure paths
-  (`502`) — revokes the minted token, even if dereferences already
-  created leases: the service-token cascade revokes those leases too,
-  which is the desired cleanup since nothing was delivered.
-- **A `200` never revokes** — returned dereferenced leases and/or the
-  returned `vault_token` must outlive the response (DEC-260711061324); TTL is
-  the cleanup.
-
-Revoke failures are logged and do not change the response code
-(best-effort; TTL is the backstop).
-
-### 3.5 Startup canary (self-check)
-
-At startup (and after every AppRole re-login), ironbark performs one
-canary mint against `TOKEN_ROLE` requesting the single policy
-`<POLICY_PREFIX>/ironbark-selftest` (conventional prefix, nonexistent —
-warning expected):
-
-- Mint must succeed → proves AppRole capability and that the role glob
-  covers the convention prefix [R§7.6].
-- Response `token_type` must be `service` → catches the silent
-  misconfiguration (G1) without granting ironbark any read on the role.
-- Response `renewable` must be `false` (cycle-2 C2-1).
-- Orphan status: asserted from the mint response IF the products expose
-  it there (cycle-2 G2-3: exposure unverified either way); the privileged
-  integration test (§9.3) is the definitive orphan check regardless.
-- `auth/token/revoke-self` with the canary token must succeed → proves
-  the `default` policy survived role config (C5).
-
-**Canary state is a hard gate on minting** (cycle-2 C2-2): while the
-canary state is failed or unknown (startup, or after a re-login whose
-canary hasn't passed yet), POST requests return `502` without minting —
-a role misconfigured in ways the per-mint assertion cannot see
-(non-orphan, renewable, stripped default) must not produce tokens.
-Canary failure: log at error with the specific violated expectation;
-`/readyz` serves 503.
+- Per request it signs an RS256 JWT (`IRONBARK_JWT_SIGNING_KEY`; the
+  OpenBao `jwt` mount trusts the public key) and logs in
+  (`POST auth/<IRONBARK_JWT_MOUNT>/login`) with the role rendered from
+  `IRONBARK_JWT_ROLE` (`ci-{env}`, or `ci` with no environment). A refused
+  login is never retried with another role.
+- The role must issue a service, orphan token with an explicit max TTL. Each
+  login asserts this (`token_type`, `orphan`, `lookup-self`
+  `explicit_max_ttl`); a violation revokes and reports `outcome=error`.
+- The only other login is the metadata-only discovery login to `ci` before
+  an environment chosen by level metadata; it is revoked before the
+  environment login unless no level claims the branch.
+- **Revocation by outcome.** A response carrying only `ironbark_status`
+  (and possibly `vault_addr`) revokes any token the request obtained; a
+  response carrying any other secret never does.
+- Every verified request is `200` with `ironbark_status`
+  (`outcome=ok|refused|invalid|config_error|error`); `204` and `502` are
+  gone. An invalid signature is still `401` with nothing.
 
 ## 4. Sweep
 
 ### 4.1 Read set
 
-All sweep prefixes are derived from the identity a priori — no LIST-based
-discovery or descent. Using the minted token, ironbark LISTs each
-applicable prefix **independently** (so a least-privilege policy granting
-only one tier still works — C2), in this order (most specific first, G2):
-
-1. `LIST <mount>/metadata/<B>/<event>/<esc(branch)>` — branchful events
-   with non-empty branch only.
-2. `LIST <mount>/metadata/<B>/<event>`
-3. `LIST <mount>/metadata/<B>`
-
-From each LIST result, only plain keys at that level are taken —
-directory entries are never descended (deeper nesting is NOT swept; v1
-constraint, documented). Keys beginning with `.` are NEVER treated as
-secret entries at any level (cycle-3 G3-3): at the base level they are
-the directive namespace (§2.4); everywhere they are skipped by the
-sweep. Every LIST/GET tolerates `403` and `404` by
-skipping that level/entry — partial visibility IS the tiering mechanism
-(DESIGN §5). Any other status: revoke + `502` (§1.2 step 8). Plain keys
-are read via `GET <mount>/data/...`.
+**Replaced by the walk** ([grant-model design](plans/2026-09-30-grant-model-design.md) §8.2). Levels (repo, environment, one per
+target segment) are read shallow to deep as the login's token: `LIST` each
+level, `GET` each entry, deeper level wins, unreadable levels and entries
+skipped. Entries are voidstar views: `fetch` (default), `resolve`
+(dynamic engine paths, one hop, leases parent to the pipeline token) and
+`metadata` (the `vault_token` marker). `ironbark_status` is a reserved name.
 
 ### 4.2 Entry forms and secret naming
 
-For a KV entry named `E` with data map `D`:
+For a level entry named `E` (a voidstar view or a plain KV v2 entry) whose
+`data` map is `D`:
 
-- **Pointer**: `D` is exactly `{"$ref": "<path>"}` → §4.3.
 - **Single-field shorthand**: `D` is exactly `{"value": v}` → one secret
   named `E`.
-- **General**: each field `f` in `D` → secret named `E_f`.
+- **General**: each field `f` in `D`, in sorted order → secret named `E_f`.
+- **`vault_token`**: an entry named `vault_token` with a `metadata`-mode
+  view, or no data, → the secret `vault_token` carrying the pipeline token;
+  one carrying data is skipped with a warning.
+- **`resolve` view**: the entry's data is what its target path returns
+  (§4.3), always flattened as `E_f` unless KV v2-shaped.
 
 **Values must be JSON strings** (C4): a non-string field value (number,
-bool, array, object) is skipped with a warning — never coerced — in all
-three entry forms and in deref results. (Woodpecker's secret `value` is a
-string; emitting anything else risks a response-decode failure and silent
-fail-open on the CI side.)
+bool, array, object) is skipped with a warning — never coerced — in every
+form and in resolved results. (Woodpecker's secret `value` is a string;
+emitting anything else risks a response-decode failure and silent fail-open
+on the CI side.)
 
-Secret names are lowercased; ironbark validates final names against
-`[a-z0-9_]+` (KV keys with `-` map to `_`; anything else invalid →
-entry skipped + warning log). Name collisions within one response: first
-writer wins, and because the sweep runs most-specific-first (§4.1:
-branch, then event, then base; lexicographic within a level), the MOST
-specific secret wins deterministically (G2). Collisions are logged.
-Emitting lowercase is required so Woodpecker's case-sensitive store-merge
-and case-insensitive compiler agree [WP§9].
+Names are lowercased with `-` mapped to `_`; ironbark validates final names
+against `[a-z0-9_]+` (anything else → entry skipped + warning log).
+`ironbark_status` is reserved: an entry producing it is skipped with a
+warning. Collisions: a deeper level's secret replaces a shallower level's
+of the same name (§4.1); within one level the first key in bytewise order
+wins and the clash is logged. Emitting lowercase is required so
+Woodpecker's case-sensitive store-merge and case-insensitive compiler agree
+[WP§9].
 
-### 4.3 Pointer dereference
+### 4.3 Resolve mappings
 
-`GET <path>` (any mount) with the minted token. Response `.data` fields
-flatten as `E_f` per §4.2 (string-only rule applies). `403`/`404` on
-deref: skip entry, log. Any other deref failure (5xx, timeout, malformed
-response): revoke + `502` — per §3.4 a failed request always revokes, and
-the service-token cascade cleans up any leases earlier derefs created
-(C3). Leases only survive when the response is a `200`. Pointers are
-followed exactly one level — a deref result is never re-examined for
-`$ref` (no chains, no cycles).
+A `resolve` view names an engine path; the walk does a bodiless `GET` of it
+with the pipeline token, so any lease parents to that token and is revoked
+with it. Response `.data` fields flatten as `E_f` per §4.2 (string-only
+rule applies). `403`/`404` on the resolve target: skip entry, log. Any
+other failure (5xx, timeout, malformed response): the walk fails, the
+request is `outcome=error reason=walk`, the token is revoked and the
+cascade revokes leases already taken. A view that cannot be read (a
+voidstar quarantine or loopback `502`, or an undecodable answer) is the
+same failure but names the entry: `outcome=error reason=view:<level>/<key>`,
+and the audit line carries `entry`. Leases only survive when the response
+carries secrets. The hop is one level: a resolved response is never itself
+treated as a pointer or view (no chains, no cycles). Which paths a mapping
+may name is the voidstar mount's concern, and which it may read is the
+token's policy.
 
-**KV v2-shaped deref targets.** A `$ref` may point at a target whose
-response is itself KV v2 wire-shaped — KV v2 read directly, or a
-KV v2-wire-compatible view (e.g. a voidstar view: `vs/data/...`) — rather
-than a flat dynamic-engine response (`aws/sts/*` etc.). Detection is
-shape-based, never path-based: the response's `.data` is treated as KV
+**KV v2-shaped resolve targets.** A target whose response is itself KV v2
+wire-shaped — KV v2 read directly, or a KV v2-wire-compatible view — is
+detected by shape, never by path: the response's `.data` is treated as KV
 v2-shaped only when it contains BOTH a nested `data` object AND a
-`metadata` object (mirroring the envelope §4.1's own KV v2 data-GET
-already unwraps). Only then is it unwrapped to the inner field map and
-classified exactly like a swept entry (§4.2: single `{"value": v}` →
-secret named `E` alone; otherwise general form, `E_f`) — pointer-form
-(`$ref`) classification is never applied to a deref result, preserving
-the no-chain rule above. A flat response — including one that happens to
-carry a field literally named `data` or `metadata` without the paired
-object shape — is unaffected and keeps flattening unconditionally as
-`E_f`, byte-identical to prior behavior.
+`metadata` object. Only then is it unwrapped to the inner field map and
+classified like a level entry (§4.2: single `{"value": v}` → secret named
+`E` alone; otherwise `E_f`). A flat response — including one that happens
+to carry a field literally named `data` or `metadata` without the paired
+object shape — keeps flattening unconditionally as `E_f`.
 
-**Limitation — GET-only deref (integration-verified, 2026-07-16):** the
-deref is a bodiless HTTP GET, so `$ref` targets must be **GET-readable**
+**Limitation — GET-only resolve (integration-verified, 2026-07-16):** the
+read is a bodiless HTTP GET, so targets must be **GET-readable**
 dynamic-secret endpoints: `aws/creds/<role>` (DEC-260711061324's motivating STS
 example), `database/creds/<role>`, `gcp/.../key`, `azure/creds/<role>`,
 and KV reads. It does NOT support engines that require request-body
 parameters on a write — notably `pki/issue/<role>`, which is POST-only
 (`GET` returns 405 on both Vault and OpenBao). Supporting POST-with-body
-derefs would require the KV pointer entry to carry an attacker-writable
-request body into a privileged write — out of scope for M1 and a
-deliberate trust-surface exclusion. If PKI issuance via `$ref` is ever
-needed, that is a post-M1 design change, not a bug.
+would mean carrying a request body into a privileged write — a deliberate
+trust-surface exclusion, not a bug.
 
-### 4.4 `.identity` binding
+### 4.4 `.identity` binding and 4.5 `.config` directives
 
-If `GET <mount>/data/<B>/.identity` succeeds and yields
-`{"forge_remote_id": <string>}`: compare against the payload's
-`forge_remote_id`; mismatch → §1.2 step 7. If the entry is absent (404)
-or unreadable (403), the binding is not enforced (opt-in hardening,
-written by the M2 module; conventional policies SHOULD grant read on it).
-**Fail-closed rules (C1):** if the entry exists but is malformed —
-`forge_remote_id` missing, non-string, or empty — treat as a mismatch
-(revoke, error log naming the malformation, `204`); a non-403/404 read
-error (5xx, timeout) → revoke + `502`. A broken binding must never
-silently degrade to "not enforced". This closes the
-repo-rename/recreate inheritance hole (DESIGN §3) when enabled.
+**Removed** ([grant-model design](plans/2026-09-30-grant-model-design.md) §13). Repo identity is bound by the role's `repo_key`
+claim (`esc(org)/esc(repo)#esc(forge_remote_id)`). `vault_token` is returned
+only where a metadata-only `vault_token` mapping exists at a walked level
+(§8.5); there is no suppression or `vault_token_images` directive.
 
-### 4.5 `.config` directives
+### 4.6 Per-secret pins
 
-`GET <mount>/data/<B>/.config`, optional, all fields optional:
-
-| Key | Type | Effect |
-|---|---|---|
-| `vault_token` | `"false"` | Suppress returning the minted token |
-| `vault_token_images` | comma-separated string | `images` pin on the `vault_token` secret |
-
-Unknown keys ignored (logged at debug). **Fail-closed rules (C1):** a
-non-403/404 read error → revoke + `502`; an entry that exists but cannot
-be parsed as a flat string map → revoke + `502` with an error log (a
-broken directive must never silently fall back to defaults — it may be an
-operator's suppression attempt).
-
-### 4.6 Per-secret pins via custom_metadata
-
-If a swept entry's KV v2 `custom_metadata` contains:
-
-| Key | Effect |
-|---|---|
-| `ironbark_images` | comma-separated → the returned secret's `images` list |
-| `ironbark_events` | comma-separated → REPLACES the default event pin (rare; e.g. a secret valid for `push` and `cron`) |
-
-`custom_metadata` is read from the KV v2 data-GET response's metadata
-block — no fallback metadata-GET (G3). That the data-GET carries
-`custom_metadata` on BOTH products is a named integration-test assertion
-(§9.3); if that assertion ever fails, this section is the thing to
-re-design, not silently work around.
+**Changed** ([grant-model design](plans/2026-09-30-grant-model-design.md) §8.4). Image pins live on the voidstar mapping as
+`ironbark_images` in its `custom_metadata`, relayed as the secret's
+`images`. Event pins are gone: they are role `bound_claims`. An entry still
+carrying `ironbark_events` is logged as ignored. No `events` field is
+emitted in the response.
 
 ## 5. Signature verification (load-bearing; DESIGN §6)
 
@@ -440,43 +314,59 @@ uncovered required component, missing `created`, stale/future `created`.
 
 ```json
 { "secrets": [
-    { "name": "<per §4.2>", "value": "<...>",
-      "events": ["<event>"], "images": ["<pin or absent>"] },
-    { "name": "vault_token", "value": "<minted>", "events": ["<event>"] },
-    { "name": "vault_addr",  "value": "<ADVERTISE_VAULT_ADDR>", "events": ["<event>"] }
+    { "name": "<per §4.2>", "value": "<...>", "images": ["<pin or absent>"] },
+    { "name": "vault_token", "value": "<pipeline token>" },
+    { "name": "vault_addr",  "value": "<ADVERTISE_VAULT_ADDR>" },
+    { "name": "ironbark_status", "value": "ironbark/v1 outcome=ok ..." }
 ] }
 ```
 
-- Every secret's `events` defaults to exactly the minting event
-  (`ironbark_events` may override, §4.6). Extension secrets override DB
-  secrets on exact-name collision [WP§10].
-- `vault_token` included unless suppressed (§4.5).
-- `vault_addr` included only when `ADVERTISE_VAULT_ADDR` is configured
-  (convenience so pipelines need no hardcoded address). It never counts
-  toward the empty-response decision (C7) — a response containing only
-  `vault_addr` is forbidden; that case is revoke + `204`.
-- `204` (no body): un-onboarded repo, identity mismatch, or
-  empty-and-suppressed (§1.2).
+- No `events` field is emitted: event pins are role `bound_claims` (§4.6).
+  Extension secrets override DB secrets on exact-name collision [WP§10].
+- `vault_token` only where a metadata-only `vault_token` mapping exists at
+  a walked level (§4.4).
+- `vault_addr` only when `ADVERTISE_VAULT_ADDR` is configured (convenience
+  so pipelines need no hardcoded address). It never counts toward the
+  empty-response decision (§3): a response of `ironbark_status` plus
+  `vault_addr` still revokes the token.
+- `ironbark_status` is on every `200`: `ironbark/v1` followed by
+  `key=value` pairs in fixed order, empty keys omitted — `outcome`, `env`,
+  `env_source`, `target`, `role`, `reason`, `levels` (the environments
+  claiming the branch, on `config_error`), `skipped` (levels the walk
+  skipped). Values are percent-encoded so they cannot add a field; secret
+  values never appear.
+- Non-`200` answers carry no body: `401` (§5), `400` (payload yields no
+  identity, §1.2), `413`.
 
 ## 7. Configuration (complete surface)
 
 Env vars (a `_FILE` suffix variant reads the value from a file path, for
-ESO/k8s mounts):
+ESO/k8s mounts). The grant settings are defined in [grant-model design](plans/2026-09-30-grant-model-design.md) §11.
 
 | Var | Default | Notes |
 |---|---|---|
+| `IRONBARK_DATA_PATH` | — (required) | path template with `{repo}`, `{env}`, `{target...}` as the last three segments; second segment `data` |
+| `IRONBARK_ENV_VAR` | `DEPLOY_ENV` | pipeline variable naming the environment |
+| `IRONBARK_TARGET_VAR` | `DEPLOY_TO` | manual-run variable naming the target (must differ from the env var) |
+| `IRONBARK_JWT_ROLE` | `ci-{env}` | login role template; renders `ci` with no environment |
+| `IRONBARK_JWT_SIGNING_KEY` / `_FILE` | — (required) | PEM RSA private key, at least 3072 bits |
+| `IRONBARK_JWT_MOUNT` | `jwt` | auth mount path |
 | `IRONBARK_LISTEN_ADDR` | `:8080` | |
 | `IRONBARK_WOODPECKER_PUBLIC_KEY` / `_FILE` | — (required) | PEM ed25519 |
 | `IRONBARK_VAULT_ADDR` | — (required) | Vault/OpenBao URL |
-| `IRONBARK_VAULT_ROLE_ID` / `_FILE` | — (required) | AppRole |
-| `IRONBARK_VAULT_SECRET_ID` / `_FILE` | — (required) | AppRole |
-| `IRONBARK_TOKEN_ROLE` | `ci` | token role name |
-| `IRONBARK_KV_MOUNT` | `kv` | KV v2 mount |
-| `IRONBARK_KV_PREFIX` | `ci` | |
-| `IRONBARK_POLICY_PREFIX` | `ci` | |
 | `IRONBARK_FRESHNESS_WINDOW` | `10s` | §5 |
 | `IRONBARK_ADVERTISE_VAULT_ADDR` | unset | §6 |
 | `IRONBARK_LOG_LEVEL` | `info` | |
+| `IRONBARK_ACTOR_FORGE` | `none` | `none` \| `gitea` \| `github` \| `bitbucket`: the forge whose push-family `sender` is a login. With `IRONBARK_FORGE_PROVIDER=gitea` only `gitea` or `none` |
+| `IRONBARK_FORGE_PROVIDER` | `none` | `none` \| `gitea` (Gitea, Forgejo): branch protection and teams. `none` makes `branch_protected` always `"false"` (startup warning) |
+| `IRONBARK_FORGE_URL` | — | required when provider ≠ `none` |
+| `IRONBARK_FORGE_TOKEN` / `_FILE` | — | required when provider ≠ `none` |
+| `IRONBARK_FORGE_TIMEOUT` | `3s` | Go duration > 0; bounds each forge lookup (protection, teams) |
+
+Removed: `IRONBARK_VAULT_ROLE_ID`, `IRONBARK_VAULT_SECRET_ID`,
+`IRONBARK_TOKEN_ROLE`, `IRONBARK_KV_MOUNT`, `IRONBARK_KV_PREFIX`,
+`IRONBARK_POLICY_PREFIX`, `IRONBARK_ATTR_MOUNT`, `IRONBARK_MAX_POLICIES`.
+`/readyz` reports 200 while OpenBao answers `sys/health` unsealed.
 
 No config file, no rule tables, no path maps (DEC-260711061323). TLS termination
 is the deployment's concern (in-cluster service mesh / ingress); ironbark
@@ -492,10 +382,22 @@ never appear in the refused-signature line):
 
 - **Refused signature**: `ts, remote_addr, reason (failure taxonomy §5),
   outcome=refused_signature` — nothing derived from the payload.
-- **Verified request**: `ts, org, repo, event, branch, pipeline_number,
-  policies_requested, policy_warnings (names), secrets_returned (names
-  only), token_accessor, token_ttl,
-  outcome (ok|unonboarded|identity_mismatch|error)`.
+- **Verified request**: `org, repo, repo_key, event, branch, ref,
+  branch_protected, actor, teams, teams_error, env, env_source
+  (variable|branch), env_claimants, env_invalid, env_refused, target,
+  target_source (variable|deploy_to|trailer), target_invalid,
+  discovery_login, role, sub, jti, levels (label →
+  read|skipped_403|skipped_404), secrets_returned (names only),
+  images_relayed (names), vault_token_issued, token_accessor, token_ttl,
+  entry (the entry whose view broke, `error` only),
+  outcome (ok|refused|invalid|config_error|error)`; fields with no value
+  are omitted. Payload values that are not facts (variables other than the
+  two selectors, message text) are never logged. Warnings from the walk,
+  an error line for a config or availability fault, and a failed
+  best-effort revoke each log a separate line. At debug level a
+  `payload attributes` line lists the pipeline facts behind the audit
+  fields (event, sender, author, actor, branch) and the variable *names*,
+  never their values or the message text.
 
 NEVER log: secret values, the token itself, netrc. The token *accessor*
 is safe and correlates with Vault's own audit log (DESIGN §13 audit
@@ -509,7 +411,7 @@ Built with `httpsign` acting as Woodpecker [WP§8]:
 
 | Case | Expect |
 |---|---|
-| valid signature, fresh `created` | 200/204 path |
+| valid signature, fresh `created` | 200 path |
 | no signature header | 401 |
 | signed with a different key | 401 |
 | body tampered after signing (digest mismatch) | 401 |
@@ -522,90 +424,93 @@ Built with `httpsign` acting as Woodpecker [WP§8]:
 
 ### 9.2 Unit
 
-- `esc()` injectivity: property/fuzz test over pairs — distinct inputs
-  never collide; output never contains `/` and never begins with `.`
-  (inputs `.`, `..`, `.foo` produce encoded, non-path-special segments —
-  cycle-3 G3-1); explicit case pair `main` vs `Main` derives distinct P2
-  policies and KV paths (cycle-2 C2-3).
-- Policy derivation table: every event type × branch present/empty/
-  slash-containing/uppercase → exact expected policy lists (incl. manual/
-  deploy/tag producing P1 only).
-- Naming/flattening: shorthand, general, pointer detection, `-`→`_`,
-  invalid-name skip, collision most-specific-wins (branch beats event
-  beats base), non-string value skip (all entry forms + deref).
-- Payload parsing: netrc present-and-ignored; missing fields → 400;
-  unknown event → P1-only processing.
+- `esc()` injectivity: property/fuzz test over pairs (`FuzzEscInjective`) —
+  distinct inputs never collide; output never contains `/` and never begins
+  with `.`; reserved segments never equal `esc` output
+  (`TestAttrSegmentsNeverEscOutput`, `FuzzEscNeverAttrSegment`); `main` vs
+  `Main` stay distinct (`TestEsc`).
+- Facts (`internal/facts`): per-event fixtures (`TestBuildFixtures`),
+  `pull_request_closed` has no branch, a promoted-PR ref never looks up
+  protection, forge error/unprotected/no forge → `"false"`, actor per
+  `IRONBARK_ACTOR_FORGE`, malformed payloads, team resolution and its
+  fail-closed error.
+- Selectors (`internal/selector`): environment and target grammar, the
+  target cascade per event, trailer parsing, invalid never falls through,
+  branch-pattern claimants.
+- JWT (`internal/jwtsign`): key validation, signature verifies, full claims,
+  absent facts omitted, hostile values escaped, `sub`, discovery claims.
+- Levels and policies (`internal/levels`): level derivation per template,
+  rendered policies (golden; no stanza ends in `*`).
+- Walk (`internal/walk`): unreadable levels skipped and deeper ones read,
+  bytewise order, deepest wins, entry errors, naming/flattening incl.
+  non-string skip, `vault_token` marker, ignored `ironbark_events`, resolve
+  hook; discovery incl. two claimants and an unreadable level.
+- Status (`internal/status`): golden status line, values cannot break the
+  line, `ShouldRevoke`, audit JSON omits absent fields.
+- Config (`internal/grantcfg`): defaults, required vars, `_FILE` variants,
+  selector-variable clash, role template, forge vars.
+- Broker and HTTP (`internal/broker`, `internal/httpapi`): every outcome
+  row of design §9.2, revocation by outcome, revoke failure flagged,
+  malformed payload → 400, 413, timeout → 200 `outcome=error`, `/readyz`
+  tracks OpenBao, routes and metrics.
 
-### 9.3 Integration (containerized Vault AND OpenBao, both must pass)
+### 9.3 Integration (containerized OpenBao 2.7.0 with voidstar, plus Vault 1.20)
 
-Fixture: mount KV v2, create tier policies for a test repo, token role
-per §3.1, AppRole for ironbark.
+Fixture (`test/integration`): OpenBao with the voidstar plugin mounted, a
+`jwt` auth mount trusting the test key, the templated level policies, and a
+plain Vault 1.20 with KV v2 only. The grant tests run on OpenBao; Vault
+results are informational.
 
-- Startup canary: passes against the documented role; fails loudly
-  (`/readyz` 503, and POSTs return 502 WITHOUT minting — assert no token
-  is created, cycle-2 C2-2) when the role is misconfigured to
-  `token_type=batch`, `renewable=true`, non-orphan,
-  `token_no_default_policy=true`, or a glob not covering the prefix —
-  one test per misconfiguration (G1/C5/C2-1).
-- Privileged-client assertions on a normally-minted token: type is
-  service, orphan, renewable=false (the definitive orphan check —
-  cycle-2 G2-3).
-- Un-onboarded repo (no policies exist) → all-warnings mint → 204, token
-  revoked (verify via accessor lookup by a root test client).
-- Revoke-self works for the documented role (C5); failure-path revocation
-  cascades deref leases (C3: force a deref then a later 5xx → assert the
-  pki lease is revoked).
-- Least-privilege tier: a policy granting list/read ONLY on the branch
-  tier (no base/event grants) still yields that tier's secrets (C2).
-- Precedence: same-named secret at base and branch tier → branch value
-  returned (G2).
-- Non-string KV value (number/bool/object) → skipped with warning, valid
-  siblings still returned (C4).
-- Malformed `.identity` (missing/non-string field) → 204 + revoke;
-  malformed `.config` → 502 + revoke (C1).
-- Tier isolation: PR-tier token sweeps only PR-visible entries; deploy
-  subtree yields 403s that are skipped; response contains exactly the
-  expected names.
-- Glob coverage: role glob narrowed below the convention → mint errors →
-  502 (and the failure is observable) [R§7.6].
-- Nonexistent branch-tier policy → warning, P1 still effective.
-- `.identity` match, mismatch, absent.
-- `.config` vault_token suppression → 204 when sweep empty; token revoked.
-- Pointer deref with lease: use the `pki` secrets engine (cheap
-  lease-producing engine) — deref returns fields, lease created, token
-  NOT revoked, lease dies when token TTL expires (assert with short TTL).
-- custom_metadata pins surface as `images`/`events`, AND the named
-  assertion that `custom_metadata` arrives in the data-GET response on
-  both products (§4.6 depends on it; no fallback exists) [R§7.8, G3].
-- TTL merge pinning: role `token_ttl` vs request-supplied ttl (we send
-  none, but the test documents actual behavior on both products) [R§7.4].
-- LIST behavior parity on both products (List-op precedence divergence,
-  R§7.3): the sweep's 403-tolerant LISTs behave identically.
-(An earlier draft said ironbark "does not preflight the role" — superseded
-by the §3.5 canary, which preflights it via a mint, not a role read.)
+- Login (`TestGrantLogin`): event lists, globs, string claims, `repo_key`
+  with a changed forge id, a missing bound claim and a missing role are
+  refused; a bad signature is an error, not a refusal; a role without
+  explicit max TTL or a `batch` role fails the per-login assertion and the
+  token is revoked.
+- Discovery (`TestGrantDiscovery`): the `ci` token reads every environment
+  level's `branches` and no environment data; none/one/two claimants; another
+  repo's levels are unreadable so discovery errors.
+- Walk (`TestGrantWalk`, `TestGrantWalkPlainKV`): nested targets read their
+  parents and not a sibling; another environment or repo is skipped on 403;
+  a target below an unreadable environment is still read; pins come from
+  the mapping; plain KV v2 entries and the `vault_token` marker.
+- Dynamic credentials (`TestGrantDynamic`): a `resolve` mapping yields the
+  engine's credentials with the lease parented to the pipeline token.
+- Spike findings (`TestGrantSpike`, both products) and `esc()` never
+  emitting a policy-template metacharacter
+  (`TestEscNeverEmitsPolicyMetacharacters`).
 
 ### 9.4 End-to-end smoke
 
-Fake-Woodpecker signer POSTs a realistic payload → response secrets used
-to read KV directly → values match. Run in CI for both products.
+`TestGrantE2E`: a fake-Woodpecker signer POSTs realistic payloads through
+`httpapi`, `broker` and `walk` against OpenBao — discovery then
+environment, manual and promote with targets, `resolve`, PR and tag
+(repo level only), an explicit environment refused from an unprotected
+branch, invalid selectors, two claimants, status-only revocation, the audit
+line carrying the design §10 fields and no values. Run in CI.
 
 ## 10. Implementation shape (Go)
 
-- Module path: decided at publishing-home decision (DESIGN §13); build as
-  `ironbark` until then. Go ≥1.22, stdlib `net/http`.
+- Module path: `github.com/navistau/ironbark`. Go ≥1.22, stdlib `net/http`.
 - Dependencies (deliberately few): `github.com/yaronf/httpsign`,
   `github.com/hashicorp/vault/api` (client; works against OpenBao),
   `github.com/prometheus/client_golang`. Logging: stdlib `log/slog`.
 - Packages:
-  - `cmd/ironbark` — main, config loading, wiring.
-  - `internal/wpsign` — §5. `Verify(r *http.Request, key ed25519.PublicKey, window time.Duration) (err error)` + failure-reason typed errors.
-  - `internal/identity` — §2.1–2.2. `Parse(body []byte) (Identity, error)`, `Esc(string) string`. (`Identity` also carries `Commit`/`PipelineNumber` for the §3.2 mint metadata and §8.1 audit line.)
-  - `internal/policy` — §2.3. `Derive(Identity, Prefix) []string`.
-  - `internal/broker` — orchestrates §1.2 steps 5–10; owns interfaces:
-    `Minter`, `Sweeper`, `Dereferencer` (implemented in `internal/vaultx`).
-  - `internal/vaultx` — Vault API client wrapper: AppRole session (§1.3),
-    `Mint`, `Sweep`, `Deref`, `RevokeSelf`.
+  - `cmd/ironbark` — main, wiring, `render-policies`.
+  - `internal/wpsign` — §5. `Verify` + failure-reason typed errors.
+  - `internal/identity` — §2.2. `Esc`, git remote parsing, `ErrMalformed`.
+  - `internal/facts` — §2.1, §2.5. Verified facts and team resolution.
+  - `internal/selector` — environment and target selection, branch claimants.
+  - `internal/grantcfg`, `internal/levels` — §7 configuration; level and
+    policy derivation from `IRONBARK_DATA_PATH`.
+  - `internal/jwtsign` — the JWT (§3).
+  - `internal/vaultx` — OpenBao client: `LoginJWT` with its assertions,
+    reads, `RevokeSelf`, `Healthy`.
+  - `internal/walk` — discovery and the walk (§4).
+  - `internal/status` — `ironbark_status` and the audit record.
+  - `internal/broker` — orchestrates §1.2 steps 3–9.
   - `internal/httpapi` — routes (§1.1), handler, metrics.
+  - `internal/forge` — the forge lookups (branch protection, teams); Gitea
+    family implementation.
 - The fork-reference: `woodpecker-ci/example-extensions` (Apache-2.0) is
   reference material for the transport half; ironbark's verification is
   written against `httpsign` directly with the §9.1 matrix.
@@ -617,9 +522,9 @@ to read KV directly → values match. Run in CI for both products.
   token — stage-2 bootstrap, no Vault dependency (DESIGN §9).
 - README gains: deployment walkthrough (Woodpecker env vars incl.
   `WOODPECKER_EXTENSIONS_ALLOWED_HOSTS` gotcha [WP§3], the fail-open
-  property [WP§5], netrc-off requirement [WP§11]), the Vault operator
-  contract (§3.1 + tier policy examples), and TTL budgeting guidance
-  (queue+runtime; mint-at-approval for gated pipelines [WP§12]).
+  property [WP§5], netrc-off requirement [WP§11]), the OpenBao operator
+  contract (grant model), and TTL budgeting guidance (queue+runtime;
+  login-at-approval for gated pipelines [WP§12]).
 
 ## 12. Decisions this spec introduces (log as DECs on acceptance)
 

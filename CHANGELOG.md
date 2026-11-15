@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-15
+
+### Changed (BREAKING: grant model)
+
+- ironbark no longer mints tokens. It signs an RS256 JWT per request and logs
+  in to OpenBao's `jwt` auth mount as a role rendered from
+  `IRONBARK_JWT_ROLE`; what a run may read is OpenBao configuration (roles,
+  templated level policies, external groups, voidstar views). Design:
+  `docs/plans/2026-09-30-grant-model-design.md`. There is no dual mode: run a
+  second deployment beside the old one to migrate.
+- Secrets live on a level tree (repo, environment, target segments) addressed
+  by `IRONBARK_DATA_PATH`, read by one walk. An environment is selected by
+  `IRONBARK_ENV_VAR` or by level-metadata `branches` on a protected branch; a
+  target by `deploy_to`, a commit trailer, or the manual-run variable
+  `IRONBARK_TARGET_VAR`.
+- Every verified request returns `200` with an `ironbark_status` secret
+  (`outcome=ok|refused|invalid|config_error|error`); `204` and `502` are
+  gone (invalid signature is still `401`). A response with nothing but
+  `ironbark_status` (and `vault_addr`) revokes the token it obtained.
+- `events` is no longer emitted; event pins are role `bound_claims`.
+  `ironbark_events` is ignored (logged). `vault_token` is returned only where
+  a metadata-only `vault_token` mapping exists.
+- The audit line is reworked (SPEC §8.1): `repo_key`, `env`, `env_source`,
+  `target`, `target_source`, `actor`, `teams`, `levels`, `role`, `sub`,
+  `jti`, `discovery_login`, `outcome`, and more. At debug level a
+  `payload attributes` line names the pipeline facts and variable names,
+  never values.
+- `/readyz` reflects OpenBao `sys/health`; the startup canary and AppRole
+  session are gone.
+
+### Added
+
+- `ironbark render-policies -accessor ACC`: prints the three level policies
+  for `IRONBARK_DATA_PATH`, with no OpenBao access.
+- Pipeline facts in the JWT: the actor (`IRONBARK_ACTOR_FORGE`), and the
+  actor's forge teams and branch protection from a Gitea/Forgejo lookup
+  (`IRONBARK_FORGE_PROVIDER`, `IRONBARK_FORGE_URL`,
+  `IRONBARK_FORGE_TOKEN`/`_FILE`, `IRONBARK_FORGE_TIMEOUT`). A failed lookup
+  fails closed. The `teams` claim is always present (`[]` when none).
+- Config: `IRONBARK_DATA_PATH`, `IRONBARK_ENV_VAR`, `IRONBARK_TARGET_VAR`,
+  `IRONBARK_JWT_ROLE`, `IRONBARK_JWT_SIGNING_KEY[_FILE]`,
+  `IRONBARK_JWT_MOUNT`.
+
+### Removed
+
+- `IRONBARK_VAULT_ROLE_ID`, `IRONBARK_VAULT_SECRET_ID`, `IRONBARK_TOKEN_ROLE`,
+  `IRONBARK_KV_MOUNT`, `IRONBARK_KV_PREFIX`, `IRONBARK_POLICY_PREFIX`; tier
+  policies, `.identity` / `.config` directives, `$ref` pointers (replaced by
+  `resolve` mappings), the mint/canary/sweep path.
+
 ## [0.1.2] - 2026-08-19
 
 ### Fixed

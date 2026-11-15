@@ -19,7 +19,7 @@ import (
 
 func main() {
 	key := flag.String("key", "", "RSA private key PEM file (>= 3072 bits)")
-	org := flag.String("org", "ci", "org")
+	org := flag.String("org", "acme", "org")
 	repo := flag.String("repo", "widgets", "repo")
 	id := flag.String("repo-id", "4711", "forge repo id")
 	event := flag.String("event", "push", "event")

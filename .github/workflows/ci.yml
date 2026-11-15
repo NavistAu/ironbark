@@ -49,6 +49,8 @@ jobs:
       # ubuntu-latest runners ship Docker + the Compose v2 plugin;
       # --wait blocks until every service's healthcheck (see
       # test/integration/docker-compose.yml) reports healthy.
+      - name: Fetch the voidstar plugin for OpenBao
+        run: bash test/integration/build-voidstar.sh
       - name: Start Vault + OpenBao + Postgres fixtures
         run: docker compose -f test/integration/docker-compose.yml up -d --wait
       - name: Run integration suite

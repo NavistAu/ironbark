@@ -53,7 +53,7 @@ services:
       timeout: 2s
       retries: 30
 
-  # OpenBao 2.7.0 with the voidstar plugin (built by build-voidstar.sh into
+  # OpenBao 2.7.0 with the voidstar plugin (fetched by build-voidstar.sh into
   # ./plugins) for the grant-model tests. Dev mode, root token "root".
   openbao:
     image: ghcr.io/openbao/openbao:2.7.0
